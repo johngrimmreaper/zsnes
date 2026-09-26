@@ -1,24 +1,3 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #ifdef __UNIXSDL__
 #include "../gblhdr.h"
 #else
@@ -29,11 +8,11 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #endif
 #include "../gblvars.h"
 
-//Start of execute.asm goodness
+// Start of execute.asm goodness
 extern uint16_t t1cc; // not sure about this one
 extern uint32_t nextframe; // framecounter for frameskipping
 
-void Game60hzcall()
+void Game60hzcall(void)
 {
     t1cc++;
     nextframe++;

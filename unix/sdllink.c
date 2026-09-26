@@ -1,0 +1,2590 @@
+#include "../gblhdr.h"
+#include "gl_draw.h"
+#include "lib.h"
+#include "sw_draw.h"
+
+#include <signal.h>
+#include <stdbool.h>
+#include <time.h>
+
+#include "../c_intrf.h"
+#include "../c_vcache.h"
+#include "../cpu/execute.h"
+#include "../gui/c_gui.h"
+#include "../gui/gui.h"
+#include "../gui/guifuncs.h"
+#include "../gui/guimouse.h"
+#include "../initc.h"
+#include "../intrf.h"
+#include "../link.h"
+#include "../ui.h"
+#include "../video/filter.h"
+#include "../video/procvidc.h"
+#include "../zip/zpng.h"
+#include "../zstate.h"
+#include "audio.h"
+#include "cfg.h"
+#include "input.h"
+#include "safelib.h"
+#include "sdllink.h"
+
+#ifdef __OPENGL__
+#include "gl_draw.h"
+#endif
+
+#ifdef QT_DEBUGGER
+#include "debugger/load.h"
+#endif
+
+_Noreturn void zexit_error(void);
+
+typedef enum {
+    FALSE = 0,
+    TRUE = 1
+} BOOL;
+
+typedef enum vidstate_e {
+    vid_null,
+    vid_none,
+    vid_soft,
+    vid_gl
+} vidstate_t;
+
+/* VIDEO VARIABLES */
+SDL_Window* sdl_window = NULL;
+
+/* Monitor selection. SDL numbers displays afresh each run and the ids it hands
+   out do not survive a replug, so the setting is not a number: it is a short ID
+   derived from the display's name, which does follow the monitor. */
+static SDL_DisplayID* sdl_displays = NULL;
+static int sdl_display_count = 0;
+
+static void RefreshMonitors(void)
+{
+    /* Asking before the emulator has started - -mo list does, while parsing
+       the command line - would otherwise find nothing, because SDL has no
+       displays until its video subsystem is up. */
+    if (!SDL_WasInit(SDL_INIT_VIDEO)) {
+        SDL_Init(SDL_INIT_VIDEO);
+    }
+    SDL_free(sdl_displays);
+    sdl_displays = SDL_GetDisplays(&sdl_display_count);
+    if (!sdl_displays) {
+        sdl_display_count = 0;
+    }
+}
+
+u4 VideoMonitorCount(void)
+{
+    if (!sdl_displays) {
+        RefreshMonitors();
+    }
+    return (u4)sdl_display_count;
+}
+
+char const* VideoMonitorName(u4 const i)
+{
+    char const* name;
+
+    if (!sdl_displays) {
+        RefreshMonitors();
+    }
+    if ((int)i >= sdl_display_count) {
+        return "";
+    }
+    name = SDL_GetDisplayName(sdl_displays[i]);
+    return name ? name : "";
+}
+
+/* A short handle for a monitor, from its name with everything but letters and
+   digits taken out. Long names keep their head and their tail rather than
+   losing the tail to truncation: the model number lives at the end, and it is
+   what separates a KV-27 from a KV-29. A display reporting no usable name
+   falls back to its position in the list. */
+#define MONITOR_ID_MAX 12
+
+void VideoMonitorID(u4 const i, char* const out, u4 const len)
+{
+    char const* name = VideoMonitorName(i);
+    char full[64];
+    u4 n = 0;
+    u4 keep;
+
+    for (; *name && n + 1 < (u4)sizeof(full); name++) {
+        if ((*name >= '0' && *name <= '9') || (*name >= 'A' && *name <= 'Z')) {
+            full[n++] = *name;
+        } else if (*name >= 'a' && *name <= 'z') {
+            full[n++] = (char)(*name - 'a' + 'A');
+        }
+    }
+    full[n] = '\0';
+    if (n == 0) {
+        snprintf(out, len, "%u", (unsigned)(i + 1));
+        return;
+    }
+    keep = len - 1 < MONITOR_ID_MAX ? len - 1 : MONITOR_ID_MAX;
+    if (n <= keep) {
+        snprintf(out, len, "%.*s", (int)keep, full);
+    } else {
+        u4 const head = keep / 2;
+        u4 const tail = keep - head;
+
+        snprintf(out, len, "%.*s%.*s", (int)head, full, (int)tail, full + n - tail);
+    }
+}
+
+/* Which listed monitor the setting names, or the primary one when it names
+   none of them - a monitor that is unplugged today may be back tomorrow, so
+   the setting itself is left alone. */
+u4 VideoMonitorSelected(void)
+{
+    u4 const count = VideoMonitorCount();
+    u4 i;
+
+    for (i = 0; i < count; i++) {
+        char id[sizeof(MonitorID)];
+
+        VideoMonitorID(i, id, (u4)sizeof(id));
+        if (!strcmp(id, MonitorID)) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+void VideoMonitorSelect(u4 const i)
+{
+    VideoMonitorID(i, MonitorID, (u4)sizeof(MonitorID));
+}
+
+/* Whether the monitor we are about to open on is in HDR mode. Asked of the
+   display rather than the user: there is nothing to choose here, the display
+   either has the range or it does not. */
+int VideoMonitorIsHDR(u4 const i)
+{
+    SDL_PropertiesID props;
+
+    if (!sdl_displays) {
+        RefreshMonitors();
+    }
+    if (sdl_display_count <= 0 || i >= (u4)sdl_display_count) {
+        return 0;
+    }
+    props = SDL_GetDisplayProperties(sdl_displays[i]);
+    return props
+        && SDL_GetBooleanProperty(props, SDL_PROP_DISPLAY_HDR_ENABLED_BOOLEAN, false);
+}
+
+int VideoMonitorHDR(void)
+{
+    return VideoMonitorIsHDR(VideoMonitorSelected());
+}
+
+/* Put a freshly made window on the chosen monitor. Called by each of the three
+   video paths right after SDL_CreateWindow, which in SDL3 cannot be given a
+   position of its own. */
+void PlaceWindowOnMonitor(SDL_Window* const win)
+{
+    SDL_DisplayID id;
+    int pos;
+
+    if (!win) {
+        return;
+    }
+    if (!sdl_displays) {
+        RefreshMonitors();
+    }
+    if (sdl_display_count <= 0) {
+        return;
+    }
+    id = sdl_displays[VideoMonitorSelected()];
+    pos = (int)SDL_WINDOWPOS_CENTERED_DISPLAY(id);
+    SDL_SetWindowPosition(win, pos, pos);
+    /* Text entry (the file browser, netplay fields) reads characters from
+       SDL_EVENT_TEXT_INPUT so the keyboard layout decides them - otherwise a
+       shifted symbol like the Norwegian '/' (shift-7) is unreachable. */
+    SDL_StartTextInput(win);
+}
+SDL_Surface* surface;
+int SurfaceLocking = 0;
+int SurfaceX, SurfaceY;
+static uint32_t WindowWidth = 256;
+static uint32_t WindowHeight = 224;
+static uint32_t FullScreen = 0;
+static vidstate_t sdl_state = vid_null;
+static int UseOpenGL = 0;
+/* The accelerated modes go through SDL_Renderer (unix/sdl_render.c), which
+   reaches Metal on macOS and D3D on Windows without an OpenGL dependency.
+   ZSNES_LEGACY_GL=1 asks for the old immediate-mode GL path instead. */
+int sr_start(int width, int height, int req_depth, int FullScreen);
+void sr_end(void);
+void sr_clearwin(void);
+void sr_drawwin(void);
+int sr_vsync_on(void);
+
+static int UseLegacyGL(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        char const* e = getenv("ZSNES_LEGACY_GL");
+        cached = (e && *e == '1') ? 1 : 0;
+    }
+    return cached;
+}
+
+int VideoSettingsLive(void)
+{
+    return !UseLegacyGL();
+}
+static const int BitDepth = 16;
+static uint32_t FirstVid = 1;
+#ifdef __OPENGL__
+SDL_GLContext gl_context = NULL;
+#endif
+
+extern unsigned char* BitConv32Ptr;
+extern unsigned char* RGBtoYUVPtr;
+
+/* JOYSTICK AND KEYBOARD INPUT */
+static SDL_Joystick* JoystickInput[5];
+static SDL_JoystickID JoystickID[5];
+static unsigned int AxisOffset[5] = { 256 + 128 + 64 }; // per joystick offsets in
+static unsigned int ButtonOffset[5] = { 448 }; // pressed. We have 128 + 64
+static unsigned int HatOffset[5] = { 448 }; // bytes for all joysticks. We
+// joystick balls are gone in SDL3
+/* Buttons pressed since the last GetMouseButton, so a press shorter than a
+   frame still reaches the GUI. */
+static u1 MouseButtonPressed = 0;
+static int shiftptr = 0;
+static int offset;
+uint32_t numlockptr;
+
+BOOL InitJoystickInput(void);
+
+static int joystick_index_from_id(SDL_JoystickID id)
+{
+    int i;
+    for (i = 0; i < 5; i++) {
+        if (JoystickInput[i] && JoystickID[i] == id) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* MOUSE INPUT */
+static float MouseMinX = 0;
+static float MouseMaxX = 256;
+static float MouseMinY = 0;
+static float MouseMaxY = 223;
+static int MouseX, MouseY;
+static int MouseMove2X, MouseMove2Y;
+/* Sub-pixel motion carried over; touchpads move in steps below one pixel. */
+static float MouseFracX, MouseFracY;
+static float MouseMoveFracX, MouseMoveFracY;
+u1 MouseButton;
+static float MouseXScale = 1.0;
+static float MouseYScale = 1.0;
+static uint32_t CurMode = -1;
+
+static uint8_t IsActivated = 1;
+
+/* TIMER VARIABLES/MACROS */
+// millisecond per world update
+#define UPDATE_TICKS_GAME (1000.0 / 59.948743718592964824120603015060)
+#define UPDATE_TICKS_GAMEPAL (20.0)
+#define UPDATE_TICKS_GUI (1000.0 / 36.0)
+#define UPDATE_TICKS_UDP (1000.0 / 60.0)
+
+static int T60HZEnabled = 0;
+u1 T36HZEnabled = 0;
+static double end;
+static double end2;
+static double start;
+static double start2;
+static double update_ticks_pc;
+static double update_ticks_pc2;
+
+// Used for semaphore code
+static SDL_Semaphore* sem_frames = NULL;
+static struct timespec sem_start;
+
+void Game60hzcall(void);
+u8 copymaskRB = UINT64_C(0x001FF800001FF800);
+u8 copymaskG = UINT64_C(0x0000FC000000FC00);
+u8 copymagic = UINT64_C(0x0008010000080100);
+
+static void adjustMouseXScale(void)
+{
+    MouseXScale = (MouseMaxX - MouseMinX) / ((float)WindowWidth);
+}
+
+static void adjustMouseYScale(void)
+{
+    MouseYScale = (MouseMaxY - MouseMinY) / ((float)WindowHeight);
+}
+
+#ifdef __OPENGL__
+// Point the GL viewport at a w*h drawable and set the projection, correcting
+// the aspect ratio for the variable (20) and custom (21/22) video modes. Pass
+// the real drawable size in pixels: in fullscreen it differs from
+// WindowWidth/Height and has to come from SDL_GetWindowSizeInPixels once the
+// window change has settled.
+static void SetGLViewport(int w, int h)
+{
+    glViewport(0, 0, w, h);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+
+    if (cvidmode == 20) {
+        if (224 * w > 256 * h && h) {
+            glOrtho(-((float)224 * w) / ((float)256 * h),
+                ((float)224 * w) / ((float)256 * h), -1, 1, -1, 1);
+        } else if (224 * w < 256 * h && w) {
+            glOrtho(-1, 1, -((float)256 * h) / ((float)224 * w),
+                ((float)256 * h) / ((float)224 * w), -1, 1);
+        } else {
+            glOrtho(-1, 1, -1, 1, -1, 1);
+        }
+    }
+
+    if (Keep4_3Ratio && ((cvidmode == 21) || (cvidmode == 22))) {
+        if (3 * w > 4 * h && h) {
+            glOrtho(-((float)3 * w) / ((float)4 * h),
+                ((float)3 * w) / ((float)4 * h), -1, 1, -1, 1);
+        } else if (3 * w < 4 * h && w) {
+            glOrtho(-1, 1, -((float)4 * h) / ((float)3 * w),
+                ((float)4 * h) / ((float)3 * w), -1, 1);
+        } else {
+            glOrtho(-1, 1, -1, 1, -1, 1);
+        }
+    }
+
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glDisable(GL_DEPTH_TEST);
+    glFlush();
+}
+#endif
+
+void SetHQx(unsigned int ResX, unsigned int ResY)
+{
+    int maxHQ;
+    if (ResX / 256 < ResY / 224) {
+        maxHQ = ResX / 256;
+    } else {
+        maxHQ = ResY / 224;
+    }
+
+    if (maxHQ >= 2) {
+        GUIHQ2X[cvidmode] = 1;
+        /* 3x needs a mode at least 768x672; 4x waits on a real hq4x. */
+        GUIHQ3X[cvidmode] = maxHQ >= 3;
+        GUIHQ4X[cvidmode] = 0;
+    } else {
+        GUIHQ2X[cvidmode] = 0;
+        GUIHQ3X[cvidmode] = 0;
+        GUIHQ4X[cvidmode] = 0;
+    }
+}
+
+void SetHiresOpt(unsigned int ResX, unsigned int ResY)
+{
+    if (ResX >= 512 && ResY >= 448) {
+        GUIM7VID[cvidmode] = 1;
+    } else {
+        GUIM7VID[cvidmode] = 0;
+    }
+}
+
+static unsigned int sdl_keysym_to_pc_scancode(int sym);
+static unsigned int sdl_event_to_pc_scancode(SDL_KeyboardEvent const* k);
+static void ProcessKeyBuf(int scancode);
+
+/* Set by SIGINT/SIGTERM; Main_Proc sees it next frame and leaves through
+   zexit(), so the atexit cleanup runs and the config is saved. Exiting from the
+   handler itself would run free()/fwrite() there, which is not async-signal
+   safe, so it only raises this flag. */
+static volatile sig_atomic_t quit_signalled = 0;
+
+static void on_quit_signal(int sig)
+{
+    (void)sig;
+    quit_signalled = 1;
+}
+
+void InstallQuitSignalHandlers(void)
+{
+    struct sigaction sa;
+
+    /* Own these instead of SDL, whose handler posts SDL_EVENT_QUIT only once
+       its video subsystem is up - not during a headless config write. */
+    SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_quit_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+}
+
+int Main_Proc(void)
+{
+    SDL_Event event;
+    unsigned int key;
+
+    if (quit_signalled) {
+        zexit();
+    }
+
+#ifdef QT_DEBUGGER
+    if (debugger_quit) {
+        debug_exit(0);
+    }
+#endif
+
+    while (SDL_PollEvent(&event)) {
+        switch (event.type) {
+        case SDL_EVENT_WINDOW_FOCUS_GAINED:
+            IsActivated = 1;
+            SDL_HideCursor(); // some compositors restore it with the focus
+            break;
+        case SDL_EVENT_WINDOW_MOUSE_ENTER:
+            SDL_HideCursor();
+            break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+            IsActivated = 0;
+            // Drop held key state, otherwise a key released while the window
+            // is unfocused never gets a KEY_UP event and stays "pressed",
+            // hanging the wait-for-release loop in guipresstestb (Set Keys).
+            memset(pressed, 0, sizeof(pressed));
+            shiftptr = 0;
+            break;
+#ifdef __OPENGL__
+        case SDL_EVENT_WINDOW_RESIZED:
+            if (UseOpenGL && GUIRESIZE[cvidmode]) {
+                WindowWidth = SurfaceX = event.window.data1;
+                WindowHeight = SurfaceY = event.window.data2;
+                SetHQx(SurfaceX, SurfaceY);
+                SetHiresOpt(SurfaceX, SurfaceY);
+                adjustMouseXScale();
+                adjustMouseYScale();
+                if (UseLegacyGL()) {
+                    SetGLViewport(WindowWidth, WindowHeight);
+                    gl_clearwin();
+                } else {
+                    sr_clearwin();
+                }
+                Clear2xSaIBuffer();
+            }
+            break;
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+            // Wayland applies the fullscreen drawable size asynchronously, so
+            // re-fit the viewport whenever the pixel size actually changes
+            // rather than trusting the size right after the toggle. Modes 1, 3
+            // and 4 are fullscreen *software* modes, where FullScreen alone
+            // would call gl_clearwin() with no context.
+            if (UseOpenGL && FullScreen) {
+                if (UseLegacyGL()) {
+                    SetGLViewport(event.window.data1, event.window.data2);
+                    gl_clearwin();
+                } else {
+                    sr_clearwin();
+                }
+                Clear2xSaIBuffer();
+            }
+            break;
+#endif
+        case SDL_EVENT_KEY_DOWN:
+            if ((event.key.key == SDLK_RETURN) && (event.key.mod & SDL_KMOD_ALT) && !event.key.repeat) {
+                SwitchFullScreen();
+                break;
+            }
+            if (event.key.key == SDLK_LSHIFT || event.key.key == SDLK_RSHIFT) {
+                shiftptr = 1;
+            }
+            if (event.key.mod & SDL_KMOD_NUM) {
+                numlockptr = 1;
+            } else {
+                numlockptr = 0;
+            }
+
+            key = sdl_event_to_pc_scancode(&event.key);
+            if (key < 448) {
+                pressed[key] = 1;
+                ProcessKeyBuf(event.key.key);
+            }
+            break;
+
+        case SDL_EVENT_KEY_UP:
+            if (event.key.key == SDLK_LSHIFT || event.key.key == SDLK_RSHIFT) {
+                shiftptr = 0;
+            }
+            key = sdl_event_to_pc_scancode(&event.key);
+            if (key < 448) {
+                pressed[key] = 0;
+            }
+            break;
+
+        case SDL_EVENT_TEXT_INPUT: {
+            /* The characters the layout produced, already UTF-8. The menus store
+               and render text as UTF-8, so push the bytes straight through -
+               ASCII as one byte, an accented letter as its two. TEXT_INPUT only
+               carries printable text, so there is nothing to filter; control and
+               navigation keys still come through ProcessKeyBuf. */
+            char const* t = event.text.text;
+
+            for (; t && *t; t++) {
+                unsigned int const next = (CurKeyPos + 1) % 16;
+
+                if (next == CurKeyReadPos) {
+                    break;
+                }
+                KeyBuffer[CurKeyPos] = (unsigned char)*t;
+                CurKeyPos++;
+                if (CurKeyPos == 16) {
+                    CurKeyPos = 0;
+                }
+            }
+            break;
+        }
+
+        case SDL_EVENT_MOUSE_MOTION:
+            if (FullScreen) {
+                int dx, dy;
+
+                MouseFracX += event.motion.xrel;
+                MouseFracY += event.motion.yrel;
+                dx = (int)MouseFracX;
+                dy = (int)MouseFracY;
+                MouseFracX -= (float)dx;
+                MouseFracY -= (float)dy;
+                MouseX += dx;
+                MouseY += dy;
+            } else {
+                /* Absolute, so the origin has to come back in: the scale is
+                   the *span* over the window, and a slider drag narrows that
+                   span to the bar. Without MouseMin the pointer mapped to
+                   0..span, which is below the bar's left edge, so it clamped
+                   there and the slider could not be dragged. */
+                MouseX = MouseMinX + ((int)event.motion.x * MouseXScale);
+                MouseY = MouseMinY + ((int)event.motion.y * MouseYScale);
+            }
+
+            if (MouseX < MouseMinX) {
+                MouseX = MouseMinX;
+            }
+            if (MouseX > MouseMaxX) {
+                MouseX = MouseMaxX;
+            }
+            if (MouseY < MouseMinY) {
+                MouseY = MouseMinY;
+            }
+            if (MouseY > MouseMaxY) {
+                MouseY = MouseMaxY;
+            }
+            break;
+
+        case SDL_EVENT_MOUSE_WHEEL:
+            if (event.wheel.y > 0)
+                ProcessKeyBuf(SDLK_UP);
+            else if (event.wheel.y < 0)
+                ProcessKeyBuf(SDLK_DOWN);
+            break;
+
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+            switch (event.button.button) {
+            case SDL_BUTTON_RIGHT:
+                MouseButton |= 2;
+                MouseButtonPressed |= 2;
+                break;
+            case SDL_BUTTON_MIDDLE:
+                ProcessKeyBuf(SDLK_RETURN);
+                // Yes, this is intentional - DDOI
+                /* fallthrough */
+            case SDL_BUTTON_LEFT:
+                MouseButton |= event.button.button;
+                MouseButtonPressed |= event.button.button;
+                break;
+            }
+            break;
+
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+            switch (event.button.button) {
+            case SDL_BUTTON_LEFT:
+            case SDL_BUTTON_MIDDLE:
+                MouseButton &= ~event.button.button;
+                break;
+
+            case SDL_BUTTON_RIGHT:
+                MouseButton &= ~2;
+                break;
+            }
+            break;
+
+        case SDL_EVENT_JOYSTICK_HAT_MOTION: {
+            int idx = joystick_index_from_id(event.jhat.which);
+            if (idx < 0) {
+                break;
+            }
+            // POV hats act as direction pad
+            offset = HatOffset[idx];
+            /* Four slots, so the last one is what has to fit: the layout
+               keeps handing out offsets past the end once a set of pads
+               outgrows pressed[]. */
+            if (offset + 4 > (256 + 128 + 64)) {
+                break;
+            }
+            switch (event.jhat.value) {
+            case SDL_HAT_CENTERED:
+                pressed[offset] = 0;
+                pressed[offset + 1] = 0;
+                pressed[offset + 2] = 0;
+                pressed[offset + 3] = 0;
+                break;
+            case SDL_HAT_UP:
+                pressed[offset + 3] = 1;
+                pressed[offset + 2] = 0;
+                pressed[offset + 1] = 0;
+                pressed[offset + 0] = 0;
+                break;
+            case SDL_HAT_RIGHTUP:
+                pressed[offset] = 1;
+                pressed[offset + 3] = 1;
+                pressed[offset + 1] = 0;
+                pressed[offset + 2] = 0;
+                break;
+            case SDL_HAT_RIGHT:
+                pressed[offset] = 1;
+                pressed[offset + 1] = 0;
+                pressed[offset + 2] = 0;
+                pressed[offset + 3] = 0;
+                break;
+            case SDL_HAT_RIGHTDOWN:
+                pressed[offset] = 1;
+                pressed[offset + 2] = 1;
+                pressed[offset + 1] = 0;
+                pressed[offset + 3] = 0;
+                break;
+            case SDL_HAT_DOWN:
+                pressed[offset + 2] = 1;
+                pressed[offset + 0] = 0;
+                pressed[offset + 1] = 0;
+                pressed[offset + 3] = 0;
+                break;
+            case SDL_HAT_LEFTDOWN:
+                pressed[offset + 1] = 1;
+                pressed[offset + 2] = 1;
+                pressed[offset] = 0;
+                pressed[offset + 3] = 0;
+                break;
+            case SDL_HAT_LEFT:
+                pressed[offset + 1] = 1;
+                pressed[offset] = 0;
+                pressed[offset + 2] = 0;
+                pressed[offset + 3] = 0;
+                break;
+            case SDL_HAT_LEFTUP:
+                pressed[offset + 1] = 1;
+                pressed[offset + 3] = 1;
+                pressed[offset] = 0;
+                pressed[offset + 2] = 0;
+                break;
+            }
+            break;
+        }
+
+        case SDL_EVENT_JOYSTICK_AXIS_MOTION: {
+            int idx = joystick_index_from_id(event.jaxis.which);
+            if (idx < 0) {
+                break;
+            }
+            offset = AxisOffset[idx];
+            offset += event.jaxis.axis * 2;
+            if (offset + 2 > (256 + 128 + 64)) { /* two slots, see the hat */
+                break;
+            }
+            if (event.jaxis.value < -(joy_sensitivity)) {
+                pressed[offset + 1] = 1;
+                pressed[offset + 0] = 0;
+            } else if (event.jaxis.value > joy_sensitivity) {
+                pressed[offset + 0] = 1;
+                pressed[offset + 1] = 0;
+            } else {
+                pressed[offset + 0] = 0;
+                pressed[offset + 1] = 0;
+            }
+            break;
+        }
+
+        case SDL_EVENT_JOYSTICK_BUTTON_DOWN: {
+            int idx = joystick_index_from_id(event.jbutton.which);
+            if (idx < 0) {
+                break;
+            }
+            offset = ButtonOffset[idx];
+            offset += event.jbutton.button;
+            if (offset >= (256 + 128 + 64)) {
+                break;
+            }
+            pressed[offset] = 1;
+            break;
+        }
+
+        case SDL_EVENT_JOYSTICK_BUTTON_UP: {
+            int idx = joystick_index_from_id(event.jbutton.which);
+            if (idx < 0) {
+                break;
+            }
+            offset = ButtonOffset[idx];
+            offset += event.jbutton.button;
+            if (offset >= (256 + 128 + 64)) {
+                break;
+            }
+            pressed[offset] = 0;
+            break;
+        }
+        case SDL_EVENT_JOYSTICK_ADDED:
+            /* SDL announces the pads that were already there when the
+               subsystem came up; only a genuinely new one needs the slots
+               worked out again. */
+            if (joystick_index_from_id(event.jdevice.which) < 0) {
+                InitJoystickInput();
+            }
+            break;
+
+        case SDL_EVENT_JOYSTICK_REMOVED:
+            if (joystick_index_from_id(event.jdevice.which) >= 0) {
+                InitJoystickInput();
+            }
+            break;
+
+        case SDL_EVENT_QUIT:
+            zexit();
+            break;
+        default:
+            break;
+        }
+    }
+
+    return TRUE;
+}
+
+static unsigned int sdl_keysym_to_pc_scancode(int sym)
+{
+    switch (sym) {
+    case SDLK_ESCAPE:
+        return 0x01;
+    case SDLK_1:
+        return 0x02;
+    case SDLK_2:
+        return 0x03;
+    case SDLK_3:
+        return 0x04;
+    case SDLK_4:
+        return 0x05;
+    case SDLK_5:
+        return 0x06;
+    case SDLK_6:
+        return 0x07;
+    case SDLK_7:
+        return 0x08;
+    case SDLK_8:
+        return 0x09;
+    case SDLK_9:
+        return 0x0a;
+    case SDLK_0:
+        return 0x0b;
+    case SDLK_MINUS:
+        return 0x0c;
+    case SDLK_EQUALS:
+        return 0x0d;
+    case SDLK_BACKSPACE:
+        return 0x0e;
+    case SDLK_TAB:
+        return 0x0f;
+    case SDLK_Q:
+        return 0x10;
+    case SDLK_W:
+        return 0x11;
+    case SDLK_E:
+        return 0x12;
+    case SDLK_R:
+        return 0x13;
+    case SDLK_T:
+        return 0x14;
+    case SDLK_Y:
+        return 0x15;
+    case SDLK_U:
+        return 0x16;
+    case SDLK_I:
+        return 0x17;
+    case SDLK_O:
+        return 0x18;
+    case SDLK_P:
+        return 0x19;
+    case SDLK_LEFTBRACKET:
+        return 0x1a;
+    case SDLK_RIGHTBRACKET:
+        return 0x1b;
+    case SDLK_RETURN:
+        return 0x1c;
+    case SDLK_LCTRL:
+        return 0x1d;
+    case SDLK_A:
+        return 0x1e;
+    case SDLK_S:
+        return 0x1f;
+    case SDLK_D:
+        return 0x20;
+    case SDLK_F:
+        return 0x21;
+    case SDLK_G:
+        return 0x22;
+    case SDLK_H:
+        return 0x23;
+    case SDLK_J:
+        return 0x24;
+    case SDLK_K:
+        return 0x25;
+    case SDLK_L:
+        return 0x26;
+    case SDLK_SEMICOLON:
+        return 0x27;
+    case SDLK_APOSTROPHE:
+        return 0x28;
+    case SDLK_GRAVE:
+    case SDLK_HASH:
+        return 0x29;
+    case SDLK_LSHIFT:
+        return 0x2a;
+    case SDLK_BACKSLASH:
+        return 0x2b;
+    case SDLK_Z:
+        return 0x2c;
+    case SDLK_X:
+        return 0x2d;
+    case SDLK_C:
+        return 0x2e;
+    case SDLK_V:
+        return 0x2f;
+    case SDLK_B:
+        return 0x30;
+    case SDLK_N:
+        return 0x31;
+    case SDLK_M:
+        return 0x32;
+    case SDLK_COMMA:
+        return 0x33;
+    case SDLK_PERIOD:
+        return 0x34;
+    case SDLK_SLASH:
+        return 0x35;
+    case SDLK_RSHIFT:
+        return 0x36;
+    case SDLK_KP_MULTIPLY:
+        return 0x37;
+    case SDLK_LALT:
+        return 0x38;
+    case SDLK_SPACE:
+        return 0x39;
+    case SDLK_CAPSLOCK:
+        return 0x3a;
+    case SDLK_F1:
+        return 0x3b;
+    case SDLK_F2:
+        return 0x3c;
+    case SDLK_F3:
+        return 0x3d;
+    case SDLK_F4:
+        return 0x3e;
+    case SDLK_F5:
+        return 0x3f;
+    case SDLK_F6:
+        return 0x40;
+    case SDLK_F7:
+        return 0x41;
+    case SDLK_F8:
+        return 0x42;
+    case SDLK_F9:
+        return 0x43;
+    case SDLK_F10:
+        return 0x44;
+    case SDLK_NUMLOCKCLEAR:
+        return 0x45;
+    case SDLK_SCROLLLOCK:
+        return 0x46;
+    case SDLK_KP_7:
+        return 0x47;
+    case SDLK_KP_8:
+        return 0x48;
+    case SDLK_KP_9:
+        return 0x49;
+    case SDLK_KP_MINUS:
+        return 0x4a;
+    case SDLK_KP_4:
+        return 0x4b;
+    case SDLK_KP_5:
+        return 0x4c;
+    case SDLK_KP_6:
+        return 0x4d;
+    case SDLK_KP_PLUS:
+        return 0x4e;
+    case SDLK_KP_1:
+        return 0x4f;
+    case SDLK_KP_2:
+        return 0x50;
+    case SDLK_KP_3:
+        return 0x51;
+    case SDLK_KP_0:
+        return 0x52;
+    case SDLK_KP_PERIOD:
+        return 0x53;
+    case SDLK_F11:
+        return 0x57;
+    case SDLK_F12:
+        return 0x58;
+    case SDLK_HOME:
+        return 0x59;
+    case SDLK_UP:
+        return 0x5a;
+    case SDLK_PAGEUP:
+        return 0x5b;
+    case SDLK_LEFT:
+        return 0x5c;
+    case SDLK_RIGHT:
+        return 0x5e;
+    case SDLK_END:
+        return 0x5f;
+    case SDLK_DOWN:
+        return 0x60;
+    case SDLK_PAGEDOWN:
+        return 0x61;
+    case SDLK_INSERT:
+        return 0x62;
+    case SDLK_DELETE:
+        return 0x63;
+    case SDLK_RCTRL:
+        return 0x54;
+    case SDLK_RALT:
+        return 0x55;
+    case SDLK_KP_ENTER:
+        return 0x5D;
+    case SDLK_KP_DIVIDE:
+        return 0x56;
+    case SDLK_KP_EQUALS:
+        return 0x64;
+    }
+    return (0x64 + sym);
+}
+
+/* The same PC scancodes keyed by physical key (SDL_Scancode) instead of the
+   layout-dependent keycode, so game controls follow key position on any layout.
+   Gated by InputPhysicalKeys; see the dispatch in Main_Proc. */
+static unsigned int sdl_scancode_to_pc_scancode(SDL_Scancode sc)
+{
+    switch (sc) {
+    case SDL_SCANCODE_ESCAPE:
+        return 0x01;
+    case SDL_SCANCODE_1:
+        return 0x02;
+    case SDL_SCANCODE_2:
+        return 0x03;
+    case SDL_SCANCODE_3:
+        return 0x04;
+    case SDL_SCANCODE_4:
+        return 0x05;
+    case SDL_SCANCODE_5:
+        return 0x06;
+    case SDL_SCANCODE_6:
+        return 0x07;
+    case SDL_SCANCODE_7:
+        return 0x08;
+    case SDL_SCANCODE_8:
+        return 0x09;
+    case SDL_SCANCODE_9:
+        return 0x0a;
+    case SDL_SCANCODE_0:
+        return 0x0b;
+    case SDL_SCANCODE_MINUS:
+        return 0x0c;
+    case SDL_SCANCODE_EQUALS:
+        return 0x0d;
+    case SDL_SCANCODE_BACKSPACE:
+        return 0x0e;
+    case SDL_SCANCODE_TAB:
+        return 0x0f;
+    case SDL_SCANCODE_Q:
+        return 0x10;
+    case SDL_SCANCODE_W:
+        return 0x11;
+    case SDL_SCANCODE_E:
+        return 0x12;
+    case SDL_SCANCODE_R:
+        return 0x13;
+    case SDL_SCANCODE_T:
+        return 0x14;
+    case SDL_SCANCODE_Y:
+        return 0x15;
+    case SDL_SCANCODE_U:
+        return 0x16;
+    case SDL_SCANCODE_I:
+        return 0x17;
+    case SDL_SCANCODE_O:
+        return 0x18;
+    case SDL_SCANCODE_P:
+        return 0x19;
+    case SDL_SCANCODE_LEFTBRACKET:
+        return 0x1a;
+    case SDL_SCANCODE_RIGHTBRACKET:
+        return 0x1b;
+    case SDL_SCANCODE_RETURN:
+        return 0x1c;
+    case SDL_SCANCODE_LCTRL:
+        return 0x1d;
+    case SDL_SCANCODE_A:
+        return 0x1e;
+    case SDL_SCANCODE_S:
+        return 0x1f;
+    case SDL_SCANCODE_D:
+        return 0x20;
+    case SDL_SCANCODE_F:
+        return 0x21;
+    case SDL_SCANCODE_G:
+        return 0x22;
+    case SDL_SCANCODE_H:
+        return 0x23;
+    case SDL_SCANCODE_J:
+        return 0x24;
+    case SDL_SCANCODE_K:
+        return 0x25;
+    case SDL_SCANCODE_L:
+        return 0x26;
+    case SDL_SCANCODE_SEMICOLON:
+        return 0x27;
+    case SDL_SCANCODE_APOSTROPHE:
+        return 0x28;
+    case SDL_SCANCODE_GRAVE:
+    case SDL_SCANCODE_NONUSHASH:
+        return 0x29;
+    case SDL_SCANCODE_LSHIFT:
+        return 0x2a;
+    case SDL_SCANCODE_BACKSLASH:
+    case SDL_SCANCODE_NONUSBACKSLASH:
+        return 0x2b;
+    case SDL_SCANCODE_Z:
+        return 0x2c;
+    case SDL_SCANCODE_X:
+        return 0x2d;
+    case SDL_SCANCODE_C:
+        return 0x2e;
+    case SDL_SCANCODE_V:
+        return 0x2f;
+    case SDL_SCANCODE_B:
+        return 0x30;
+    case SDL_SCANCODE_N:
+        return 0x31;
+    case SDL_SCANCODE_M:
+        return 0x32;
+    case SDL_SCANCODE_COMMA:
+        return 0x33;
+    case SDL_SCANCODE_PERIOD:
+        return 0x34;
+    case SDL_SCANCODE_SLASH:
+        return 0x35;
+    case SDL_SCANCODE_RSHIFT:
+        return 0x36;
+    case SDL_SCANCODE_KP_MULTIPLY:
+        return 0x37;
+    case SDL_SCANCODE_LALT:
+        return 0x38;
+    case SDL_SCANCODE_SPACE:
+        return 0x39;
+    case SDL_SCANCODE_CAPSLOCK:
+        return 0x3a;
+    case SDL_SCANCODE_F1:
+        return 0x3b;
+    case SDL_SCANCODE_F2:
+        return 0x3c;
+    case SDL_SCANCODE_F3:
+        return 0x3d;
+    case SDL_SCANCODE_F4:
+        return 0x3e;
+    case SDL_SCANCODE_F5:
+        return 0x3f;
+    case SDL_SCANCODE_F6:
+        return 0x40;
+    case SDL_SCANCODE_F7:
+        return 0x41;
+    case SDL_SCANCODE_F8:
+        return 0x42;
+    case SDL_SCANCODE_F9:
+        return 0x43;
+    case SDL_SCANCODE_F10:
+        return 0x44;
+    case SDL_SCANCODE_NUMLOCKCLEAR:
+        return 0x45;
+    case SDL_SCANCODE_SCROLLLOCK:
+        return 0x46;
+    case SDL_SCANCODE_KP_7:
+        return 0x47;
+    case SDL_SCANCODE_KP_8:
+        return 0x48;
+    case SDL_SCANCODE_KP_9:
+        return 0x49;
+    case SDL_SCANCODE_KP_MINUS:
+        return 0x4a;
+    case SDL_SCANCODE_KP_4:
+        return 0x4b;
+    case SDL_SCANCODE_KP_5:
+        return 0x4c;
+    case SDL_SCANCODE_KP_6:
+        return 0x4d;
+    case SDL_SCANCODE_KP_PLUS:
+        return 0x4e;
+    case SDL_SCANCODE_KP_1:
+        return 0x4f;
+    case SDL_SCANCODE_KP_2:
+        return 0x50;
+    case SDL_SCANCODE_KP_3:
+        return 0x51;
+    case SDL_SCANCODE_KP_0:
+        return 0x52;
+    case SDL_SCANCODE_KP_PERIOD:
+        return 0x53;
+    case SDL_SCANCODE_RCTRL:
+        return 0x54;
+    case SDL_SCANCODE_RALT:
+        return 0x55;
+    case SDL_SCANCODE_KP_DIVIDE:
+        return 0x56;
+    case SDL_SCANCODE_F11:
+        return 0x57;
+    case SDL_SCANCODE_F12:
+        return 0x58;
+    case SDL_SCANCODE_HOME:
+        return 0x59;
+    case SDL_SCANCODE_UP:
+        return 0x5a;
+    case SDL_SCANCODE_PAGEUP:
+        return 0x5b;
+    case SDL_SCANCODE_LEFT:
+        return 0x5c;
+    case SDL_SCANCODE_KP_ENTER:
+        return 0x5d;
+    case SDL_SCANCODE_RIGHT:
+        return 0x5e;
+    case SDL_SCANCODE_END:
+        return 0x5f;
+    case SDL_SCANCODE_DOWN:
+        return 0x60;
+    case SDL_SCANCODE_PAGEDOWN:
+        return 0x61;
+    case SDL_SCANCODE_INSERT:
+        return 0x62;
+    case SDL_SCANCODE_DELETE:
+        return 0x63;
+    case SDL_SCANCODE_KP_EQUALS:
+        return 0x64;
+    default:
+        return 0x64 + (unsigned int)sc;
+    }
+}
+
+/* Which of the two maps feeds pressed[]; see InputPhysicalKeys in cfg.psr. */
+static unsigned int sdl_event_to_pc_scancode(SDL_KeyboardEvent const* k)
+{
+    return InputPhysicalKeys ? sdl_scancode_to_pc_scancode(k->scancode)
+                             : sdl_keysym_to_pc_scancode((int)k->key);
+}
+
+static void ProcessKeyBuf(int scancode)
+{
+    int accept = 0;
+    int vkeyval = 0;
+
+    if (((scancode >= 'A') && (scancode <= 'Z')) || ((scancode >= 'a') && (scancode <= 'z')) || (scancode == SDLK_ESCAPE) || (scancode == SDLK_SPACE) || (scancode == SDLK_BACKSPACE) || (scancode == SDLK_RETURN) || (scancode == SDLK_TAB)) {
+        accept = 1;
+        vkeyval = scancode;
+    }
+    if (scancode == SDLK_KP_ENTER) {
+        accept = 1;
+        vkeyval = SDLK_RETURN;
+    }
+    if ((scancode >= '0') && (scancode <= '9')) {
+        accept = 1;
+        vkeyval = scancode;
+        if (shiftptr) {
+            switch (scancode) {
+            case '1':
+                vkeyval = '!';
+                break;
+            case '2':
+                vkeyval = '@';
+                break;
+            case '3':
+                vkeyval = '#';
+                break;
+            case '4':
+                vkeyval = '$';
+                break;
+            case '5':
+                vkeyval = '%';
+                break;
+            case '6':
+                vkeyval = '^';
+                break;
+            case '7':
+                vkeyval = '&';
+                break;
+            case '8':
+                vkeyval = '*';
+                break;
+            case '9':
+                vkeyval = '(';
+                break;
+            case '0':
+                vkeyval = ')';
+                break;
+            }
+        }
+    }
+    /* SDL2 numbers KP_0 above KP_9, so this is two tests, not a range. */
+    if ((scancode >= (int)SDLK_KP_1 && scancode <= (int)SDLK_KP_9)
+        || scancode == (int)SDLK_KP_0) {
+        if (numlockptr) {
+            accept = 1;
+            vkeyval = scancode == (int)SDLK_KP_0
+                ? '0'
+                : scancode - (int)SDLK_KP_1 + '1';
+        } else {
+            switch (scancode) {
+            case SDLK_KP_9:
+                vkeyval = 256 + 73;
+                accept = 1;
+                break;
+            case SDLK_KP_8:
+                vkeyval = 256 + 72;
+                accept = 1;
+                break;
+            case SDLK_KP_7:
+                vkeyval = 256 + 71;
+                accept = 1;
+                break;
+            case SDLK_KP_6:
+                vkeyval = 256 + 77;
+                accept = 1;
+                break;
+            case SDLK_KP_5:
+                vkeyval = 256 + 76;
+                accept = 1;
+                break;
+            case SDLK_KP_4:
+                vkeyval = 256 + 75;
+                accept = 1;
+                break;
+            case SDLK_KP_3:
+                vkeyval = 256 + 81;
+                accept = 1;
+                break;
+            case SDLK_KP_2:
+                vkeyval = 256 + 80;
+                accept = 1;
+                break;
+            case SDLK_KP_1:
+                vkeyval = 256 + 79;
+                accept = 1;
+                break;
+            }
+        } // end no-numlock
+    } // end testing of keypad
+    if (!shiftptr) {
+        switch (scancode) {
+        case SDLK_MINUS:
+            vkeyval = '-';
+            accept = 1;
+            break;
+        case SDLK_EQUALS:
+            vkeyval = '=';
+            accept = 1;
+            break;
+        case SDLK_LEFTBRACKET:
+            vkeyval = '[';
+            accept = 1;
+            break;
+        case SDLK_RIGHTBRACKET:
+            vkeyval = ']';
+            accept = 1;
+            break;
+        case SDLK_SEMICOLON:
+            vkeyval = ';';
+            accept = 1;
+            break;
+        case SDLK_COMMA:
+            vkeyval = ',';
+            accept = 1;
+            break;
+        case SDLK_PERIOD:
+            vkeyval = '.';
+            accept = 1;
+            break;
+        case SDLK_SLASH:
+            vkeyval = '/';
+            accept = 1;
+            break;
+        case SDLK_APOSTROPHE:
+            vkeyval = '`';
+            accept = 1;
+            break;
+        }
+    } else {
+        switch (scancode) {
+        case SDLK_MINUS:
+            vkeyval = '_';
+            accept = 1;
+            break;
+        case SDLK_EQUALS:
+            vkeyval = '+';
+            accept = 1;
+            break;
+        case SDLK_LEFTBRACKET:
+            vkeyval = '{';
+            accept = 1;
+            break;
+        case SDLK_RIGHTBRACKET:
+            vkeyval = '}';
+            accept = 1;
+            break;
+        case SDLK_SEMICOLON:
+            vkeyval = ':';
+            accept = 1;
+            break;
+        case SDLK_APOSTROPHE:
+            vkeyval = '"';
+            accept = 1;
+            break;
+        case SDLK_COMMA:
+            vkeyval = '<';
+            accept = 1;
+            break;
+        case SDLK_PERIOD:
+            vkeyval = '>';
+            accept = 1;
+            break;
+        case SDLK_SLASH:
+            vkeyval = '?';
+            accept = 1;
+            break;
+        case SDLK_GRAVE:
+            vkeyval = '~';
+            accept = 1;
+            break;
+        case SDLK_BACKSLASH:
+            vkeyval = '|';
+            accept = 1;
+            break;
+        }
+    }
+    switch (scancode) {
+    case SDLK_PAGEUP:
+        vkeyval = 256 + 73;
+        accept = 1;
+        break;
+    case SDLK_UP:
+        vkeyval = 256 + 72;
+        accept = 1;
+        break;
+    case SDLK_HOME:
+        vkeyval = 256 + 71;
+        accept = 1;
+        break;
+    case SDLK_RIGHT:
+        vkeyval = 256 + 77;
+        accept = 1;
+        break;
+    case SDLK_LEFT:
+        vkeyval = 256 + 75;
+        accept = 1;
+        break;
+    case SDLK_PAGEDOWN:
+        vkeyval = 256 + 81;
+        accept = 1;
+        break;
+    case SDLK_DOWN:
+        vkeyval = 256 + 80;
+        accept = 1;
+        break;
+    case SDLK_END:
+        vkeyval = 256 + 79;
+        accept = 1;
+        break;
+    case SDLK_KP_PLUS:
+        vkeyval = '+';
+        accept = 1;
+        break;
+    case SDLK_KP_MINUS:
+        vkeyval = '-';
+        accept = 1;
+        break;
+    case SDLK_KP_MULTIPLY:
+        vkeyval = '*';
+        accept = 1;
+        break;
+    case SDLK_KP_DIVIDE:
+        vkeyval = '/';
+        accept = 1;
+        break;
+    case SDLK_KP_EQUALS:
+        vkeyval = '=';
+        accept = 1;
+        break;
+    case SDLK_KP_PERIOD:
+        vkeyval = '.';
+        accept = 1;
+        break;
+    }
+
+    /* Printable characters come from SDL_EVENT_TEXT_INPUT, which honours the
+       keyboard layout; drop them here so they are not queued twice and so a
+       layout's own symbols are not overridden by this US mapping. Control keys
+       (ESC, backspace, tab, return) and the 256+scancode navigation codes pass
+       through. */
+    if (accept && vkeyval >= 0x20 && vkeyval <= 0x7E) {
+        accept = 0;
+    }
+
+    if (accept) {
+        // Drop the event if the ring buffer is full, to avoid corrupting
+        // CurKeyPos/CurKeyReadPos which would freeze Get_Key.
+        unsigned int const next = (CurKeyPos + 1) % 16;
+        if (next == CurKeyReadPos)
+            return;
+        KeyBuffer[CurKeyPos] = vkeyval;
+        CurKeyPos++;
+        if (CurKeyPos == 16) {
+            CurKeyPos = 0;
+        }
+    }
+}
+
+/* Re-enumerating gives a pad the same slot and the same pressed[] offsets it
+   would have had at startup, so a configuration keyed to those offsets keeps
+   working. Anything held down on a pad that just went away has to be let go
+   of, hence the clear. */
+static void CloseJoystickInput(void)
+{
+    int i;
+
+    for (i = 0; i < 5; i++) {
+        if (JoystickInput[i]) {
+            SDL_CloseJoystick(JoystickInput[i]);
+        }
+        JoystickInput[i] = NULL;
+        JoystickID[i] = 0;
+    }
+    memset(pressed + 256, 0, 128 + 64);
+}
+
+BOOL InitJoystickInput(void)
+{
+    int i, max_num_joysticks, num_joysticks = 0;
+    int num_axes, num_buttons, num_hats;
+    int next_offset = 256;
+    SDL_JoystickID* ids;
+
+    CloseJoystickInput();
+
+    SDL_InitSubSystem(SDL_INIT_JOYSTICK);
+    ids = SDL_GetJoysticks(&num_joysticks);
+    if (!ids || num_joysticks <= 0) {
+        printf("No joysticks found.\n");
+        SDL_free(ids);
+        /* The subsystem stays up: it is what reports a pad plugged in later. */
+        return FALSE;
+    }
+    SDL_SetJoystickEventsEnabled(true);
+
+    max_num_joysticks = num_joysticks > 5 ? 5 : num_joysticks;
+
+    for (i = 0; i < max_num_joysticks; i++) {
+        JoystickInput[i] = SDL_OpenJoystick(ids[i]);
+        if (!JoystickInput[i]) {
+            printf("Could not open joystick %d: %s\n", i, SDL_GetError());
+            continue;
+        }
+        JoystickID[i] = ids[i];
+        num_axes = SDL_GetNumJoystickAxes(JoystickInput[i]);
+        num_buttons = SDL_GetNumJoystickButtons(JoystickInput[i]);
+        num_hats = SDL_GetNumJoystickHats(JoystickInput[i]);
+        printf("Device %i %s\n", i, SDL_GetJoystickName(JoystickInput[i]));
+        printf("  %i axis, %i buttons, %i hats\n", num_axes, num_buttons, num_hats);
+
+        if (next_offset >= 448) {
+            printf("Warning: Joystick won't work.\n");
+            continue;
+        }
+
+        AxisOffset[i] = next_offset;
+        ButtonOffset[i] = AxisOffset[i] + num_axes * 2;
+        HatOffset[i] = ButtonOffset[i] + num_buttons;
+        next_offset = HatOffset[i] + num_hats * 4;
+
+        if (next_offset > (256 + 128 + 64)) {
+            printf("Warning: Too many buttons, axes and/or hats!\n");
+            printf("Warning: Joystick won't work fully.\n");
+        }
+    }
+    SDL_free(ids);
+
+    return TRUE;
+}
+
+BOOL InitInput(void)
+{
+    InitJoystickInput();
+    return TRUE;
+}
+
+static void sem_sleep_rdy(void);
+
+int startgame(void)
+{
+    static bool ranonce = false;
+    int status;
+
+    if (!ranonce) {
+        ranonce = true;
+
+        clock_gettime(CLOCK_MONOTONIC, &sem_start);
+
+        // Start semaphore code so ZSNES multitasks nicely :)
+        sem_sleep_rdy();
+    }
+
+    if (sdl_state == vid_null) {
+        if (!SDL_Init(SDL_INIT_VIDEO)) {
+            fprintf(stderr, "Could not initialize SDL: %s", SDL_GetError());
+            return FALSE;
+        }
+        sdl_state = vid_none;
+    }
+
+    if (sdl_state == vid_soft) {
+#ifdef __OPENGL__
+        if (UseOpenGL) {
+            sw_end(); // switching software -> GL: the software window must go
+        }
+#endif
+        // Otherwise keep the window alive so sw_start() can resize it in place
+        // instead of destroying/recreating it (see sw_start in sw_draw.c).
+    }
+#ifdef __OPENGL__
+    else if (sdl_state == vid_gl) {
+        if (UseLegacyGL()) {
+            gl_end();
+        } else {
+            sr_end();
+        }
+    }
+
+    SDL_Init(SDL_INIT_VIDEO);
+
+    if (UseOpenGL) {
+        status = UseLegacyGL()
+            ? gl_start(WindowWidth, WindowHeight, BitDepth, FullScreen)
+            : sr_start(WindowWidth, WindowHeight, BitDepth, FullScreen);
+    } else
+#endif
+    {
+        status = sw_start(WindowWidth, WindowHeight, BitDepth, FullScreen);
+    }
+
+    if (!status) {
+        // The old window was torn down above; do not claim it is still there.
+        sdl_state = vid_none;
+        return FALSE;
+    }
+    sdl_state = (UseOpenGL ? vid_gl : vid_soft);
+
+    return TRUE;
+}
+
+static double sem_GetTicks(void);
+
+void Start60HZ(void)
+{
+    update_ticks_pc2 = UPDATE_TICKS_UDP;
+    if (romispal == 1) {
+        update_ticks_pc = UPDATE_TICKS_GAMEPAL;
+    } else {
+        update_ticks_pc = UPDATE_TICKS_GAME;
+    }
+
+    // Restore timer data from semaphore data
+    start = sem_GetTicks();
+    start2 = sem_GetTicks();
+    T36HZEnabled = 0;
+    T60HZEnabled = 1;
+}
+
+void Stop60HZ(void)
+{
+    T60HZEnabled = 0;
+}
+
+void Start36HZ(void)
+{
+    update_ticks_pc2 = UPDATE_TICKS_UDP;
+    update_ticks_pc = UPDATE_TICKS_GUI;
+
+    // Restore timer data from semaphore data
+    start = sem_GetTicks();
+    start2 = sem_GetTicks();
+    T60HZEnabled = 0;
+    T36HZEnabled = 1;
+}
+
+void Stop36HZ(void)
+{
+    T36HZEnabled = 0;
+}
+
+void init_hqNx(void)
+{
+    uint32_t color32;
+    uint32_t* p;
+    int i, j, k, r, g, b, Y, u, v;
+
+    for (i = 0, p = (uint32_t*)BitConv32Ptr; i < 65536; i++, p++) {
+        color32 = ((i & 0xF800) << 8) + ((i & 0x07E0) << 5) + ((i & 0x001F) << 3) + 0xFF000000;
+
+        *p = color32;
+    }
+
+    for (i = 0; i < 32; i++) {
+        for (j = 0; j < 64; j++) {
+            for (k = 0; k < 32; k++) {
+                r = i << 3;
+                g = j << 2;
+                b = k << 3;
+                Y = (r + g + b) >> 2;
+                u = 128 + ((r - b) >> 2);
+                v = 128 + ((-r + 2 * g - b) >> 3);
+                ((uint32_t*)RGBtoYUVPtr)[(i << 11) + (j << 5) + k] = (Y << 16) + (u << 8) + v;
+            }
+        }
+    }
+}
+
+unsigned char prevNTSCMode = 0;
+unsigned char changeRes = 1;
+unsigned char prevKeep4_3Ratio = 0;
+static unsigned char prevsync = 0;
+char CheckOGLMode(void);
+
+void initwinvideo(void)
+{
+    // A failed mode change leaves no window at all, so keep somewhere to
+    // fall back to.
+    static uint32_t lastGoodMode = ~0u;
+    uint32_t newmode = 0;
+
+    init_hqNx();
+
+    if ((CurMode != cvidmode) || (prevNTSCMode != NTSCFilter) || (changeRes) || (prevKeep4_3Ratio != Keep4_3Ratio)
+        || (prevsync != vsyncon && !VideoSettingsLive())) {
+        CurMode = cvidmode;
+        newmode = 1;
+        WindowWidth = 256;
+        WindowHeight = 224;
+        prevNTSCMode = NTSCFilter;
+        changeRes = 0;
+        prevKeep4_3Ratio = Keep4_3Ratio;
+        prevsync = vsyncon;
+
+        FullScreen = GUIWFVID[cvidmode];
+#ifdef __OPENGL__
+        UseOpenGL = 0;
+        if (CheckOGLMode()) {
+            UseOpenGL = 1;
+        }
+
+        if ((cvidmode == 20) || (cvidmode == 21) || (cvidmode == 22)) {
+            SetHQx(CustomResX, CustomResY);
+            SetHiresOpt(CustomResX, CustomResY);
+        }
+#else
+        if (CheckOGLMode()) {
+            cvidmode = 2;
+        } // set it to the default 512x448 W
+#endif
+
+        switch (cvidmode) {
+        default:
+        case 0:
+        case 1:
+            WindowWidth = 256;
+            WindowHeight = 224;
+            break;
+        case 2:
+        case 3:
+        case 6:
+            if (NTSCFilter) {
+                WindowWidth = 602;
+                WindowHeight = 446;
+            } else {
+                WindowWidth = 512;
+                WindowHeight = 448;
+            }
+            break;
+        case 4:
+        case 7:
+        case 8:
+            WindowWidth = 640;
+            WindowHeight = 480;
+            break;
+        case 9:
+            WindowWidth = 640;
+            WindowHeight = 560;
+            break;
+        case 10:
+            WindowWidth = 768;
+            WindowHeight = 672;
+            break;
+        case 11:
+        case 12:
+            WindowWidth = 800;
+            WindowHeight = 600;
+            break;
+        case 13:
+            WindowWidth = 896;
+            WindowHeight = 784;
+            break;
+        case 14:
+        case 15:
+            WindowWidth = 1024;
+            WindowHeight = 768;
+            break;
+        case 16:
+            WindowWidth = 1024;
+            WindowHeight = 896;
+            break;
+        case 17:
+            WindowWidth = 1280;
+            WindowHeight = 960;
+            break;
+        case 18:
+            WindowWidth = 1280;
+            WindowHeight = 1024;
+            break;
+        case 19:
+            WindowWidth = 1600;
+            WindowHeight = 1200;
+            break;
+        case 20:
+            // Variable ODR
+        case 21:
+            // Variable ODS
+        case 22:
+            // Custom Res
+            WindowWidth = CustomResX;
+            WindowHeight = CustomResY;
+            break;
+        }
+        adjustMouseXScale();
+        adjustMouseYScale();
+    }
+
+    if (startgame() != TRUE) {
+        /* Exit zsnes if SDL could not be initialized */
+        if (sdl_state == vid_null) {
+            zexit_error();
+        }
+        /* Returning here would resume drawing into the destroyed window.
+           The retry cannot loop: cvidmode is then already lastGoodMode. */
+        if (lastGoodMode != ~0u && cvidmode != lastGoodMode) {
+            fprintf(stderr, "Video mode %u failed to start, reverting to %u\n",
+                (unsigned)cvidmode, (unsigned)lastGoodMode);
+            cvidmode = lastGoodMode;
+            CurMode = ~0u; /* force the size recompute above to run again */
+            initwinvideo();
+            return;
+        }
+        fprintf(stderr, "Could not start any video mode: %s\n", SDL_GetError());
+        zexit_error();
+    }
+    lastGoodMode = cvidmode;
+
+    if (newmode == 1) {
+#ifdef __OPENGL__
+        if (CheckOGLMode()) {
+            if (UseLegacyGL()) {
+                SetGLAttributes();
+            }
+            if (sdl_window) {
+                SDL_SetWindowSize(sdl_window, WindowWidth, WindowHeight);
+                SDL_SyncWindow(sdl_window); // settle the new size before querying it
+            }
+            adjustMouseXScale();
+            adjustMouseYScale();
+
+            /* SDL_Renderer fits its own output to the window; only the GL path
+               has a viewport to set, and calling into GL without its context
+               takes the process down. */
+            if (UseLegacyGL()) {
+                int vp_w = (int)WindowWidth;
+                int vp_h = (int)WindowHeight;
+                if (FullScreen && sdl_window) {
+                    SDL_GetWindowSizeInPixels(sdl_window, &vp_w, &vp_h);
+                }
+                SetGLViewport(vp_w, vp_h);
+            }
+        }
+#endif
+        clearwin();
+        Clear2xSaIBuffer();
+    }
+
+    if (FirstVid == 1) {
+        FirstVid = 0;
+
+        InitSound();
+        InitInput();
+
+        // SDL_DisableScreenSaver();
+    }
+
+    if (((PrevStereoSound != StereoSound) || (PrevSoundQuality != SoundQuality))) {
+        InitSound();
+    }
+}
+
+int TryToggleFullScreen(void)
+{
+    if (!sdl_window) {
+        return 0;
+    }
+
+    FullScreen = GUIWFVID[cvidmode];
+
+    // Wayland resizes the GL surface rather than recreating it, so resizing in
+    // place across a fullscreen transition flickers and draws the frame twice.
+    // Reinit the window and context whenever the fullscreen state changes; the
+    // cheap in-place path stays for mode changes that do not.
+    bool const wasFullScreen = (SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_FULLSCREEN) != 0;
+    if (wasFullScreen != (FullScreen != 0)) {
+        return 0;
+    }
+
+#ifdef __OPENGL__
+    // Fall back to full reinit if the backend would change
+    int newUseOpenGL = CheckOGLMode() ? 1 : 0;
+    if (newUseOpenGL != UseOpenGL) {
+        return 0;
+    }
+#endif
+
+    CurMode = cvidmode;
+
+    // Compute WindowWidth/WindowHeight for the new mode
+    WindowWidth = 256;
+    WindowHeight = 224;
+    switch (cvidmode) {
+    default:
+    case 0:
+    case 1:
+        break;
+    case 2:
+    case 3:
+    case 6:
+        if (NTSCFilter) {
+            WindowWidth = 602;
+            WindowHeight = 446;
+        } else {
+            WindowWidth = 512;
+            WindowHeight = 448;
+        }
+        break;
+    case 4:
+    case 7:
+    case 8:
+        WindowWidth = 640;
+        WindowHeight = 480;
+        break;
+    case 9:
+        WindowWidth = 640;
+        WindowHeight = 560;
+        break;
+    case 10:
+        WindowWidth = 768;
+        WindowHeight = 672;
+        break;
+    case 11:
+    case 12:
+        WindowWidth = 800;
+        WindowHeight = 600;
+        break;
+    case 13:
+        WindowWidth = 896;
+        WindowHeight = 784;
+        break;
+    case 14:
+    case 15:
+        WindowWidth = 1024;
+        WindowHeight = 768;
+        break;
+    case 16:
+        WindowWidth = 1024;
+        WindowHeight = 896;
+        break;
+    case 17:
+        WindowWidth = 1280;
+        WindowHeight = 960;
+        break;
+    case 18:
+        WindowWidth = 1280;
+        WindowHeight = 1024;
+        break;
+    case 19:
+        WindowWidth = 1600;
+        WindowHeight = 1200;
+        break;
+    case 20:
+    case 21:
+    case 22:
+        WindowWidth = CustomResX;
+        WindowHeight = CustomResY;
+        break;
+    }
+
+    SDL_SetWindowFullscreen(sdl_window, FullScreen ? true : false);
+
+    if (!FullScreen) {
+        SDL_SetWindowSize(sdl_window, WindowWidth, WindowHeight);
+    }
+
+    // The fullscreen/size change is asynchronous in SDL3; settle it before
+    // reading the drawable size, otherwise the viewport gets sized from the
+    // stale (pre-toggle) dimensions and fullscreen scaling comes out wrong.
+    SDL_SyncWindow(sdl_window);
+
+    SDL_SetWindowMouseGrab(sdl_window, FullScreen ? true : false);
+
+    adjustMouseXScale();
+    adjustMouseYScale();
+
+#ifdef __OPENGL__
+    if (CheckOGLMode() && UseLegacyGL()) {
+        int vp_w = (int)WindowWidth;
+        int vp_h = (int)WindowHeight;
+        if (FullScreen) {
+            SDL_GetWindowSizeInPixels(sdl_window, &vp_w, &vp_h);
+        }
+        SetGLViewport(vp_w, vp_h);
+    }
+#endif
+
+    clearwin();
+    Clear2xSaIBuffer();
+
+    return 1;
+}
+
+void CheckTimers(void)
+{
+    end2 = sem_GetTicks();
+
+    while ((end2 - start2) >= update_ticks_pc2) {
+        start2 += update_ticks_pc2;
+    }
+
+    if (T60HZEnabled) {
+        end = sem_GetTicks();
+
+        if ((end - start) >= 1000.0) {
+            start = end;
+        }
+        while ((end - start) >= update_ticks_pc) {
+            Game60hzcall();
+            SDL_SignalSemaphore(sem_frames);
+            start += update_ticks_pc;
+        }
+    }
+
+    if (T36HZEnabled) {
+        end = sem_GetTicks();
+
+        while ((end - start) >= update_ticks_pc) {
+            GUI36hzcall();
+            start += update_ticks_pc;
+        }
+    }
+}
+
+/* Pace on the blocking present when the display runs at the emulated rate;
+   the timer drifts against vblank and drops or repeats frames. */
+static int VsyncPaced(void)
+{
+    SDL_DisplayMode const* m;
+    double rate;
+
+    if (!T60HZEnabled || SloMo || UseLegacyGL() || !sr_vsync_on()) {
+        return 0;
+    }
+    m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(sdl_window));
+    if (!m || m->refresh_rate <= 0.f) {
+        return 0;
+    }
+    rate = 1000.0 / update_ticks_pc;
+    return m->refresh_rate > rate * 0.99 && m->refresh_rate < rate * 1.01;
+}
+
+/* Early (vsync not blocking) or late (behind) frames stay on the timer. */
+int VsyncPacedFrame(void)
+{
+    double const now = sem_GetTicks();
+    double const elapsed = now - start;
+
+    if (!VsyncPaced() || elapsed < update_ticks_pc * 0.75 || elapsed > update_ticks_pc * 1.5) {
+        return 0;
+    }
+    Game60hzcall();
+    start = now;
+    return 1;
+}
+
+void sem_sleep(void)
+{
+    end = update_ticks_pc - (sem_GetTicks() - start) - .2;
+    if (end > 0.) {
+        SDL_WaitSemaphoreTimeout(sem_frames, (Sint32)end);
+    }
+}
+
+static SDL_Thread* sem_threadid = NULL;
+static int sem_threadrun;
+
+int sem_thread(void* param)
+{
+    while (sem_threadrun) {
+        if (T60HZEnabled) {
+            SDL_SignalSemaphore(sem_frames);
+            zsleep_us(romispal ? 2000 : 1000);
+        } else {
+            zsleep_us(20000);
+        }
+    }
+    return (0);
+}
+
+static void sem_sleep_rdy(void)
+{
+    if (sem_frames) {
+        return;
+    }
+    sem_frames = SDL_CreateSemaphore(0);
+    sem_threadrun = 1;
+    sem_threadid = SDL_CreateThread(sem_thread, "sem_thread", 0);
+}
+
+static void sem_sleep_die(void)
+{
+    if (sem_threadid) {
+        sem_threadrun = 0;
+        SDL_WaitThread(sem_threadid, NULL);
+        sem_threadid = NULL;
+    }
+    if (sem_frames) {
+        SDL_DestroySemaphore(sem_frames);
+        sem_frames = NULL;
+    }
+}
+
+void DoRumble(void)
+{
+    extern u2 RumbleData;
+
+    if (RumbleData == 0xFFFF) {
+        RumbleData = 0;
+    }
+
+    if ((RumbleData & 0xFF00) == 0x7200) {
+        u2 RumbleLeft = ((RumbleData & 0x000F) * 4369);
+        u2 RumbleRight = (((RumbleData & 0x00F0) >> 4) * 4369);
+        SDL_RumbleJoystick(JoystickInput[0], RumbleLeft, RumbleRight, 600);
+        RumbleData = 0;
+    }
+}
+
+/* Debug output goes under TMPDIR when it is set, so two runs at once do not
+   write over each other's logs. */
+static char const* ZSnesDebugDir(void)
+{
+    char const* const d = getenv("TMPDIR");
+
+    return (d && *d) ? d : "/tmp";
+}
+
+void UpdateVFrame(void)
+{
+    extern u1 MultiTap;
+
+    // Quick fix for GUI CPU usage
+    if (GUIOn || GUIOn2 || EMUPause) {
+        zsleep_us(6000);
+    }
+
+    CheckTimers();
+    Main_Proc();
+
+    // Debug: ASCII_SCREENSHOT_EVERY_FIVE=1 writes a burst of consecutive
+    // frames (ASCII_SCREENSHOT_BURST, default 10) to /tmp/zsnes_<seq>.txt
+    // every 5s, and per-frame hashes to /tmp/zsnes_hashes.txt
+    {
+        static int sshot_checked = 0;
+        static int sshot_enabled = 0;
+        static int sshot_burst = 0;
+        static int sshot_burst_len = 10;
+        static Uint64 sshot_next_ms = 0;
+        static unsigned int sshot_seq = 0;
+        if (!sshot_checked) {
+            const char* e = getenv("ASCII_SCREENSHOT_EVERY_FIVE");
+            const char* b = getenv("ASCII_SCREENSHOT_BURST");
+            sshot_enabled = (e && *e == '1');
+            if (b && atoi(b) > 0) {
+                sshot_burst_len = atoi(b);
+            }
+            sshot_next_ms = SDL_GetTicks() + 5000;
+            sshot_checked = 1;
+        }
+        if (sshot_enabled) {
+            Uint64 now = SDL_GetTicks();
+            if (sshot_burst == 0 && now >= sshot_next_ms) {
+                sshot_burst = sshot_burst_len;
+                sshot_next_ms = now + 5000;
+            }
+            if (sshot_burst > 0) {
+                sshot_burst--;
+                char path[512];
+                snprintf(path, sizeof(path), "%s/zsnes_%05u.txt", ZSnesDebugDir(), sshot_seq++);
+                Grab_ASCII_Data_Path(path);
+            }
+            {
+                char hpath[512];
+
+                snprintf(hpath, sizeof(hpath), "%s/zsnes_hashes.txt", ZSnesDebugDir());
+                Grab_Frame_Hash_Path(hpath);
+            }
+        }
+    }
+
+    // Debug: PNG_SCREENSHOT_EVERY_N=<n> writes a full-resolution PNG
+    // /tmp/zsnes_<frame>.png every N emulated frames (filmstrip for headless
+    // debugging, e.g. driving DEBUG_INPUT_SCRIPT to reproduce a bug).
+    // zip/zpng.h only declares the writer when the build has libpng.
+#ifndef NO_PNG
+    {
+        static int png_checked = 0;
+        static int png_every = 0;
+        static unsigned int png_frame = 0;
+        if (!png_checked) {
+            const char* e = getenv("PNG_SCREENSHOT_EVERY_N");
+            if (e && atoi(e) > 0)
+                png_every = atoi(e);
+            png_checked = 1;
+        }
+        if (png_every) {
+            if (png_frame % (unsigned)png_every == 0) {
+                char path[512];
+                snprintf(path, sizeof(path), "%s/zsnes_%06u.png", ZSnesDebugDir(), png_frame);
+                Grab_PNG_Data_Path(path);
+            }
+            png_frame++;
+        }
+    }
+#endif
+
+    // Debug: PPU_STATE_LOG=1 appends per-frame PPU brightness/blank/layer state
+    // to /tmp/zsnes_ppu.txt (correlate with the PNG filmstrip to explain a black
+    // screen: force-blank set? brightness 0? no layers enabled?).
+    // Built only with WITH_DEBUG_HOOKS=1; a release build has no frame hook.
+#ifdef ZSNES_DEBUG_HOOKS
+    {
+        extern uint8_t vidbright, forceblnk;
+        extern uint16_t scrnon;
+        static int ppu_checked = 0, ppu_log = 0;
+        static unsigned int ppu_frame = 0;
+        static FILE* ppu_fp = NULL;
+        if (!ppu_checked) {
+            const char* e = getenv("PPU_STATE_LOG");
+            ppu_log = (e && *e == '1') ? 1 : ((e && *e == '2') ? 2 : 0);
+            if (ppu_log) {
+                char ppath[512];
+
+                snprintf(ppath, sizeof(ppath), "%s/zsnes_ppu.txt", ZSnesDebugDir());
+                ppu_fp = fopen(ppath, "wb");
+            }
+            ppu_checked = 1;
+        }
+        if (ppu_log && ppu_fp) {
+            if (ppu_log == 2) {
+                /* PPU_STATE_LOG=2 adds emulated machine state, so a run can be
+                   compared against another build frame by frame and the first
+                   divergence located. The sums are order-independent on
+                   purpose - they only have to change when the memory does. */
+                extern uint8_t wramdataa[65536], ram7fa[65536];
+                extern uint8_t SPCRAM[];
+                uint32_t w = 0, r = 0, a = 0;
+                unsigned i;
+                for (i = 0; i < 65536; i++) {
+                    w = w * 31u + wramdataa[i];
+                    r = r * 31u + ram7fa[i];
+                    a = a * 31u + SPCRAM[i];
+                }
+                {
+                    extern u1* spcPCRam;
+                    extern u1 spcA, spcX, spcY, spcP, spcNZ;
+                    extern uint32_t spcS, spcCycle;
+                    fprintf(ppu_fp,
+                        "%u bright=%u blank=%02x scrnon=%04x wram=%08x ram7f=%08x spc=%08x "
+                        "spcpc=%04x a=%02x x=%02x y=%02x p=%02x nz=%08x s=%04x cyc=%08x\n",
+                        ppu_frame, vidbright, forceblnk, scrnon, w, r, a,
+                        (unsigned)(spcPCRam - SPCRAM), (unsigned)spcA,
+                        (unsigned)spcX, (unsigned)spcY,
+                        (unsigned)spcP, (unsigned)spcNZ,
+                        (unsigned)(spcS & 0xFFFF), (unsigned)spcCycle);
+                }
+                {
+                    /* PPU_DUMP_FRAME=N writes work RAM at frame N, so two
+                       builds can be diffed byte for byte at the frame the
+                       checksums first disagree. */
+                    static int dump_at = -2;
+                    if (dump_at == -2) {
+                        const char* d = getenv("PPU_DUMP_FRAME");
+                        dump_at = d ? atoi(d) : -1;
+                    }
+                    if (dump_at >= 0 && (int)ppu_frame == dump_at) {
+                        char wpath[512];
+                        FILE* wf;
+
+                        snprintf(wpath, sizeof(wpath), "%s/zsnes_wram.bin", ZSnesDebugDir());
+                        wf = fopen(wpath, "wb");
+                        if (wf) {
+                            fwrite(wramdataa, 1, 65536, wf);
+                            fclose(wf);
+                        }
+                    }
+                }
+            } else {
+                /* hires counts the lines the PPU widened to 512 and mode is
+                   the BG mode, so a filmstrip can be searched for the frames
+                   that actually exercise the hi-res and mode 7 paths rather
+                   than guessing at which game reaches them. */
+                extern u1 SpecialLine[256], bgmode;
+                extern u2 resolutn;
+                unsigned hires = 0;
+                unsigned i;
+
+                for (i = 1; i <= (unsigned)resolutn && i < 256; i++) {
+                    hires += SpecialLine[i] ? 1 : 0;
+                }
+                fprintf(ppu_fp, "%u bright=%u blank=%02x scrnon=%04x hires=%u mode=%u\n",
+                    ppu_frame, vidbright, forceblnk, scrnon, hires, (unsigned)bgmode);
+            }
+            fflush(ppu_fp);
+        }
+        {
+            /* ZST_ROUNDTRIP=N: check the save-state path once, at frame N. */
+            static int zst_at = -2;
+            if (zst_at == -2) {
+                char const* z = getenv("ZST_ROUNDTRIP");
+                zst_at = z ? atoi(z) : -1;
+            }
+            if (zst_at >= 0 && (int)ppu_frame == zst_at) {
+                extern void zst_roundtrip_check(void);
+                zst_roundtrip_check();
+            }
+        }
+        ppu_frame++;
+    }
+#endif
+
+    if (SNESRumble && !MultiTap) {
+        DoRumble();
+    } else {
+        // Stop vibration
+        SDL_RumbleJoystick(JoystickInput[0], 0, 0, 1);
+    }
+
+    if (sound_sdl) {
+        SoundWrite_sdl();
+    }
+}
+
+void clearwin(void)
+{
+    /* If we're vid_null and we get here, there's a problem */
+    /* elsewhere - DDOI */
+    if (sdl_state == vid_none) {
+        return;
+    }
+
+#ifdef __OPENGL__
+    if (UseOpenGL) {
+        if (UseLegacyGL()) {
+            gl_clearwin();
+        } else {
+            sr_clearwin();
+        }
+    } else
+#endif
+    {
+        sw_clearwin();
+    }
+}
+
+#ifdef ZSNES_DEBUG_HOOKS
+unsigned zsnes_frame_dump_no = 0;
+
+/* ZSNES_FILTER_SOAK=N steps through every filter, CRT setting and video mode,
+   N frames apart, for running under a sanitizer: a display path that only
+   writes inside its buffer at the size it was built for fails here. */
+void ZSnesFilterSoak(void)
+{
+    /* Software and accelerated, windowed and fullscreen, small and large. */
+    static u1 const modes[] = { 0, 2, 3, 4, 6, 9, 10, 14 };
+    extern u2 resolutn;
+    static int every = -1;
+    static unsigned step = 0;
+
+    if (every < 0) {
+        char const* const e = getenv("ZSNES_FILTER_SOAK");
+
+        every = e ? atoi(e) : 0;
+    }
+    if (every <= 0 || (zsnes_frame_dump_no % (unsigned)every) != 0) {
+        return;
+    }
+    VideoFilterSet((VideoFilter)(step % VFILTER_COUNT));
+    sl_intensity = (u1)(step * 7 % 101);
+    sl_vibrancy = (u1)(step * 13 % 101);
+    BloomLevel = (u1)(step * 17 % 101);
+    GetLoadData(); /* rebuild the browser lists, so the arena turns over too */
+    if (step % VFILTER_COUNT == 0) {
+        cvidmode = modes[step / VFILTER_COUNT % (sizeof modes / sizeof *modes)];
+        changeRes = 1;
+        initwinvideo();
+    }
+    fprintf(stderr, "SOAK %u %s mode=%u res=%u scan=%u bloom=%u\n", step,
+        VideoFilterName(VideoFilterGet()), (unsigned)cvidmode,
+        (unsigned)resolutn, (unsigned)sl_intensity, (unsigned)BloomLevel);
+    step++;
+}
+
+int ZSnesFrameDumpWanted(void)
+{
+    static int checked = 0;
+    static int every = 0;
+
+    if (!checked) {
+        char const* const e = getenv("ZSNES_FRAME_DUMP");
+
+        checked = 1;
+        if (e && atoi(e) > 0) {
+            every = atoi(e);
+        }
+    }
+    return every && (zsnes_frame_dump_no % (unsigned)every) == 0;
+}
+
+void ZSnesFrameDumpSurface(SDL_Surface* const s, char const* const tag)
+{
+    char path[512];
+
+    if (!s) {
+        return;
+    }
+    snprintf(path, sizeof(path), "%s/zsnes_out_%s_%06u.bmp", ZSnesDebugDir(), tag,
+        zsnes_frame_dump_no);
+    SDL_SaveBMP(s, path);
+}
+#endif
+
+void drawscreenwin(void)
+{
+#if defined(__LIBAO__) || defined(__PIPEWIRE__)
+    extern bool RawDumpInProgress;
+    if (!sound_sdl && !GUIOn2 && !GUIOn && !EMUPause && !RawDumpInProgress) {
+#ifdef __PIPEWIRE__
+        if (sound_pipewire) {
+            SoundWrite_pipewire();
+        }
+#endif
+#ifdef __LIBAO__
+#ifdef __PIPEWIRE__
+        else
+#endif
+            SoundWrite_ao();
+#endif
+    }
+#endif
+
+    /* Just in case - DDOI */
+    if (sdl_state == vid_none) {
+        return;
+    }
+
+#ifdef ZSNES_DEBUG_HOOKS
+    zsnes_frame_dump_no++;
+    ZSnesFilterSoak();
+#endif
+
+#ifdef __OPENGL__
+    if (UseOpenGL) {
+        if (UseLegacyGL()) {
+            gl_drawwin();
+        } else {
+            sr_drawwin();
+        }
+    } else
+#endif
+    {
+        sw_drawwin();
+    }
+}
+
+void UnloadSDL(void)
+{
+    DeinitSound();
+    sem_sleep_die(); // Shutdown semaphore
+    if (sdl_state == vid_soft) {
+        sw_end();
+    }
+#ifdef __OPENGL__
+    else if (sdl_state == vid_gl) {
+        if (UseLegacyGL()) {
+            gl_end();
+        } else {
+            sr_end();
+        }
+    }
+#endif
+    if (sdl_state != vid_null && sdl_window) {
+        SDL_SetWindowMouseGrab(sdl_window, false);
+    }
+    SDL_Quit();
+}
+
+s4 GetMouseX(void)
+{
+    return ((int)MouseX);
+}
+s4 GetMouseY(void)
+{
+    return ((int)MouseY);
+}
+
+s4 GetMouseMoveX(void)
+{
+    float fx = 0.0f, fy = 0.0f;
+    SDL_GetRelativeMouseState(&fx, &fy);
+    fx += MouseMoveFracX;
+    fy += MouseMoveFracY;
+    MouseMove2X = (int)fx;
+    MouseMove2Y = (int)fy;
+    MouseMoveFracX = fx - (float)MouseMove2X;
+    MouseMoveFracY = fy - (float)MouseMove2Y;
+    return (MouseMove2X);
+}
+
+s4 GetMouseMoveY(void)
+{
+    return (MouseMove2Y);
+}
+
+/* A trackpad tap presses and releases inside a single frame, and the GUI only
+   samples the button level once a frame, so the press would fall between two
+   polls and the click would be lost. Remember what has gone down since the
+   last poll and report it once, which makes a tap as reliable as a held
+   button without making a held button behave differently. */
+s4 GetMouseButton(void)
+{
+    int const r = (int)(MouseButton | MouseButtonPressed);
+
+    MouseButtonPressed = 0;
+    return (r);
+}
+
+void SetMouseMinX(int MinX)
+{
+    MouseMinX = MinX;
+    adjustMouseXScale();
+}
+void SetMouseMaxX(int MaxX)
+{
+    MouseMaxX = MaxX;
+    adjustMouseXScale();
+}
+void SetMouseMinY(int MinY)
+{
+    MouseMinY = MinY;
+    adjustMouseYScale();
+}
+void SetMouseMaxY(int MaxY)
+{
+    MouseMaxY = MaxY;
+    adjustMouseYScale();
+}
+void SetMouseX(int X)
+{
+    MouseX = X;
+}
+void SetMouseY(int Y)
+{
+    MouseY = Y;
+}
+
+static double sem_GetTicks(void)
+{
+    struct timespec now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return ((double)(now.tv_sec - sem_start.tv_sec)) * 1000.
+        + ((double)(now.tv_nsec - sem_start.tv_nsec)) * 1e-6;
+}
+
+void LaunchBrowser(char const* browser, char const* url)
+{
+    /* execvp's prototype predates const and does not write these; the
+       cast goes through uintptr_t so -Wcast-qual stays satisfied. */
+    char* const arglist[] = { (char*)(uintptr_t)browser, (char*)(uintptr_t)url, 0 };
+    execvp(browser, arglist);
+}
+
+void LaunchURL(char const* url)
+{
+    if (safe_fork(0, 0)) // If fork failed, or we are the parent
+    {
+        MouseX = 0;
+        MouseY = 0;
+        return;
+    }
+
+    // We are now the child proccess
+
+    // If any of these LaunchBrowser() calls return that means it failed and we should try the next one
+    LaunchBrowser("xdg-open", url);
+    LaunchBrowser("firefox-developer-edition", url);
+    LaunchBrowser("firefox", url);
+    LaunchBrowser("konqueror", url);
+    LaunchBrowser("opera", url);
+    LaunchBrowser("lynx", url);
+    LaunchBrowser("links", url);
+
+    _exit(0); // All browser launches failed, oh well
+}
+
+void ProjectPage(void)
+{
+    LaunchURL("https://github.com/xyproto/zsnes");
+}

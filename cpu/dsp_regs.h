@@ -1,22 +1,13 @@
 /*
- * cpu/dsp_regs.h - DSP register ($00-$FF) write handlers, ported from the
- * WDSPReg00..FF routines in cpu/dsp.asm along with the ProcessGain,
- * ProcessGain2, SwitchSustain, VoiceAdsr, VoiceAdsr2, VoiceGain and keyoffm
- * macros they were built from.
+ * DSP register ($00-$FF) write handlers, from the WDSPReg00..FF routines in
+ * cpu/dsp.asm and the ProcessGain, SwitchSustain, VoiceAdsr, VoiceGain and
+ * keyoffm macros behind them.
  *
- * Textual include (cpu/c_dsp.c): the includer must first provide the
- * u1/u2/u4/u8/s1/s4 typedefs and declarations for the globals used below -
- * DSPMem, VolumeTableb, VolumeConvTable, MusicVol, GlobalVL, GlobalVR, EchoVL,
- * EchoVR, EchoFB, FIRTAPVal0, EchoRate, MaxEcho, NoiseSpeeds, NoiseInc,
- * dspPAdj, KeyOnStA, KeyOnStB, Voice0Noise..Voice7Noise, Voice0State,
- * Voice0Status, Voice0Time, Voice0EnvInc, Voice0IncNumber, GainDecBendDataPos,
- * GainDecBendDataTime, GainDecBendDataDat, AdsrBlocksLeft, AdsrSustLevLoc,
- * AdsrNextTimeDepth, DecayRate, SustainRate, Increase, Decrease,
- * DecreaseRateExp - and the VoiceStarter() function.
+ * Textual include (cpu/c_dsp.c), which supplies the integer typedefs, the DSP
+ * globals the bodies name and VoiceStarter().
  *
- * The asm handlers took the register number in ebx and the value in al, and
- * preserved every register (each non-trivial one push/pops what it touches), so
- * the C entry point needs no register threading at all.
+ * The asm handlers took the register in ebx and the value in al and preserved
+ * every register, so the C entry point needs no register threading.
  */
 #ifndef DSP_REGS_H
 #define DSP_REGS_H
@@ -106,7 +97,8 @@ static inline void dsp_process_gain2(u4 voice)
     } else if (gain & 0x40) {
         const u4 time = Increase[gain & 0x1F];
         u1 headroom = (u1)(dsp_envhi(voice) + 1);
-        if (headroom & 0x80) headroom = 127;
+        if (headroom & 0x80)
+            headroom = 127;
         headroom ^= 127;
         Voice0Time[voice] = time;
         Voice0IncNumber[voice] = ((u4)headroom << 16) / time;
@@ -218,7 +210,8 @@ static inline void dsp_voice_gain(u4 voice, u1 al) /* $x7 */
     if (Voice0State[voice] != 200 && *gain != al) {
         *gain = al;
         if (Voice0Status[voice] == 1 && !(DSPMem[0x05 + voice * 0x10] & 0x80)) {
-            if (Voice0State[voice] == 210) VoiceStarter(voice);
+            if (Voice0State[voice] == 210)
+                VoiceStarter(voice);
             dsp_process_gain2(voice);
             return;
         }
@@ -240,31 +233,67 @@ static inline void dsp_key_off(u4 voice)
 static inline void dsp_write_reg(u4 reg, u1 al)
 {
     switch (reg) {
-    case 0x05: case 0x15: case 0x25: case 0x35: /* ADSR (1) */
-    case 0x45: case 0x55: case 0x65: case 0x75:
+    case 0x05:
+    case 0x15:
+    case 0x25:
+    case 0x35: /* ADSR (1) */
+    case 0x45:
+    case 0x55:
+    case 0x65:
+    case 0x75:
         dsp_voice_adsr(reg >> 4, al);
         break;
 
-    case 0x06: case 0x16: case 0x26: case 0x36: /* ADSR (2) */
-    case 0x46: case 0x56: case 0x66: case 0x76:
+    case 0x06:
+    case 0x16:
+    case 0x26:
+    case 0x36: /* ADSR (2) */
+    case 0x46:
+    case 0x56:
+    case 0x66:
+    case 0x76:
         dsp_voice_adsr2(reg >> 4, al);
         break;
 
-    case 0x07: case 0x17: case 0x27: case 0x37: /* GAIN */
-    case 0x47: case 0x57: case 0x67: case 0x77:
+    case 0x07:
+    case 0x17:
+    case 0x27:
+    case 0x37: /* GAIN */
+    case 0x47:
+    case 0x57:
+    case 0x67:
+    case 0x77:
         dsp_voice_gain(reg >> 4, al);
         break;
 
-    case 0x0F: case 0x1F: case 0x2F: case 0x3F: /* echo FIR coefficients */
-    case 0x4F: case 0x5F: case 0x6F: case 0x7F:
+    case 0x0F:
+    case 0x1F:
+    case 0x2F:
+    case 0x3F: /* echo FIR coefficients */
+    case 0x4F:
+    case 0x5F:
+    case 0x6F:
+    case 0x7F:
         DSPMem[reg] = al;
         FIRTAPVal0[reg >> 4] = (s1)al;
         break;
 
-    case 0x0C: DSPMem[0x0C] = al; GlobalVL = dsp_vol(al); break;
-    case 0x1C: DSPMem[0x1C] = al; GlobalVR = dsp_vol(al); break;
-    case 0x2C: DSPMem[0x2C] = al; EchoVL = dsp_vol(al); break;
-    case 0x3C: DSPMem[0x3C] = al; EchoVR = dsp_vol(al); break;
+    case 0x0C:
+        DSPMem[0x0C] = al;
+        GlobalVL = dsp_vol(al);
+        break;
+    case 0x1C:
+        DSPMem[0x1C] = al;
+        GlobalVR = dsp_vol(al);
+        break;
+    case 0x2C:
+        DSPMem[0x2C] = al;
+        EchoVL = dsp_vol(al);
+        break;
+    case 0x3C:
+        DSPMem[0x3C] = al;
+        EchoVR = dsp_vol(al);
+        break;
 
     case 0x0D: /* echo feedback */
         DSPMem[0x0D] = al;
@@ -284,7 +313,8 @@ static inline void dsp_write_reg(u4 reg, u1 al)
         break;
 
     case 0x4C: /* KON - latched for the CPU thread, unless a KOF is pending */
-        if (DSPMem[0x5C] != 0xFF) KeyOnStA |= al;
+        if (DSPMem[0x5C] != 0xFF)
+            KeyOnStA |= al;
         DSPMem[0x4C] = al;
         DSPMem[0x7C] &= (u1)~al;
         break;
@@ -293,7 +323,8 @@ static inline void dsp_write_reg(u4 reg, u1 al)
         KeyOnStA &= (u1)~al;
         KeyOnStB &= (u1)~al;
         for (u4 voice = 0; voice != 8; voice++)
-            if (al & 1U << voice) dsp_key_off(voice);
+            if (al & 1U << voice)
+                dsp_key_off(voice);
         DSPMem[0x5C] = al;
         break;
 

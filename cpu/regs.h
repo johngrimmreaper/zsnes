@@ -12,53 +12,53 @@ typedef enum Layer {
     LAYER_COL = 5
 } Layer;
 
-extern void reg2100r();
-extern void reg2134r();
-extern void reg2135r();
-extern void reg2136r();
-extern void reg2137r();
-extern void reg2138r();
-extern void reg2139r();
-extern void reg213Ar();
-extern void reg213Br();
-extern void reg213Cr();
-extern void reg213Dr();
-extern void reg213Er();
-extern void reg213Fr();
-extern void reg2140r();
-extern void reg2141r();
-extern void reg2142r();
-extern void reg2143r();
-extern void reg2180r();
-extern void reg21C2r();
-extern void reg21C3r();
-extern void reg4016r();
-extern void reg4017r();
-extern void reg4100r();
-extern void reg420Ar();
-extern void reg420Br();
-extern void reg420Cr();
-extern void reg420Dr();
-extern void reg420Er();
-extern void reg420Fr();
-extern void reg4210r();
-extern void reg4211r();
-extern void reg4212r();
-extern void reg4213r();
-extern void reg4214r();
-extern void reg4215r();
-extern void reg4216r();
-extern void reg4217r();
-extern void reg4218r();
-extern void reg4219r();
-extern void reg421Ar();
-extern void reg421Br();
-extern void reg421Cr();
-extern void reg421Dr();
-extern void reg421Er();
-extern void reg421Fr();
-extern void reg43XXr();
-extern void regINVALID();
+extern void reg2100r(void);
+extern void reg2134r(void);
+extern void reg2135r(void);
+extern void reg2136r(void);
+extern void reg2137r(void);
+extern void reg2138r(void);
+extern void reg2139r(void);
+extern void reg213Ar(void);
+extern void reg213Br(void);
+extern void reg213Cr(void);
+extern void reg213Dr(void);
+extern void reg213Er(void);
+extern void reg213Fr(void);
+extern void reg2140r(void);
+extern void reg2141r(void);
+extern void reg2142r(void);
+extern void reg2143r(void);
+extern void reg2180r(void);
+extern void reg21C2r(void);
+extern void reg21C3r(void);
+extern void reg4016r(void);
+extern void reg4017r(void);
+extern void reg4100r(void);
+extern void reg420Ar(void);
+extern void reg420Br(void);
+extern void reg420Cr(void);
+extern void reg420Dr(void);
+extern void reg420Er(void);
+extern void reg420Fr(void);
+extern void reg4210r(void);
+extern void reg4211r(void);
+extern void reg4212r(void);
+extern void reg4213r(void);
+extern void reg4214r(void);
+extern void reg4215r(void);
+extern void reg4216r(void);
+extern void reg4217r(void);
+extern void reg4218r(void);
+extern void reg4219r(void);
+extern void reg421Ar(void);
+extern void reg421Br(void);
+extern void reg421Cr(void);
+extern void reg421Dr(void);
+extern void reg421Er(void);
+extern void reg421Fr(void);
+extern void reg43XXr(void);
+extern void regINVALID(void);
 
 typedef struct DMAInfo {
     u1 control; // Control register
@@ -74,16 +74,20 @@ typedef struct DMAInfo {
 } __attribute__((packed)) DMAInfo;
 _Static_assert(sizeof(DMAInfo) == 16, "DMAInfo size mismatch");
 
-extern DMAInfo dmadata[8]; // DMA data (written from ports 43xx)
+/* The reservation is 129 raw bytes (cpu/c_regsdata.c) and the $43xx
+   handlers index it as such; DMAInfo is a view over the first 128. */
+extern u1 dmadata[129] ASM_ALIGNED(1); // DMA data (written from ports 43xx)
 
 typedef struct HDMAInfo {
     eop* dst_reg[4]; // Destination registers
     u1 count; // # of bytes to transfer/line
     u2 addr_inc; // Address increment
 } __attribute__((packed)) HDMAInfo;
-_Static_assert(sizeof(HDMAInfo) == 19, "HDMAInfo size mismatch");
+/* Four host pointers plus three bytes: 19 on a 32-bit build, and the reserve
+   for hdmadata in cpu/c_regsdata.c is sized from the same expression. */
+_Static_assert(sizeof(HDMAInfo) == 4 * sizeof(eop*) + 3, "HDMAInfo size mismatch");
 
-extern HDMAInfo hdmadata[8];
+extern HDMAInfo hdmadata[8] ASM_ALIGNED(1);
 
 extern u1 INTEnab; // enables NMI(7)/VIRQ(5)/HIRQ(4)/JOY(0)
 extern u1 MultiTap;
@@ -142,13 +146,13 @@ extern u2 bg1ptrc[4]; // pointer to background1/2/3/4
 extern u2 bg1ptrd[4]; // pointer to background1/2/3/4
 extern u2 bg1scrolx[4]; // background 1/2/3/4 x position
 extern u2 bg1scroly[4]; // background 1/2/3/4 y position
-extern u2 cgram[256]; // CGRAM
+extern u2 cgram[256] ASM_ALIGNED(1); // CGRAM
 extern u2 latchx; // latched x value
 extern u2 latchy; // latched y value
 extern u2 resolutn; // screen resolution
 extern u2 scrnon; // main & sub screen on
-extern u4 bg1ptrx[4]; // pointer to background1/2/3/4
-extern u4 bg1ptry[4]; // pointer to background1/2/3/4
-extern u4 winl1; // window 1/2 left/right position
+extern u4 bg1ptrx[4] ASM_ALIGNED(4); // pointer to background1/2/3/4
+extern u4 bg1ptry[4] ASM_ALIGNED(4); // pointer to background1/2/3/4
+extern u1 winl1; // window 1/2 left/right position
 
 #endif

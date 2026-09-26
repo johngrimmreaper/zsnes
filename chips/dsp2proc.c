@@ -1,17 +1,16 @@
 /*
- * DSP2 coprocessor register stubs
+ * DSP2 coprocessor register stubs, from chips/dsp2proc.asm.
  *
- * Ported from chips/dsp2proc.asm.
- *
- * DSP2Read8b    — validate address, read buffer byte, optional arithmetic shift
- * DSP2Read16b   — always returns 0
- * DSP2Write8b   — enforcer-queue dispatch to command handlers w00..w0B
- * DSP2Write16b  — always returns 0 (no-op)
+ * DSP2Read8b    validate address, read buffer byte, optional arithmetic shift
+ * DSP2Read16b   always 0
+ * DSP2Write8b   enforcer-queue dispatch to command handlers w00..w0B
+ * DSP2Write16b  no-op
  */
 
 #include <stdint.h>
 #include <string.h>
 
+#include "../cpu/memseam.h"
 #include "regabi.h"
 
 #define DSP2F_HALT 1u
@@ -845,7 +844,7 @@ void c_DSP2Write16b(uint32_t addr, uint16_t val)
     (void)val;
 }
 
-REGABI_BANK_READ8(DSP2Read8b);
-REGABI_BANK_READ16(DSP2Read16b);
-REGABI_BANK_WRITE8(DSP2Write8b);
-REGABI_BANK_WRITE16(DSP2Write16b);
+MEMBANK_READ8(DSP2Read8b);
+MEMBANK_READ16(DSP2Read16b);
+MEMBANK_WRITE8(DSP2Write8b);
+MEMBANK_WRITE16(DSP2Write16b);

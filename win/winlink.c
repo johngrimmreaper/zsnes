@@ -1,24 +1,3 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #define DIRECTINPUT_VERSION 0x0800
 #define DIRECTSOUND_VERSION 0x0800
 #define __STDC_CONSTANT_MACROS
@@ -37,13 +16,10 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include <winuser.h>
 #include <xinput.h>
 
-#include "../asm_call.h"
 #include "../c_init.h"
 #include "../c_intrf.h"
-#include "../cfg.h"
 #include "../gui/c_gui.h"
 #include "../gui/guimouse.h"
-#include "../input.h"
 #include "../link.h"
 #include "../types.h"
 #include "../ui.h"
@@ -51,6 +27,8 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "../video/sw_draw.h"
 #include "../zmovie.h"
 #include "c_winintrf.h"
+#include "cfg.h"
+#include "input.h"
 #include "resource.h"
 #include "winlink.h"
 
@@ -148,6 +126,20 @@ static char dsound_dll[] = { "dsound.dll\0" };
 static char dsound_imp[] = { "DirectSoundCreate8\0" };
 
 static HMODULE hM_ddraw = NULL, hM_dsound = NULL, hM_dinput8 = NULL;
+
+static void EnableDpiAwareness(void)
+{
+    HMODULE user32 = GetModuleHandle("user32.dll");
+    if (user32) {
+        typedef BOOL(WINAPI * lpSetProcessDPIAware)(void);
+        lpSetProcessDPIAware set_process_dpi_aware;
+
+        set_process_dpi_aware = (lpSetProcessDPIAware)GetProcAddress(user32, "SetProcessDPIAware");
+        if (set_process_dpi_aware) {
+            set_process_dpi_aware();
+        }
+    }
+}
 
 typedef HRESULT(WINAPI* lpDirectInput8Create)(HINSTANCE hinst, DWORD dwVersion, REFIID riidltf,
     LPVOID* ppvOut, LPUNKNOWN punkOuter);
@@ -312,6 +304,25 @@ void CheckAlwaysOnTop()
         SetWindowPos(hMainWindow, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
     } else {
         SetWindowPos(hMainWindow, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    }
+}
+
+static void ActivateMainWindow(void)
+{
+    HWND const foreground = GetForegroundWindow();
+    DWORD const current_thread = GetCurrentThreadId();
+    DWORD const foreground_thread = foreground ? GetWindowThreadProcessId(foreground, NULL) : 0;
+    BOOL const attached = foreground_thread != 0 && foreground_thread != current_thread
+        && AttachThreadInput(current_thread, foreground_thread, TRUE);
+
+    ShowWindow(hMainWindow, SW_SHOW);
+    BringWindowToTop(hMainWindow);
+    SetForegroundWindow(hMainWindow);
+    SetActiveWindow(hMainWindow);
+    SetFocus(hMainWindow);
+
+    if (attached) {
+        AttachThreadInput(current_thread, foreground_thread, FALSE);
     }
 }
 
@@ -627,6 +638,13 @@ LRESULT CALLBACK Main_Proc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 accept = true;
                 break;
             }
+            /* Printable characters come from WM_CHAR, which honours the
+               keyboard layout; the mapping above assumes US-QWERTY, so drop its
+               printable results and keep only the control keys (Esc, backspace,
+               tab, enter) and the 256+ navigation codes. */
+            if (accept && vkeyval >= 0x20 && vkeyval <= 0x7E) {
+                accept = false;
+            }
             if (accept) {
                 KeyBuffer[CurKeyPos] = vkeyval;
                 CurKeyPos++;
@@ -636,6 +654,33 @@ LRESULT CALLBACK Main_Proc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             }
         }
         break;
+    case WM_CHAR: {
+        /* The character the layout produced, so a non-US layout types the right
+           symbol. The menus store text as UTF-8: ASCII goes in as one byte and a
+           Latin-1 byte (wParam is the ANSI code page, CP1252 on a Western
+           install) becomes its two UTF-8 bytes. */
+        unsigned char utf8[2];
+        int n = 0;
+        int i;
+
+        if (wParam >= 0x20 && wParam <= 0x7E) {
+            utf8[n++] = (unsigned char)wParam;
+        } else if (wParam >= 0xA0 && wParam <= 0xFF) {
+            utf8[n++] = (unsigned char)(0xC0 | (wParam >> 6));
+            utf8[n++] = (unsigned char)(0x80 | (wParam & 0x3F));
+        }
+        for (i = 0; i < n; i++) {
+            if ((CurKeyPos + 1 == CurKeyReadPos) || ((CurKeyPos + 1 == 16) && (CurKeyReadPos == 0))) {
+                break;
+            }
+            KeyBuffer[CurKeyPos] = utf8[i];
+            CurKeyPos++;
+            if (CurKeyPos == 16) {
+                CurKeyPos = 0;
+            }
+        }
+        break;
+    }
     case WM_KEYUP:
         // sent when user releases a key
         if (wParam == 16) {
@@ -719,6 +764,8 @@ LRESULT CALLBACK Main_Proc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
 static int RegisterWinClass(HINSTANCE const hInst)
 {
+    EnableDpiAwareness();
+
     if (AllowMultipleInst == 0) {
         HWND hFindWindow;
         hFindWindow = FindWindow("ZSNES", NULL);
@@ -752,6 +799,7 @@ static int RegisterWinClass(HINSTANCE const hInst)
 
 BYTE PrevStereoSound;
 DWORD PrevSoundQuality;
+extern unsigned int SoundOutputRate; /* initdata.c */
 
 BOOL InitSound()
 {
@@ -826,6 +874,11 @@ BOOL InitSound()
         wfx.nSamplesPerSec = 11025;
         SoundBufferSize = 1024 * 2;
     }
+
+    /* DirectSound is handed the rate outright rather than resampling for us,
+       so the mixer has to render at it instead of at the DSP's own
+       (initdata.c, cpu/c_dspproc.c). */
+    SoundOutputRate = wfx.nSamplesPerSec;
 
     if (StereoSound == 1) {
         wfx.nChannels = 2;
@@ -942,6 +995,11 @@ BOOL ReInitSound()
         wfx.nSamplesPerSec = 11025;
         SoundBufferSize = 1024 * 2;
     }
+
+    /* DirectSound is handed the rate outright rather than resampling for us,
+       so the mixer has to render at it instead of at the DSP's own
+       (initdata.c, cpu/c_dspproc.c). */
+    SoundOutputRate = wfx.nSamplesPerSec;
 
     if (StereoSound == 1) {
         wfx.nChannels = 2;
@@ -1132,8 +1190,8 @@ void TestJoy()
 }
 
 // BYTE changeRes = 1;
-extern unsigned int BitConv32Ptr;
-extern unsigned int RGBtoYUVPtr;
+extern unsigned char* BitConv32Ptr; /* ui.c */
+extern unsigned char* RGBtoYUVPtr; /* ui.c */
 extern unsigned short resolutn;
 extern BYTE hqFilterlevel;
 BYTE changeRes = 1;
@@ -1209,7 +1267,7 @@ void ShutdownSemaphore()
     }
 }
 
-extern unsigned int pressed;
+extern unsigned char pressed[256 + 128 + 64] ASM_ALIGNED(2); /* cpu/execute.h */
 extern unsigned char romispal;
 
 void Start60HZ(void)
@@ -1614,6 +1672,7 @@ void initwinvideo(void)
         clearwin();
         Clear2xSaIBuffer();
         clear_display();
+        ActivateMainWindow();
     } else if (newmode == 1 && Moving != 1) {
         ReleaseDirectDraw();
         InitDirectDraw();
@@ -1798,7 +1857,7 @@ void hq3x_16b();
 void hq3x_32b();
 void hq4x_16b();
 void hq4x_32b();
-extern unsigned char NGNoTransp;
+extern uint32_t NGNoTransp; /* a dword where it is defined (video/c_newgfx16data.c) */
 
 void clearwin(void)
 {
@@ -1861,19 +1920,11 @@ void drawscreenwin(void)
                     //  for ZSNES' current transparency code)
 
     UpdateVFrame();
-    {
-        static int zc;
-        if (++zc % 64 == 1)
-            fprintf(stderr, "ZSDBG dsw#%d curblank=%02x res=%d prevres=%d surf=%dx%d\n", zc, (unsigned)curblank, (int)resolutn, (int)PrevRes, (int)SurfaceX, (int)SurfaceY);
-    }
     if (curblank != 0) {
         return;
     }
 
     if (!(pitch = LockSurface())) {
-        static int zl;
-        if (++zl % 64 == 1)
-            fprintf(stderr, "ZSDBG lock fail#%d\n", zl);
         return;
     }
 
@@ -2174,7 +2225,7 @@ void drawscreenwin(void)
 
 void WinUpdateDevices()
 {
-    int i, j;
+    int i;
     unsigned char* keys;
     unsigned char keys2[256];
 
@@ -2187,7 +2238,7 @@ void WinUpdateDevices()
     for (i = 0; i < 256; i++) {
         keys2[i] = 0;
     }
-    keys = (unsigned char*)&pressed;
+    keys = pressed;
 
     if (KeyboardInput && InputEn == 1) {
         if (FAILED(IDirectInputDevice8_GetDeviceState(KeyboardInput, 256, keys2))) {
@@ -2517,16 +2568,9 @@ void FrameSemaphore(void)
     }
 }
 
-void ZsnesPage(void)
+void ProjectPage(void)
 {
-    ShellExecute(NULL, NULL, "http://www.zsnes.com/", NULL, NULL, 0);
-    MouseX = 0;
-    MouseY = 0;
-}
-
-void DocsPage(void)
-{
-    ShellExecute(NULL, NULL, "http://zsnes-docs.sourceforge.net/", NULL, NULL, 0);
+    ShellExecute(NULL, "open", "https://github.com/xyproto/zsnes", NULL, NULL, SW_SHOWNORMAL);
     MouseX = 0;
     MouseY = 0;
 }

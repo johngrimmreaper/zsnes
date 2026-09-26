@@ -1,28 +1,15 @@
 /*
- * cpu/mem_ops.h - direct-page memory accessors ported from cpu/memory.asm.
- *
- * Textual include (cpu/c_memops.c): the includer provides the u1/u2/u4
- * typedefs and the seam block declared below.
- *
- * These are the Bank0dat* handlers, reached through DPageR8/DPageR16/DPageW8/
- * DPageW16 (cpu/memtable.c picks one per direct-page high byte). The assembly
- * calls them with:
- *
- *     ebx  the direct-page offset byte just fetched from the opcode stream
- *     ecx  the direct page register, xd
- *     eax  al/ax carries the value on a write, and takes it on a read
- *
- * and the caller keeps whatever the handler leaves in ebx and ecx, so those
- * are outputs too - the "inv" and "romram" ones deliberately advance ecx and
- * some zero ebx. cpu/memory.asm spills all three to the seam around the call
- * (the memcop macro), so a body just reads and writes MemSeam*.
- *
- * The reg variants call an I/O register handler, which still wants the legacy
- * ABI, so they go through the trampolines below; the includer must have
- * included chips/regabi.h for REGABI_ENTRY/REGABI_SYM.
+ * Memory access handlers, from cpu/memory.asm. Textual include
+ * (cpu/c_memops.c). Everything goes through the seam: MemSeamB the direct-page
+ * offset byte, MemSeamC the direct page register xd, MemSeamA the value. The
+ * caller keeps whatever the handler leaves in all three - the "inv" and
+ * "romram" ones advance the address and some zero the bank on purpose.
  */
 #ifndef MEM_OPS_H
 #define MEM_OPS_H
+
+#include "../chips/sa1const.h" /* SA1_BWRAM_BYTES */
+#include "memseam.h" /* the seam block, mem_set_al/mem_set_ax */
 
 /* wramdataa is the 64K WRAM window the assembly indexes as a flat array. */
 static inline u1* mem_wram(u4 const off)
@@ -32,22 +19,10 @@ static inline u1* mem_wram(u4 const off)
 
 /* The ROM map base the 8000-FFFF handlers add to the address. The assembly
    writes `[snesmmap]`, i.e. entry 0; the per-bank entries belong to the
-   regaccessbank* handlers, which are still assembly. */
+   regaccessbank* handlers. */
 static inline u1* mem_rom(void)
 {
     return snesmmap[0];
-}
-
-/* Reads return in al/ax, leaving the rest of eax alone: the 65816 core keeps
-   live values in the upper half. */
-static inline void mem_set_al(u1 const v)
-{
-    MemSeamA = (MemSeamA & ~0xFFu) | v;
-}
-
-static inline void mem_set_ax(u2 const v)
-{
-    MemSeamA = (MemSeamA & ~0xFFFFu) | v;
 }
 
 /* `add cx,bx`: 16-bit add, so it wraps inside cx and leaves ecx's top half. */
@@ -57,65 +32,23 @@ static inline void mem_add_cx_bx(void)
         | ((MemSeamC + MemSeamB) & 0xFFFFu);
 }
 
-/* Call one I/O register handler: address in ecx, value in al, and it keeps
-   ecx and edx. Naked like the trampolines in chips/regabi.h - a constrained
-   asm cannot promise to preserve everything a legacy handler may touch, and
-   the tables are indexed regptra[addr - 0x2000], i.e. base - 0x8000 + ecx*4
-   exactly as cpu/regs.mac writes it.
+/* Call one I/O register handler, indexed regptra[addr - 0x2000] as
+   cpu/regs.mac wrote it. Bank and address are saved around the call: a
+   register write can start a DMA that runs through these same handlers, and
+   the nested access would otherwise clobber the outer address. The assembly
+   kept it in ecx, which the callee preserved. */
+#define MEM_REG_DISPATCH(name, table)               \
+    static void name(void)                          \
+    {                                               \
+        uintptr_t const b = MemSeamB, c = MemSeamC; \
+                                                    \
+        (table)[MemSeamC - 0x2000]();               \
+        MemSeamC = c;                               \
+        MemSeamB = b;                               \
+    }
 
-   The seam is restored around the call. A register write can start a DMA, and
-   the transfer runs through these same handlers, so without this the nested
-   access would overwrite the outer one's address - the assembly had no such
-   problem because it kept the address in ecx, which the callee preserves. */
-#define MEM_REG_TRAMPOLINE(name, table)                                       \
-    __asm__(REGABI_ENTRY(name) "pushl %ebx\n"                                 \
-                               "pushl %esi\n"                                 \
-                               "pushl %edi\n"                                 \
-                               "movl " REGABI_SYM(MemSeamC) ", %ecx\n"        \
-                               "movl " REGABI_SYM(MemSeamA) ", %eax\n"        \
-                               "movl " REGABI_SYM(MemSeamD) ", %edx\n"        \
-                               "pushl " REGABI_SYM(MemSeamB) "\n"            \
-                               "pushl %ecx\n"                                 \
-                               "call *" REGABI_SYM(table) "-0x8000(,%ecx,4)\n" \
-                               "movl %eax, " REGABI_SYM(MemSeamA) "\n"        \
-                               "movl %edx, " REGABI_SYM(MemSeamD) "\n"        \
-                               "popl %ecx\n"                                  \
-                               "movl %ecx, " REGABI_SYM(MemSeamC) "\n"        \
-                               "popl %ecx\n"                                  \
-                               "movl %ecx, " REGABI_SYM(MemSeamB) "\n"        \
-                               "popl %edi\n"                                  \
-                               "popl %esi\n"                                  \
-                               "popl %ebx\n"                                  \
-                               "ret\n");                                      \
-    void name(void)
-
-/* Call a handler that is still assembly, with the register ABI live. Lets a
-   ported handler keep a tail-call into one that has not moved yet; the seam
-   goes in and comes back out, so the caller sees exactly what the assembly
-   would have left in the registers. */
-__asm__(REGABI_ENTRY(MemCallAsm) "pushl %ebx\n"
-                                 "pushl %esi\n"
-                                 "pushl %edi\n"
-                                 "movl 16(%esp), %eax\n"
-                                 "pushl %eax\n"
-                                 "movl " REGABI_SYM(MemSeamB) ", %ebx\n"
-                                 "movl " REGABI_SYM(MemSeamC) ", %ecx\n"
-                                 "movl " REGABI_SYM(MemSeamD) ", %edx\n"
-                                 "movl " REGABI_SYM(MemSeamA) ", %eax\n"
-                                 "call *(%esp)\n"
-                                 "movl %eax, " REGABI_SYM(MemSeamA) "\n"
-                                 "addl $4, %esp\n"
-                                 "movl %ebx, " REGABI_SYM(MemSeamB) "\n"
-                                 "movl %ecx, " REGABI_SYM(MemSeamC) "\n"
-                                 "movl %edx, " REGABI_SYM(MemSeamD) "\n"
-                                 "popl %edi\n"
-                                 "popl %esi\n"
-                                 "popl %ebx\n"
-                                 "ret\n");
-void MemCallAsm(void* fn);
-
-MEM_REG_TRAMPOLINE(MemRegRead, regptra);
-MEM_REG_TRAMPOLINE(MemRegWrite, regptwa);
+MEM_REG_DISPATCH(MemRegRead, regptra)
+MEM_REG_DISPATCH(MemRegWrite, regptwa)
 
 /* --- 8-bit reads --------------------------------------------------------- */
 
@@ -141,9 +74,22 @@ void c_membank0r8inv(void) /* 4800-5FFF */
     mem_set_al((u1)((MemSeamC >> 8) & 0xFFu));
 }
 
+/* Defined further down; the ROM handlers below fall back to them. */
+void c_membank0r8chip(void);
+void c_membank0r16chip(void);
+
 void c_membank0r8rom(void) /* 8000-FFFF */
 {
-    MemSeamB += (u4)(uintptr_t)mem_rom();
+    /* The page table hands this handler direct pages from 7E00 up, because one
+       there reaches ROM once an offset is added. An address that stays below
+       8000 is not ROM at all, and the base is romdata - 8000, so indexing it
+       reads before the buffer; below 8000 the expansion area answers. A sum
+       that carried past FFFF is left as it was: in bounds, as the assembly. */
+    if (MemSeamB + MemSeamC < 0x8000u) {
+        c_membank0r8chip();
+        return;
+    }
+    MemSeamB += (uintptr_t)mem_rom();
     mem_set_al(*(u1*)(uintptr_t)(MemSeamB + MemSeamC));
     MemSeamB = 0;
 }
@@ -152,7 +98,7 @@ void c_membank0r8romram(void) /* 0000-1FFF */
 {
     mem_add_cx_bx();
     if (MemSeamC & 0x8000u) {
-        MemSeamB = (u4)(uintptr_t)mem_rom();
+        MemSeamB = (uintptr_t)mem_rom();
         mem_set_al(*(u1*)(uintptr_t)(MemSeamB + MemSeamC));
         MemSeamB = 0;
     } else {
@@ -219,7 +165,11 @@ void c_membank0r16inv(void) /* 4800-5FFF */
 
 void c_membank0r16rom(void) /* 8000-FFFF */
 {
-    MemSeamB += (u4)(uintptr_t)mem_rom();
+    if (MemSeamB + MemSeamC < 0x8000u) { /* see c_membank0r8rom */
+        c_membank0r16chip();
+        return;
+    }
+    MemSeamB += (uintptr_t)mem_rom();
     mem_set_ax((u2)(*(u1*)(uintptr_t)(MemSeamB + MemSeamC)
         | (*(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) << 8)));
     MemSeamB = 0;
@@ -229,7 +179,7 @@ void c_membank0r16romram(void) /* 0000-1FFF */
 {
     mem_add_cx_bx();
     if (MemSeamC & 0x8000u) {
-        MemSeamB = (u4)(uintptr_t)mem_rom();
+        MemSeamB = (uintptr_t)mem_rom();
         mem_set_ax((u2)(*(u1*)(uintptr_t)(MemSeamB + MemSeamC)
             | (*(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) << 8)));
         MemSeamB = 0;
@@ -323,19 +273,21 @@ void c_membank0w16romram(void) /* 0000-1FFF */
    silently reads the wrong entry. */
 static inline u1* mem_bank(void)
 {
-    return snesmmap[MemSeamB];
+    /* The SNES bank is 8 bits and snesmmap has 256 entries; the asm indexed it
+       through a movzx, so mask off any high bits an opcode left in the bank. */
+    return snesmmap[MemSeamB & 0xFFu];
 }
 
 void c_memaccessbankr8(void)
 {
-    MemSeamB = (u4)(uintptr_t)mem_bank();
+    MemSeamB = (uintptr_t)mem_bank();
     mem_set_al(*(u1*)(uintptr_t)(MemSeamB + MemSeamC));
     MemSeamB = 0;
 }
 
 void c_memaccessbankr16(void)
 {
-    MemSeamB = (u4)(uintptr_t)mem_bank();
+    MemSeamB = (uintptr_t)mem_bank();
     mem_set_ax((u2)(*(u1*)(uintptr_t)(MemSeamB + MemSeamC)
         | (*(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) << 8)));
     MemSeamB = 0;
@@ -348,7 +300,7 @@ void c_memaccessbankw8(void)
     if (!writeon) {
         return;
     }
-    MemSeamB = (u4)(uintptr_t)mem_bank();
+    MemSeamB = (uintptr_t)mem_bank();
     *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
     MemSeamB = 0;
 }
@@ -358,7 +310,7 @@ void c_memaccessbankw16(void)
     if (!writeon) {
         return;
     }
-    MemSeamB = (u4)(uintptr_t)mem_bank();
+    MemSeamB = (uintptr_t)mem_bank();
     *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
     *(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) = (u1)((MemSeamA >> 8) & 0xFFu);
     MemSeamB = 0;
@@ -372,9 +324,17 @@ void c_wramaccessbankr8(void)
     mem_set_al(*mem_wram(MemSeamC));
 }
 
+/* The second byte of a word at the top of the bank wraps to its foot rather
+   than running off the end of the buffer, which for a write meant scribbling
+   on whatever the pinned layout put next. */
+static inline u4 mem_next(u4 const off)
+{
+    return (off + 1u) & 0xFFFFu;
+}
+
 void c_wramaccessbankr16(void)
 {
-    mem_set_ax((u2)(mem_wram(MemSeamC)[0] | (mem_wram(MemSeamC)[1] << 8)));
+    mem_set_ax((u2)(*mem_wram(MemSeamC) | (*mem_wram(mem_next(MemSeamC)) << 8)));
 }
 
 void c_wramaccessbankw8(void)
@@ -384,8 +344,8 @@ void c_wramaccessbankw8(void)
 
 void c_wramaccessbankw16(void)
 {
-    mem_wram(MemSeamC)[0] = (u1)(MemSeamA & 0xFFu);
-    mem_wram(MemSeamC)[1] = (u1)((MemSeamA >> 8) & 0xFFu);
+    *mem_wram(MemSeamC) = (u1)(MemSeamA & 0xFFu);
+    *mem_wram(mem_next(MemSeamC)) = (u1)((MemSeamA >> 8) & 0xFFu);
 }
 
 void c_eramaccessbankr8(void)
@@ -395,7 +355,7 @@ void c_eramaccessbankr8(void)
 
 void c_eramaccessbankr16(void)
 {
-    mem_set_ax((u2)(ram7fa[MemSeamC] | (ram7fa[MemSeamC + 1] << 8)));
+    mem_set_ax((u2)(ram7fa[MemSeamC] | (ram7fa[mem_next(MemSeamC)] << 8)));
 }
 
 void c_eramaccessbankw8(void)
@@ -406,7 +366,7 @@ void c_eramaccessbankw8(void)
 void c_eramaccessbankw16(void)
 {
     ram7fa[MemSeamC] = (u1)(MemSeamA & 0xFFu);
-    ram7fa[MemSeamC + 1] = (u1)((MemSeamA >> 8) & 0xFFu);
+    ram7fa[mem_next(MemSeamC)] = (u1)((MemSeamA >> 8) & 0xFFu);
 }
 
 /* --- cartridge SRAM ------------------------------------------------------ */
@@ -462,12 +422,10 @@ void c_sramaccessbankw16b(void)
     MemSeamB = 0;
 }
 
-/* Banks 78-7D map SRAM in 32K slices: turn the bank into a slice offset, run
-   the access, then put the caller's address back. `sub bl,78h` is a byte
-   subtract, so it wraps inside bl rather than borrowing. Kept faithful even
-   though nothing can currently observe it: after the shift the difference sits
-   above bit 22, and every SRAM access masks with ramsizeand, which a 128K
-   cartridge never takes past 0x1FFFF. */
+/* Banks 78-7D map SRAM in 32K slices: bank to slice offset, access, restore
+   the caller's address. `sub bl,78h` wraps inside bl rather than borrowing;
+   unobservable today, since the difference lands above bit 22 and ramsizeand
+   never reaches past 0x1FFFF. Kept faithful. */
 static inline void mem_sram_slice(u4 const base, void (*body)(void))
 {
     u4 const saved = MemSeamC;
@@ -479,11 +437,9 @@ static inline void mem_sram_slice(u4 const base, void (*body)(void))
     MemSeamC = saved;
 }
 
-/* Banks 70-7D. `and bl,7Fh` masks the low byte only, so anything the caller
-   left above it survives into the shift. Like the 78-7D form above, none of
-   this is observable today: initc.c caps ramsize at 0x20000, so ramsizeand
-   never reaches past bit 16, while the bank only contributes bits 18 and up.
-   Kept faithful anyway. */
+/* Banks 70-7D. `and bl,7Fh` masks the low byte only, so anything above it
+   survives into the shift. Unobservable today - ramsize caps at 0x20000 while
+   the bank contributes bits 18 and up. Kept faithful. */
 static inline void mem_sram_bank70(void (*body)(void))
 {
     MemSeamB &= ~0x80u;
@@ -559,57 +515,57 @@ static inline u4 mem_st_addr(u4 const base)
     return (MemSeamC + MemSeamB) & ramsizeand;
 }
 
-#define MEM_ST_READ8(name, base, buf)                                        \
-    void name(void)                                                          \
-    {                                                                        \
-        if (mem_st_is_rom()) {                                               \
-            c_memaccessbankr8();                                             \
-            return;                                                          \
-        }                                                                    \
-        mem_set_al((buf)[mem_st_addr(base)]);                                \
-        MemSeamB = 0;                                                        \
+#define MEM_ST_READ8(name, base, buf)         \
+    void name(void)                           \
+    {                                         \
+        if (mem_st_is_rom()) {                \
+            c_memaccessbankr8();              \
+            return;                           \
+        }                                     \
+        mem_set_al((buf)[mem_st_addr(base)]); \
+        MemSeamB = 0;                         \
     }
 
-#define MEM_ST_READ16(name, base, buf)                                       \
-    void name(void)                                                          \
-    {                                                                        \
-        u4 a;                                                                \
-                                                                             \
-        if (mem_st_is_rom()) {                                               \
-            c_memaccessbankr16();                                            \
-            return;                                                          \
-        }                                                                    \
-        a = mem_st_addr(base);                                               \
-        mem_set_ax((u2)((buf)[a] | ((buf)[(a + 1) & ramsizeand] << 8)));      \
-        MemSeamB = 0;                                                        \
+#define MEM_ST_READ16(name, base, buf)                                   \
+    void name(void)                                                      \
+    {                                                                    \
+        u4 a;                                                            \
+                                                                         \
+        if (mem_st_is_rom()) {                                           \
+            c_memaccessbankr16();                                        \
+            return;                                                      \
+        }                                                                \
+        a = mem_st_addr(base);                                           \
+        mem_set_ax((u2)((buf)[a] | ((buf)[(a + 1) & ramsizeand] << 8))); \
+        MemSeamB = 0;                                                    \
     }
 
-#define MEM_ST_WRITE8(name, base, buf)                                       \
-    void name(void)                                                          \
-    {                                                                        \
-        if (mem_st_is_rom()) {                                               \
-            c_memaccessbankw8();                                             \
-            return;                                                          \
-        }                                                                    \
-        (buf)[mem_st_addr(base)] = (u1)(MemSeamA & 0xFFu);                   \
-        sramb4save = 5 * 60;                                                 \
-        MemSeamB = 0;                                                        \
+#define MEM_ST_WRITE8(name, base, buf)                     \
+    void name(void)                                        \
+    {                                                      \
+        if (mem_st_is_rom()) {                             \
+            c_memaccessbankw8();                           \
+            return;                                        \
+        }                                                  \
+        (buf)[mem_st_addr(base)] = (u1)(MemSeamA & 0xFFu); \
+        sramb4save = 5 * 60;                               \
+        MemSeamB = 0;                                      \
     }
 
-#define MEM_ST_WRITE16(name, base, buf)                                      \
-    void name(void)                                                          \
-    {                                                                        \
-        u4 a;                                                                \
-                                                                             \
-        if (mem_st_is_rom()) {                                               \
-            c_memaccessbankw16();                                            \
-            return;                                                          \
-        }                                                                    \
-        a = mem_st_addr(base);                                               \
-        (buf)[a] = (u1)(MemSeamA & 0xFFu);                                   \
-        (buf)[(a + 1) & ramsizeand] = (u1)((MemSeamA >> 8) & 0xFFu);         \
-        sramb4save = 5 * 60;                                                 \
-        MemSeamB = 0;                                                        \
+#define MEM_ST_WRITE16(name, base, buf)                              \
+    void name(void)                                                  \
+    {                                                                \
+        u4 a;                                                        \
+                                                                     \
+        if (mem_st_is_rom()) {                                       \
+            c_memaccessbankw16();                                    \
+            return;                                                  \
+        }                                                            \
+        a = mem_st_addr(base);                                       \
+        (buf)[a] = (u1)(MemSeamA & 0xFFu);                           \
+        (buf)[(a + 1) & ramsizeand] = (u1)((MemSeamA >> 8) & 0xFFu); \
+        sramb4save = 5 * 60;                                         \
+        MemSeamB = 0;                                                \
     }
 
 MEM_ST_READ8(c_stsramr8, 0x60, sram)
@@ -623,15 +579,14 @@ MEM_ST_WRITE16(c_stsramw16b, 0x70, sram2)
 
 /* --- banks 00-3F / 80-BF: the mixed ROM, WRAM, I/O and cartridge window ---
  *
- * ebx is the bank number. The address decides everything: bit 15 set is ROM,
- * below 2000 is the WRAM mirror, 2000-48FF the I/O registers, and 6000-7FFF
- * whatever the cartridge put there - SuperFX RAM, DSP1, or HiROM SRAM in 8K
- * slices - with plain open bus in between.
+ * ebx is the bank. The address decides the rest: bit 15 set is ROM, below 2000
+ * the WRAM mirror, 2000-48FF the I/O registers, 6000-7FFF whatever the cart
+ * put there (SuperFX RAM, DSP1, HiROM SRAM in 8K slices), open bus between.
  */
 void c_regaccessbankr8(void)
 {
     if (MemSeamC & 0x8000u) { /* ROM */
-        MemSeamB = (u4)(uintptr_t)mem_bank();
+        MemSeamB = (uintptr_t)mem_bank();
         mem_set_al(*(u1*)(uintptr_t)(MemSeamB + MemSeamC));
         MemSeamB = 0;
         return;
@@ -693,7 +648,7 @@ void c_regaccessbankw8(void)
         if (!writeon) {
             return;
         }
-        MemSeamB = (u4)(uintptr_t)mem_bank();
+        MemSeamB = (uintptr_t)mem_bank();
         *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
         MemSeamB = 0;
         return;
@@ -748,7 +703,7 @@ void c_regaccessbankw8(void)
 void c_regaccessbankr16(void)
 {
     if (MemSeamC & 0x8000u) {
-        MemSeamB = (u4)(uintptr_t)mem_bank();
+        MemSeamB = (uintptr_t)mem_bank();
         mem_set_ax((u2)(*(u1*)(uintptr_t)(MemSeamB + MemSeamC)
             | (*(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) << 8)));
         MemSeamB = 0;
@@ -815,7 +770,7 @@ void c_regaccessbankw16(void)
         if (!writeon) {
             return;
         }
-        MemSeamB = (u4)(uintptr_t)mem_bank();
+        MemSeamB = (uintptr_t)mem_bank();
         *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
         *(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) = (u1)((MemSeamA >> 8) & 0xFFu);
         MemSeamB = 0;
@@ -872,11 +827,10 @@ void c_regaccessbankw16(void)
 
 /* --- the general bank 00-3F / 80-BF dispatchers -------------------------- *
  *
- * Same windows as regaccessbank*, with three differences worth keeping in
- * sight: the address is masked to 16 bits first, ROM comes from map entry 0
- * rather than one picked by ebx, and an SA-1 cart hands the whole access to
- * the still-assembly SA-1 variant. The open-bus value also differs between the
- * 8- and 16-bit reads, and none of the cartridge paths here clear ebx.
+ * The regaccessbank* windows, with four differences: the address is masked to
+ * 16 bits first, ROM comes from map entry 0 rather than one picked by ebx, an
+ * SA-1 cart hands the whole access to the SA-1 variant, and the open-bus value
+ * differs between the 8- and 16-bit reads. No cartridge path here clears ebx.
  */
 void c_membank0r8SA1(void);
 void c_membank0r16SA1(void);
@@ -895,7 +849,7 @@ void c_membank0r8(void)
         return;
     }
     if (MemSeamC & 0x8000u) {
-        MemSeamB = (u4)(uintptr_t)mem_rom();
+        MemSeamB = (uintptr_t)mem_rom();
         mem_set_al(*(u1*)(uintptr_t)(MemSeamB + MemSeamC));
         MemSeamB = 0;
         return;
@@ -936,7 +890,7 @@ void c_membank0r16(void)
         return;
     }
     if (MemSeamC & 0x8000u) {
-        MemSeamB = (u4)(uintptr_t)mem_rom();
+        MemSeamB = (uintptr_t)mem_rom();
         mem_set_ax((u2)(*(u1*)(uintptr_t)(MemSeamB + MemSeamC)
             | (*(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) << 8)));
         MemSeamB = 0;
@@ -981,7 +935,7 @@ void c_membank0w8(void)
         if (!writeon) {
             return;
         }
-        MemSeamB = (u4)(uintptr_t)mem_rom();
+        MemSeamB = (uintptr_t)mem_rom();
         *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
         MemSeamB = 0;
         return;
@@ -1023,7 +977,7 @@ void c_membank0w16(void)
         if (!writeon) {
             return;
         }
-        MemSeamB = (u4)(uintptr_t)mem_rom();
+        MemSeamB = (uintptr_t)mem_rom();
         *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
         *(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) = (u1)((MemSeamA >> 8) & 0xFFu);
         MemSeamB = 0;
@@ -1054,74 +1008,82 @@ void c_membank0w16(void)
 
 /* --- bank 00-3F low RAM on an SA-1 cart ---------------------------------- *
  *
- * While the 65816 has the bus this is the ordinary WRAM mirror; while the SA-1
- * has it, the same window is the SA-1's own 2K of IRAM, and anything above it
- * reads back zero. Only ecx is range-checked, so ebx can carry the index a
- * little past 800h - IRAM has room for that.
+ * The WRAM mirror while the 65816 has the bus, the SA-1's 2K of IRAM while it
+ * does, zero above that. The assembly checked ecx alone and let ebx carry the
+ * index past 800h into whatever followed IRAM; the check is on the whole
+ * address here, which is what "zero above that" meant.
  */
+static inline int mem_iram_in(u4 const a)
+{
+    return a < 0x800u;
+}
+
 void c_membank0r8ramSA1(void)
 {
+    u4 const a = MemSeamC + MemSeamB;
+
     if (SA1Status == 0) {
-        mem_set_al(*mem_wram(MemSeamC + MemSeamB));
+        mem_set_al(*mem_wram(a));
         return;
     }
-    if (MemSeamC >= 0x800u) {
-        mem_set_al(0);
-        return;
-    }
-    mem_set_al(IRAM[MemSeamC + MemSeamB]);
+    mem_set_al(mem_iram_in(a) ? IRAM[a] : 0);
 }
 
 void c_membank0r16ramSA1(void)
 {
-    if (SA1Status == 0) {
-        u4 const a = MemSeamC + MemSeamB;
+    u4 const a = MemSeamC + MemSeamB;
 
+    if (SA1Status == 0) {
         mem_set_ax((u2)(mem_wram(a)[0] | (mem_wram(a)[1] << 8)));
         return;
     }
-    if (MemSeamC >= 0x800u) {
-        mem_set_ax(0);
-        return;
-    }
-    mem_set_ax((u2)(IRAM[MemSeamC + MemSeamB]
-        | (IRAM[MemSeamC + MemSeamB + 1] << 8)));
+    mem_set_ax((u2)((mem_iram_in(a) ? IRAM[a] : 0)
+        | ((mem_iram_in(a + 1) ? IRAM[a + 1] : 0) << 8)));
 }
 
 void c_membank0w8ramSA1(void)
 {
+    u4 const a = MemSeamC + MemSeamB;
+
     if (SA1Status == 0) {
-        *mem_wram(MemSeamC + MemSeamB) = (u1)(MemSeamA & 0xFFu);
+        *mem_wram(a) = (u1)(MemSeamA & 0xFFu);
         return;
     }
-    if (MemSeamC >= 0x800u) {
-        return;
+    if (mem_iram_in(a)) {
+        IRAM[a] = (u1)(MemSeamA & 0xFFu);
     }
-    IRAM[MemSeamC + MemSeamB] = (u1)(MemSeamA & 0xFFu);
 }
 
 void c_membank0w16ramSA1(void)
 {
-    if (SA1Status == 0) {
-        u4 const a = MemSeamC + MemSeamB;
+    u4 const a = MemSeamC + MemSeamB;
 
+    if (SA1Status == 0) {
         mem_wram(a)[0] = (u1)(MemSeamA & 0xFFu);
         mem_wram(a)[1] = (u1)((MemSeamA >> 8) & 0xFFu);
         return;
     }
-    if (MemSeamC >= 0x800u) {
-        return;
+    if (mem_iram_in(a)) {
+        IRAM[a] = (u1)(MemSeamA & 0xFFu);
     }
-    IRAM[MemSeamC + MemSeamB] = (u1)(MemSeamA & 0xFFu);
-    IRAM[MemSeamC + MemSeamB + 1] = (u1)((MemSeamA >> 8) & 0xFFu);
+    if (mem_iram_in(a + 1)) {
+        IRAM[a + 1] = (u1)((MemSeamA >> 8) & 0xFFu);
+    }
 }
 
 /* --- the SA-1's view of its own RAM -------------------------------------- *
  *
- * Banks 40-4F, four 64K slices of SA1RAMArea. While a character-conversion
- * DMA is in flight the reads come from the converter instead, one byte at a
- * time - writes never take that path.
+ * Banks 40-4F, four 64K slices of SA1RAMArea. The assembly masked the bank
+ * with 3 and ran past the 128K; BW-RAM mirrors at its own size. During a
+ * character-conversion DMA reads come from the converter a byte at a time;
+ * writes never do.
  */
+/* Offset into BW-RAM of bank ebx, offset ecx, plus `k`; a word straddling the
+   end mirrors like everything else. */
+static inline u4 mem_bwram(u4 const k)
+{
+    return (((MemSeamB & 3u) << 16) + MemSeamC + k) & (SA1_BWRAM_BYTES - 1);
+}
 void c_SA1RAMaccessbankr8(void)
 {
     if (SA1_in_cc1_dma != 0) {
@@ -1130,8 +1092,7 @@ void c_SA1RAMaccessbankr8(void)
         mem_set_al(SA1_DMA_VALUE);
         return;
     }
-    MemSeamB = ((MemSeamB & 3u) << 16) + (u4)(uintptr_t)SA1RAMArea;
-    mem_set_al(*(u1*)(uintptr_t)(MemSeamB + MemSeamC));
+    mem_set_al(SA1RAMArea[mem_bwram(0)]);
     MemSeamB = 0;
 }
 
@@ -1151,34 +1112,29 @@ void c_SA1RAMaccessbankr16(void)
         mem_set_ax((u2)(lo | (hi << 8)));
         return;
     }
-    MemSeamB = ((MemSeamB & 3u) << 16) + (u4)(uintptr_t)SA1RAMArea;
-    mem_set_ax((u2)(*(u1*)(uintptr_t)(MemSeamB + MemSeamC)
-        | (*(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) << 8)));
+    mem_set_ax((u2)(SA1RAMArea[mem_bwram(0)] | (SA1RAMArea[mem_bwram(1)] << 8)));
     MemSeamB = 0;
 }
 
 void c_SA1RAMaccessbankw8(void)
 {
-    MemSeamB = ((MemSeamB & 3u) << 16) + (u4)(uintptr_t)SA1RAMArea;
-    *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
+    SA1RAMArea[mem_bwram(0)] = (u1)(MemSeamA & 0xFFu);
     MemSeamB = 0;
 }
 
 void c_SA1RAMaccessbankw16(void)
 {
-    MemSeamB = ((MemSeamB & 3u) << 16) + (u4)(uintptr_t)SA1RAMArea;
-    *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
-    *(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) = (u1)((MemSeamA >> 8) & 0xFFu);
+    SA1RAMArea[mem_bwram(0)] = (u1)(MemSeamA & 0xFFu);
+    SA1RAMArea[mem_bwram(1)] = (u1)((MemSeamA >> 8) & 0xFFu);
     MemSeamB = 0;
 }
 
 /* --- the SA-1's RAM seen as a bit map ------------------------------------ *
  *
- * Banks 60-6F: the same RAM as above, but addressed one pixel at a time -
- * 4 bits each, or 2 when SA1Overflow's bit 15 is set, which also widens the
- * bank field from 3 to 4 bits because a slice then covers half as much. The
- * address is a pixel index, so it is shifted down to a byte index and left
- * that way: the caller sees the shifted ecx, and ebx comes back zero.
+ * Banks 60-6F: the same RAM one pixel at a time - 4 bits each, or 2 when
+ * SA1Overflow bit 15 is set, which also widens the bank field to 4 bits since
+ * a slice then covers half as much. The pixel index is shifted down to a byte
+ * index and left that way, so the caller sees the shifted ecx and ebx is zero.
  */
 static inline u4 mem_bm_2bit(void)
 {
@@ -1247,7 +1203,7 @@ void c_SA1RAMaccessbankw8b(void)
     u1* const p = mem_bm_byte();
     u1 const field = (u1)(((MemSeamA & mask) << sh) & 0xFFu);
 
-    *p = (u1)((*p & (u1)~(u1)(mask << sh)) | field);
+    *p = (u1)((*p & (u1) ~(u1)(mask << sh)) | field);
     mem_set_al(field);
     MemSeamB = 0;
 }
@@ -1269,10 +1225,9 @@ void c_SA1RAMaccessbankw16b(void)
 
 /* --- SA-1 BW-RAM, byte view or bit map ----------------------------------- *
  *
- * With BWShift set and the SA-1 holding the bus, the 6000-7FFF window is a
- * packed view of BW-RAM: two pixels per byte, or four when SA1Overflow's bit
- * 15 selects the 2-bit mode. Otherwise it is a plain byte window through
- * CurBWPtr.
+ * With BWShift set and the SA-1 on the bus, 6000-7FFF is a packed BW-RAM view:
+ * two pixels per byte, or four in SA1Overflow's 2-bit mode. Otherwise a plain
+ * byte window through CurBWPtr.
  */
 static inline int mem_bw_mapped(void)
 {
@@ -1311,7 +1266,7 @@ static inline u1 mem_bw_put(u4 const off, u1 const val)
     u4 const idx = mem_bw_index(off);
     u1 const field = (u1)(((val & mask) << sh) & 0xFFu);
 
-    SA1BWPtr[idx] = (u1)((SA1BWPtr[idx] & (u1)~(u1)(mask << sh)) | field);
+    SA1BWPtr[idx] = (u1)((SA1BWPtr[idx] & (u1) ~(u1)(mask << sh)) | field);
     return field;
 }
 
@@ -1351,11 +1306,10 @@ static inline void mem_bw_write16(void)
 
 /* --- the 6000-FFFF cartridge window -------------------------------------- *
  *
- * Whatever the cart puts there: an 8K SuperFX RAM mirror, SA-1 BW-RAM (a byte
- * window through CurBWPtr, or the bit map once BWShift is set) or the DSP1,
- * and nothing at all otherwise - a read is then zero, not open bus. Note the
- * address add is a full 32-bit one, unlike the `add cx,bx` the ram and romram
- * handlers use, and that only the two cartridge RAM paths clear ebx.
+ * An 8K SuperFX RAM mirror, SA-1 BW-RAM (byte window through CurBWPtr, or the
+ * bit map once BWShift is set), the DSP1, or nothing - in which case a read is
+ * zero, not open bus. The address add is a full 32-bit one, unlike the ram and
+ * romram handlers' `add cx,bx`, and only the two cartridge RAM paths clear ebx.
  */
 static inline u4 mem_sfx_off(void)
 {
@@ -1469,7 +1423,7 @@ void c_membank0w16chip(void) /* 6000-FFFF */
 void c_regaccessbankr8SA1(void)
 {
     if (MemSeamC & 0x8000u) {
-        MemSeamB = (u4)(uintptr_t)mem_bank();
+        MemSeamB = (uintptr_t)mem_bank();
         mem_set_al(*(u1*)(uintptr_t)(MemSeamB + MemSeamC));
         MemSeamB = 0;
         return;
@@ -1500,7 +1454,7 @@ void c_regaccessbankr8SA1(void)
         mem_set_al(mem_bw_read8());
         return;
     }
-    MemSeamB = (u4)(uintptr_t)CurBWPtr;
+    MemSeamB = (uintptr_t)CurBWPtr;
     mem_set_al(*(u1*)(uintptr_t)(MemSeamB + MemSeamC));
     MemSeamB = 0;
 }
@@ -1511,7 +1465,7 @@ void c_regaccessbankw8SA1(void)
         if (!writeon) {
             return;
         }
-        MemSeamB = (u4)(uintptr_t)mem_bank();
+        MemSeamB = (uintptr_t)mem_bank();
         *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
         MemSeamB = 0;
         return;
@@ -1539,7 +1493,7 @@ void c_regaccessbankw8SA1(void)
         mem_bw_write8();
         return;
     }
-    MemSeamB = (u4)(uintptr_t)CurBWPtr;
+    MemSeamB = (uintptr_t)CurBWPtr;
     *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
     MemSeamB = 0;
 }
@@ -1547,7 +1501,7 @@ void c_regaccessbankw8SA1(void)
 void c_regaccessbankr16SA1(void)
 {
     if (MemSeamC & 0x8000u) {
-        MemSeamB = (u4)(uintptr_t)mem_bank();
+        MemSeamB = (uintptr_t)mem_bank();
         mem_set_ax((u2)(*(u1*)(uintptr_t)(MemSeamB + MemSeamC)
             | (*(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) << 8)));
         MemSeamB = 0;
@@ -1578,7 +1532,7 @@ void c_regaccessbankr16SA1(void)
         mem_bw_read16();
         return;
     }
-    MemSeamB = (u4)(uintptr_t)CurBWPtr;
+    MemSeamB = (uintptr_t)CurBWPtr;
     mem_set_ax((u2)(*(u1*)(uintptr_t)(MemSeamB + MemSeamC)
         | (*(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) << 8)));
     MemSeamB = 0;
@@ -1590,7 +1544,7 @@ void c_regaccessbankw16SA1(void)
         if (!writeon) {
             return;
         }
-        MemSeamB = (u4)(uintptr_t)mem_bank();
+        MemSeamB = (uintptr_t)mem_bank();
         *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
         *(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) = (u1)((MemSeamA >> 8) & 0xFFu);
         MemSeamB = 0;
@@ -1624,7 +1578,7 @@ void c_regaccessbankw16SA1(void)
         mem_bw_write16();
         return;
     }
-    MemSeamB = (u4)(uintptr_t)CurBWPtr;
+    MemSeamB = (uintptr_t)CurBWPtr;
     *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
     *(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) = (u1)((MemSeamA >> 8) & 0xFFu);
     MemSeamB = 0;
@@ -1632,14 +1586,13 @@ void c_regaccessbankw16SA1(void)
 
 /* --- the SA-1 cart's general dispatchers --------------------------------- *
  *
- * The same windows as regaccessbank*SA1, with two differences: ROM comes from
- * map entry 0 rather than a bank-indexed one, and a write to ROM is simply
- * dropped - there is no writeon check here at all.
+ * The regaccessbank*SA1 windows, except ROM comes from map entry 0 rather than
+ * a bank-indexed one and a write to ROM is dropped - no writeon check at all.
  */
 void c_membank0r8SA1(void)
 {
     if (MemSeamC & 0x8000u) {
-        MemSeamB = (u4)(uintptr_t)mem_rom();
+        MemSeamB = (uintptr_t)mem_rom();
         mem_set_al(*(u1*)(uintptr_t)(MemSeamB + MemSeamC));
         MemSeamB = 0;
         return;
@@ -1670,7 +1623,7 @@ void c_membank0r8SA1(void)
         mem_set_al(mem_bw_read8());
         return;
     }
-    MemSeamB = (u4)(uintptr_t)CurBWPtr;
+    MemSeamB = (uintptr_t)CurBWPtr;
     mem_set_al(*(u1*)(uintptr_t)(MemSeamB + MemSeamC));
     MemSeamB = 0;
 }
@@ -1678,7 +1631,7 @@ void c_membank0r8SA1(void)
 void c_membank0r16SA1(void)
 {
     if (MemSeamC & 0x8000u) {
-        MemSeamB = (u4)(uintptr_t)mem_rom();
+        MemSeamB = (uintptr_t)mem_rom();
         mem_set_ax((u2)(*(u1*)(uintptr_t)(MemSeamB + MemSeamC)
             | (*(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) << 8)));
         MemSeamB = 0;
@@ -1709,7 +1662,7 @@ void c_membank0r16SA1(void)
         mem_bw_read16();
         return;
     }
-    MemSeamB = (u4)(uintptr_t)CurBWPtr;
+    MemSeamB = (uintptr_t)CurBWPtr;
     mem_set_ax((u2)(*(u1*)(uintptr_t)(MemSeamB + MemSeamC)
         | (*(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) << 8)));
     MemSeamB = 0;
@@ -1743,7 +1696,7 @@ void c_membank0w8SA1(void)
         mem_bw_write8();
         return;
     }
-    MemSeamB = (u4)(uintptr_t)CurBWPtr;
+    MemSeamB = (uintptr_t)CurBWPtr;
     *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
     MemSeamB = 0;
 }
@@ -1778,7 +1731,7 @@ void c_membank0w16SA1(void)
         mem_bw_write16();
         return;
     }
-    MemSeamB = (u4)(uintptr_t)CurBWPtr;
+    MemSeamB = (uintptr_t)CurBWPtr;
     *(u1*)(uintptr_t)(MemSeamB + MemSeamC) = (u1)(MemSeamA & 0xFFu);
     *(u1*)(uintptr_t)(MemSeamB + MemSeamC + 1) = (u1)((MemSeamA >> 8) & 0xFFu);
     MemSeamB = 0;
@@ -1786,13 +1739,11 @@ void c_membank0w16SA1(void)
 
 /* --- S-DD1, software decompression --------------------------------------- *
  *
- * Writing 4801 points all of C0-FF at this handler (chips/sa1regs.c). It
- * decompresses one byte per read, but only for the exact bank and address the
- * stream was opened on - the DMA that drives it holds the address still
- * (AddrNoIncr), so every read lands on the same one. Anything else means the
- * transfer is over: hand the byte back from ROM and put the plain accessor
- * back in the table, which is what takes the S-DD1 out of the picture until
- * 4801 is written again.
+ * Writing 4801 points all of C0-FF here (chips/sa1regs.c). One byte per read,
+ * but only at the exact bank and address the stream was opened on - the DMA
+ * driving it holds the address still. Anything else means the transfer ended:
+ * read from ROM and put the plain accessor back in the table, which retires
+ * the S-DD1 until 4801 is written again.
  */
 
 /* Which of the four 1Mb logical banks C0-FF is mapped where. Below C0 there is
@@ -1821,7 +1772,7 @@ static inline void mem_sdd1_stop(void)
 {
     int i;
 
-    MemSeamB = (u4)(uintptr_t)mem_bank();
+    MemSeamB = (uintptr_t)mem_bank();
     mem_set_al(*(u1*)(uintptr_t)(MemSeamB + MemSeamC));
     for (i = 0xC0; i < 0x100; i++) {
         memtabler8[i] = memaccessbankr8;
@@ -1844,16 +1795,16 @@ void c_memaccessbankr8sdd1(void)
         return;
     }
     if (Sdd1Mode != 2) {
-        u4 p;
+        uintptr_t p;
 
         Sdd1Bank = MemSeamB;
         Sdd1Addr = MemSeamC;
         Sdd1NewAddr = MemSeamC;
         Sdd1Mode = 2;
-        /* Kept as 32-bit arithmetic, as the assembly has it: a bank log byte
-           of 0Fh puts the result far outside the ROM allocation. */
-        p = (u4)(uintptr_t)romdata + ((u4)mem_sdd1_banklog() << 20)
-            + ((Sdd1Bank & 0x0Fu) << 16) + (MemSeamC & 0xFFFFu);
+        /* The offset stays 32-bit, as the assembly has it: a bank log byte
+           of 0Fh puts the result far outside the ROM allocation. The base is
+           a host pointer, so only the offset wraps. */
+        p = (uintptr_t)romdata + (u4)(((u4)mem_sdd1_banklog() << 20) + ((Sdd1Bank & 0x0Fu) << 16) + (MemSeamC & 0xFFFFu));
         SDD1_init((u1*)(uintptr_t)p);
     }
     if (Sdd1Bank == MemSeamB && Sdd1Addr == MemSeamC) {

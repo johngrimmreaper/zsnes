@@ -1,10 +1,10 @@
 #ifndef VERSION_H
 #define VERSION_H
 
-#define ZVER "2.2.3"
+#define ZVER "2.3.4"
 
-void placedate(void);
-
-extern char* VERSION_STR;
+extern char const VERSION_ARCH[];
+extern char const* const VERSION_LIBRARIES[];
+extern char const VERSION_PLATFORM[];
 
 #endif

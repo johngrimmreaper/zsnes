@@ -1,11 +1,12 @@
+#include "../unaligned.h"
 #include <string.h>
 
 #include "../c_init.h"
-#include "../cfg.h"
 #include "../endmem.h"
 #include "../gblvars.h"
 #include "../init.h"
 #include "../initc.h"
+#include "cfg.h"
 #ifndef lengthof
 #define lengthof(x) (sizeof(x) / sizeof *(x))
 #endif
@@ -19,15 +20,14 @@
 #include "regs.h"
 #include "spc700.h"
 
-// Clean C dispatch ABI for the eight-voice mixers. A mixer reads the voice,
-// the decoded-sample buffer (edi) and the running DSP-buffer index (*pesi),
-// advances *pesi, and - for the pitch-modulation variants - updates the
-// increment *pebx. paramhack[] is filled with the w_* wrappers below, so the
-// dispatch is a plain C function-pointer table and individual mixers can be
-// migrated from asm to C one at a time without touching the dispatch.
+// Dispatch ABI for the eight-voice mixers: a mixer reads the voice, the
+// decoded-sample buffer (edi) and the DSP-buffer index (*pesi), advances
+// *pesi, and updates the increment *pebx in the pitch-modulation variants.
+// paramhack[] holds the w_* wrappers, so dispatch is a plain pointer table.
 typedef void mixfn(u4 voice, u4* pesi, u4* pebx, s2* edi);
 static mixfn* paramhack[4];
 static u4 SBToSPC = 22050;
+extern u4 SoundOutputRate; /* initdata.c */
 
 static void conv2speed(u4 ecx, u4* esi, u4 const* edi)
 {
@@ -246,7 +246,7 @@ static u2 const CubicSpline[] = {
 static s4 DSPInterpolate_4(u4 const edx, u4 const ebp)
 {
     u4 const ebx = BRRPlace0[ebp][0] >> 16 & 0xFF;
-    u4 const eax = *(u4 const*)((u1 const*)&BRRPlace0[ebp][0] + 3); // XXX ugly cast
+    u4 const eax = ld32u((u1 const*)&BRRPlace0[ebp][0] + 3);
     s4 ecx = (s4)(s2)PSampleBuf[ebp][edx + 2] * (s4)DSPInterP[ebx + 256 * 3] + (s4)(s2)PSampleBuf[ebp][eax + 3] * (s2)DSPInterP[ebx + 256 * 2] + (s4)(s2)PSampleBuf[ebp][eax + 4] * (s2)DSPInterP[ebx + 256 * 1] + (s4)(s2)PSampleBuf[ebp][eax + 5] * (s2)DSPInterP[ebx + 256 * 0];
 
     ecx >>= 11;
@@ -323,9 +323,11 @@ void AdjustFrequency(void)
     }
     DSPInterpolate = interpolate;
 
-    static u4 const SBToSPCSpeeds[] = { 8000, 11025, 22050, 44100, 16000, 32000, 48000 };
-    u4 const eax =
-        SBToSPCSpeeds[SoundQuality];
+    /* The rate the mixer renders at. The backend owns it: a resampling one
+       leaves it at the DSP's own 32kHz, where dspPAdj is unity and the
+       envelope tables need no rescaling, and hands the conversion to the
+       sound API. SoundOutputRate defaults to that (initdata.c). */
+    u4 const eax = SoundOutputRate ? SoundOutputRate : 32000u;
     SBToSPC = eax;
     dspPAdj = ((u8)32000 << 20) / eax;
 
@@ -397,7 +399,7 @@ void VoiceStart(u4 const voice)
     }
     Voice0Status[voice] = 0;
 
-    if (DSPMem[16 * voice] < 0x40 && DSPMem[16 * voice + 1] < 0x40 && *(u4 const*)&DSPMem[16 * voice + 4] == 0x0050FF07 && DSPMem[0x5D] == 6) { // Skip.
+    if (DSPMem[16 * voice] < 0x40 && DSPMem[16 * voice + 1] < 0x40 && ld32u(&DSPMem[16 * voice + 4]) == 0x0050FF07 && DSPMem[0x5D] == 6) { // Skip.
         DSPMem[16 * voice] = 15;
         DSPMem[16 * voice + 1] = 15;
         return;
@@ -421,7 +423,7 @@ void VoiceStart(u4 const voice)
             if (edx < ebx) {
                 // ebx = total sustain time
                 /* Traverse through al entries in edx time, then through 64 - al entries
-				 * in ebx - edx time. */
+                 * in ebx - edx time. */
                 u1 const al = AdsrSustLevLoc[DSPMem[16 * voice + 6] >> 5];
                 u4 const eax = edx / al;
                 AdsrBlocksLeft[voice] = al;
@@ -500,7 +502,7 @@ void VoiceStart(u4 const voice)
         Voice0IncNumber[voice] = -(eax / 128);
         Voice0State[voice] = 210;
     } else {
-        u2 const ax = *(u2 const*)&DSPMem[16 * voice + 2];
+        u2 const ax = ld16u(&DSPMem[16 * voice + 2]);
         if (Voice0Pitch[voice] != ax) { // Pitchc.
             Voice0Pitch[voice] = ax;
             Voice0Freq[voice] = (u8)(ax & 0x3FFF) * dspPAdj >> 8;
@@ -518,9 +520,9 @@ void VoiceStart(u4 const voice)
         echoon0[voice] = (DSPMem[0x4D] & 1U << voice) != 0; // Echo.
     }
 
-    u2 const ax = (DSPMem[0x5D] * 64 + (*(u4 const*)&DSPMem[16 * voice + 4] & 0x000000FF)) * 4;
-    Voice0Ptr[voice] = *(u2 const*)&SPCRAM[ax];
-    Voice0LoopPtr[voice] = *(u2 const*)&SPCRAM[ax + 2];
+    u2 const ax = (DSPMem[0x5D] * 64 + (ld32u(&DSPMem[16 * voice + 4]) & 0x000000FF)) * 4;
+    Voice0Ptr[voice] = ld16u(&SPCRAM[ax]);
+    Voice0LoopPtr[voice] = ld16u(&SPCRAM[ax + 2]);
 }
 
 void VoiceStarter(u1 const voice)
@@ -532,10 +534,10 @@ void VoiceStarter(u1 const voice)
 
     SoundLooped0[voice] = 0;
     echoon0[voice] = (DSPMem[0x4D] & 1 << voice) != 0; // Echo.
-    u2 const ax = (DSPMem[0x5D] * 64 + (*(u4 const*)&DSPMem[16 * voice + 4] & 0x000000FF)) * 4;
-    Voice0Ptr[voice] = *(u2 const*)&SPCRAM[ax];
-    Voice0LoopPtr[voice] = *(u2 const*)&SPCRAM[ax + 2];
-    u2 const pitch = *(u2 const*)&DSPMem[16 * voice + 2];
+    u2 const ax = (DSPMem[0x5D] * 64 + (ld32u(&DSPMem[16 * voice + 4]) & 0x000000FF)) * 4;
+    Voice0Ptr[voice] = ld16u(&SPCRAM[ax]);
+    Voice0LoopPtr[voice] = ld16u(&SPCRAM[ax + 2]);
+    u2 const pitch = ld16u(&DSPMem[16 * voice + 2]);
     if (Voice0Pitch[voice] != pitch) { // Pitchc.
         Voice0Pitch[voice] = pitch;
         Voice0Freq[voice] = (u8)(pitch & 0x3FFF) * dspPAdj >> 8;
@@ -566,266 +568,266 @@ void InitSPC(void)
 
     // first fill all pointer to an invalid access function
     // XXX seems to be redundant, all entries are overwritten below
-    for (eop** i = opcjmptab; i != endof(opcjmptab); ++i)
-        *i = Invalidopcode;
+    for (spcop** i = opcjmptab; i != endof(opcjmptab); ++i)
+        *i = SpcOpInvalid;
 
     // now fill the table
-    opcjmptab[0x00] = Op00;
-    opcjmptab[0x01] = Op01;
-    opcjmptab[0x02] = Op02;
-    opcjmptab[0x03] = Op03;
-    opcjmptab[0x04] = Op04;
-    opcjmptab[0x05] = Op05;
-    opcjmptab[0x06] = Op06;
-    opcjmptab[0x07] = Op07;
-    opcjmptab[0x08] = Op08;
-    opcjmptab[0x09] = Op09;
-    opcjmptab[0x0A] = Op0A;
-    opcjmptab[0x0B] = Op0B;
-    opcjmptab[0x0C] = Op0C;
-    opcjmptab[0x0D] = Op0D;
-    opcjmptab[0x0E] = Op0E;
-    opcjmptab[0x0F] = Op0F;
-    opcjmptab[0x10] = Op10;
-    opcjmptab[0x11] = Op11;
-    opcjmptab[0x12] = Op12;
-    opcjmptab[0x13] = Op13;
-    opcjmptab[0x14] = Op14;
-    opcjmptab[0x15] = Op15;
-    opcjmptab[0x16] = Op16;
-    opcjmptab[0x17] = Op17;
-    opcjmptab[0x18] = Op18;
-    opcjmptab[0x19] = Op19;
-    opcjmptab[0x1A] = Op1A;
-    opcjmptab[0x1B] = Op1B;
-    opcjmptab[0x1C] = Op1C;
-    opcjmptab[0x1D] = Op1D;
-    opcjmptab[0x1E] = Op1E;
-    opcjmptab[0x1F] = Op1F;
-    opcjmptab[0x20] = Op20;
-    opcjmptab[0x21] = Op21;
-    opcjmptab[0x22] = Op22;
-    opcjmptab[0x23] = Op23;
-    opcjmptab[0x24] = Op24;
-    opcjmptab[0x25] = Op25;
-    opcjmptab[0x26] = Op26;
-    opcjmptab[0x27] = Op27;
-    opcjmptab[0x28] = Op28;
-    opcjmptab[0x29] = Op29;
-    opcjmptab[0x2A] = Op2A;
-    opcjmptab[0x2B] = Op2B;
-    opcjmptab[0x2C] = Op2C;
-    opcjmptab[0x2D] = Op2D;
-    opcjmptab[0x2E] = Op2E;
-    opcjmptab[0x2F] = Op2F;
-    opcjmptab[0x30] = Op30;
-    opcjmptab[0x31] = Op31;
-    opcjmptab[0x32] = Op32;
-    opcjmptab[0x33] = Op33;
-    opcjmptab[0x34] = Op34;
-    opcjmptab[0x35] = Op35;
-    opcjmptab[0x36] = Op36;
-    opcjmptab[0x37] = Op37;
-    opcjmptab[0x38] = Op38;
-    opcjmptab[0x39] = Op39;
-    opcjmptab[0x3A] = Op3A;
-    opcjmptab[0x3B] = Op3B;
-    opcjmptab[0x3C] = Op3C;
-    opcjmptab[0x3D] = Op3D;
-    opcjmptab[0x3E] = Op3E;
-    opcjmptab[0x3F] = Op3F;
-    opcjmptab[0x40] = Op40;
-    opcjmptab[0x41] = Op41;
-    opcjmptab[0x42] = Op42;
-    opcjmptab[0x43] = Op43;
-    opcjmptab[0x44] = Op44;
-    opcjmptab[0x45] = Op45;
-    opcjmptab[0x46] = Op46;
-    opcjmptab[0x47] = Op47;
-    opcjmptab[0x48] = Op48;
-    opcjmptab[0x49] = Op49;
-    opcjmptab[0x4A] = Op4A;
-    opcjmptab[0x4B] = Op4B;
-    opcjmptab[0x4C] = Op4C;
-    opcjmptab[0x4D] = Op4D;
-    opcjmptab[0x4E] = Op4E;
-    opcjmptab[0x4F] = Op4F;
-    opcjmptab[0x50] = Op50;
-    opcjmptab[0x51] = Op51;
-    opcjmptab[0x52] = Op52;
-    opcjmptab[0x53] = Op53;
-    opcjmptab[0x54] = Op54;
-    opcjmptab[0x55] = Op55;
-    opcjmptab[0x56] = Op56;
-    opcjmptab[0x57] = Op57;
-    opcjmptab[0x58] = Op58;
-    opcjmptab[0x59] = Op59;
-    opcjmptab[0x5A] = Op5A;
-    opcjmptab[0x5B] = Op5B;
-    opcjmptab[0x5C] = Op5C;
-    opcjmptab[0x5D] = Op5D;
-    opcjmptab[0x5E] = Op5E;
-    opcjmptab[0x5F] = Op5F;
-    opcjmptab[0x60] = Op60;
-    opcjmptab[0x61] = Op61;
-    opcjmptab[0x62] = Op62;
-    opcjmptab[0x63] = Op63;
-    opcjmptab[0x64] = Op64;
-    opcjmptab[0x65] = Op65;
-    opcjmptab[0x66] = Op66;
-    opcjmptab[0x67] = Op67;
-    opcjmptab[0x68] = Op68;
-    opcjmptab[0x69] = Op69;
-    opcjmptab[0x6A] = Op6A;
-    opcjmptab[0x6B] = Op6B;
-    opcjmptab[0x6C] = Op6C;
-    opcjmptab[0x6D] = Op6D;
-    opcjmptab[0x6E] = Op6E;
-    opcjmptab[0x6F] = Op6F;
-    opcjmptab[0x70] = Op70;
-    opcjmptab[0x71] = Op71;
-    opcjmptab[0x72] = Op72;
-    opcjmptab[0x73] = Op73;
-    opcjmptab[0x74] = Op74;
-    opcjmptab[0x75] = Op75;
-    opcjmptab[0x76] = Op76;
-    opcjmptab[0x77] = Op77;
-    opcjmptab[0x78] = Op78;
-    opcjmptab[0x79] = Op79;
-    opcjmptab[0x7A] = Op7A;
-    opcjmptab[0x7B] = Op7B;
-    opcjmptab[0x7C] = Op7C;
-    opcjmptab[0x7D] = Op7D;
-    opcjmptab[0x7E] = Op7E;
-    opcjmptab[0x7F] = Op7F;
-    opcjmptab[0x80] = Op80;
-    opcjmptab[0x81] = Op81;
-    opcjmptab[0x82] = Op82;
-    opcjmptab[0x83] = Op83;
-    opcjmptab[0x84] = Op84;
-    opcjmptab[0x85] = Op85;
-    opcjmptab[0x86] = Op86;
-    opcjmptab[0x87] = Op87;
-    opcjmptab[0x88] = Op88;
-    opcjmptab[0x89] = Op89;
-    opcjmptab[0x8A] = Op8A;
-    opcjmptab[0x8B] = Op8B;
-    opcjmptab[0x8C] = Op8C;
-    opcjmptab[0x8D] = Op8D;
-    opcjmptab[0x8E] = Op8E;
-    opcjmptab[0x8F] = Op8F;
-    opcjmptab[0x90] = Op90;
-    opcjmptab[0x91] = Op91;
-    opcjmptab[0x92] = Op92;
-    opcjmptab[0x93] = Op93;
-    opcjmptab[0x94] = Op94;
-    opcjmptab[0x95] = Op95;
-    opcjmptab[0x96] = Op96;
-    opcjmptab[0x97] = Op97;
-    opcjmptab[0x98] = Op98;
-    opcjmptab[0x99] = Op99;
-    opcjmptab[0x9A] = Op9A;
-    opcjmptab[0x9B] = Op9B;
-    opcjmptab[0x9C] = Op9C;
-    opcjmptab[0x9D] = Op9D;
-    opcjmptab[0x9E] = Op9E;
-    opcjmptab[0x9F] = Op9F;
-    opcjmptab[0xA0] = OpA0;
-    opcjmptab[0xA1] = OpA1;
-    opcjmptab[0xA2] = OpA2;
-    opcjmptab[0xA3] = OpA3;
-    opcjmptab[0xA4] = OpA4;
-    opcjmptab[0xA5] = OpA5;
-    opcjmptab[0xA6] = OpA6;
-    opcjmptab[0xA7] = OpA7;
-    opcjmptab[0xA8] = OpA8;
-    opcjmptab[0xA9] = OpA9;
-    opcjmptab[0xAA] = OpAA;
-    opcjmptab[0xAB] = OpAB;
-    opcjmptab[0xAC] = OpAC;
-    opcjmptab[0xAD] = OpAD;
-    opcjmptab[0xAE] = OpAE;
-    opcjmptab[0xAF] = OpAF;
-    opcjmptab[0xB0] = OpB0;
-    opcjmptab[0xB1] = OpB1;
-    opcjmptab[0xB2] = OpB2;
-    opcjmptab[0xB3] = OpB3;
-    opcjmptab[0xB4] = OpB4;
-    opcjmptab[0xB5] = OpB5;
-    opcjmptab[0xB6] = OpB6;
-    opcjmptab[0xB7] = OpB7;
-    opcjmptab[0xB8] = OpB8;
-    opcjmptab[0xB9] = OpB9;
-    opcjmptab[0xBA] = OpBA;
-    opcjmptab[0xBB] = OpBB;
-    opcjmptab[0xBC] = OpBC;
-    opcjmptab[0xBD] = OpBD;
-    opcjmptab[0xBE] = OpBE;
-    opcjmptab[0xBF] = OpBF;
-    opcjmptab[0xC0] = OpC0;
-    opcjmptab[0xC1] = OpC1;
-    opcjmptab[0xC2] = OpC2;
-    opcjmptab[0xC3] = OpC3;
-    opcjmptab[0xC4] = OpC4;
-    opcjmptab[0xC5] = OpC5;
-    opcjmptab[0xC6] = OpC6;
-    opcjmptab[0xC7] = OpC7;
-    opcjmptab[0xC8] = OpC8;
-    opcjmptab[0xC9] = OpC9;
-    opcjmptab[0xCA] = OpCA;
-    opcjmptab[0xCB] = OpCB;
-    opcjmptab[0xCC] = OpCC;
-    opcjmptab[0xCD] = OpCD;
-    opcjmptab[0xCE] = OpCE;
-    opcjmptab[0xCF] = OpCF;
-    opcjmptab[0xD0] = OpD0;
-    opcjmptab[0xD1] = OpD1;
-    opcjmptab[0xD2] = OpD2;
-    opcjmptab[0xD3] = OpD3;
-    opcjmptab[0xD4] = OpD4;
-    opcjmptab[0xD5] = OpD5;
-    opcjmptab[0xD6] = OpD6;
-    opcjmptab[0xD7] = OpD7;
-    opcjmptab[0xD8] = OpD8;
-    opcjmptab[0xD9] = OpD9;
-    opcjmptab[0xDA] = OpDA;
-    opcjmptab[0xDB] = OpDB;
-    opcjmptab[0xDC] = OpDC;
-    opcjmptab[0xDD] = OpDD;
-    opcjmptab[0xDE] = OpDE;
-    opcjmptab[0xDF] = OpDF;
-    opcjmptab[0xE0] = OpE0;
-    opcjmptab[0xE1] = OpE1;
-    opcjmptab[0xE2] = OpE2;
-    opcjmptab[0xE3] = OpE3;
-    opcjmptab[0xE4] = OpE4;
-    opcjmptab[0xE5] = OpE5;
-    opcjmptab[0xE6] = OpE6;
-    opcjmptab[0xE7] = OpE7;
-    opcjmptab[0xE8] = OpE8;
-    opcjmptab[0xE9] = OpE9;
-    opcjmptab[0xEA] = OpEA;
-    opcjmptab[0xEB] = OpEB;
-    opcjmptab[0xEC] = OpEC;
-    opcjmptab[0xED] = OpED;
-    opcjmptab[0xEE] = OpEE;
-    opcjmptab[0xEF] = OpEF;
-    opcjmptab[0xF0] = OpF0;
-    opcjmptab[0xF1] = OpF1;
-    opcjmptab[0xF2] = OpF2;
-    opcjmptab[0xF3] = OpF3;
-    opcjmptab[0xF4] = OpF4;
-    opcjmptab[0xF5] = OpF5;
-    opcjmptab[0xF6] = OpF6;
-    opcjmptab[0xF7] = OpF7;
-    opcjmptab[0xF8] = OpF8;
-    opcjmptab[0xF9] = OpF9;
-    opcjmptab[0xFA] = OpFA;
-    opcjmptab[0xFB] = OpFB;
-    opcjmptab[0xFC] = OpFC;
-    opcjmptab[0xFD] = OpFD;
-    opcjmptab[0xFE] = OpFE;
-    opcjmptab[0xFF] = OpFF;
+    opcjmptab[0x00] = SpcOp00;
+    opcjmptab[0x01] = SpcOp01;
+    opcjmptab[0x02] = SpcOp02;
+    opcjmptab[0x03] = SpcOp03;
+    opcjmptab[0x04] = SpcOp04;
+    opcjmptab[0x05] = SpcOp05;
+    opcjmptab[0x06] = SpcOp06;
+    opcjmptab[0x07] = SpcOp07;
+    opcjmptab[0x08] = SpcOp08;
+    opcjmptab[0x09] = SpcOp09;
+    opcjmptab[0x0A] = SpcOp0A;
+    opcjmptab[0x0B] = SpcOp0B;
+    opcjmptab[0x0C] = SpcOp0C;
+    opcjmptab[0x0D] = SpcOp0D;
+    opcjmptab[0x0E] = SpcOp0E;
+    opcjmptab[0x0F] = SpcOp0F;
+    opcjmptab[0x10] = SpcOp10;
+    opcjmptab[0x11] = SpcOp11;
+    opcjmptab[0x12] = SpcOp12;
+    opcjmptab[0x13] = SpcOp13;
+    opcjmptab[0x14] = SpcOp14;
+    opcjmptab[0x15] = SpcOp15;
+    opcjmptab[0x16] = SpcOp16;
+    opcjmptab[0x17] = SpcOp17;
+    opcjmptab[0x18] = SpcOp18;
+    opcjmptab[0x19] = SpcOp19;
+    opcjmptab[0x1A] = SpcOp1A;
+    opcjmptab[0x1B] = SpcOp1B;
+    opcjmptab[0x1C] = SpcOp1C;
+    opcjmptab[0x1D] = SpcOp1D;
+    opcjmptab[0x1E] = SpcOp1E;
+    opcjmptab[0x1F] = SpcOp1F;
+    opcjmptab[0x20] = SpcOp20;
+    opcjmptab[0x21] = SpcOp21;
+    opcjmptab[0x22] = SpcOp22;
+    opcjmptab[0x23] = SpcOp23;
+    opcjmptab[0x24] = SpcOp24;
+    opcjmptab[0x25] = SpcOp25;
+    opcjmptab[0x26] = SpcOp26;
+    opcjmptab[0x27] = SpcOp27;
+    opcjmptab[0x28] = SpcOp28;
+    opcjmptab[0x29] = SpcOp29;
+    opcjmptab[0x2A] = SpcOp2A;
+    opcjmptab[0x2B] = SpcOp2B;
+    opcjmptab[0x2C] = SpcOp2C;
+    opcjmptab[0x2D] = SpcOp2D;
+    opcjmptab[0x2E] = SpcOp2E;
+    opcjmptab[0x2F] = SpcOp2F;
+    opcjmptab[0x30] = SpcOp30;
+    opcjmptab[0x31] = SpcOp31;
+    opcjmptab[0x32] = SpcOp32;
+    opcjmptab[0x33] = SpcOp33;
+    opcjmptab[0x34] = SpcOp34;
+    opcjmptab[0x35] = SpcOp35;
+    opcjmptab[0x36] = SpcOp36;
+    opcjmptab[0x37] = SpcOp37;
+    opcjmptab[0x38] = SpcOp38;
+    opcjmptab[0x39] = SpcOp39;
+    opcjmptab[0x3A] = SpcOp3A;
+    opcjmptab[0x3B] = SpcOp3B;
+    opcjmptab[0x3C] = SpcOp3C;
+    opcjmptab[0x3D] = SpcOp3D;
+    opcjmptab[0x3E] = SpcOp3E;
+    opcjmptab[0x3F] = SpcOp3F;
+    opcjmptab[0x40] = SpcOp40;
+    opcjmptab[0x41] = SpcOp41;
+    opcjmptab[0x42] = SpcOp42;
+    opcjmptab[0x43] = SpcOp43;
+    opcjmptab[0x44] = SpcOp44;
+    opcjmptab[0x45] = SpcOp45;
+    opcjmptab[0x46] = SpcOp46;
+    opcjmptab[0x47] = SpcOp47;
+    opcjmptab[0x48] = SpcOp48;
+    opcjmptab[0x49] = SpcOp49;
+    opcjmptab[0x4A] = SpcOp4A;
+    opcjmptab[0x4B] = SpcOp4B;
+    opcjmptab[0x4C] = SpcOp4C;
+    opcjmptab[0x4D] = SpcOp4D;
+    opcjmptab[0x4E] = SpcOp4E;
+    opcjmptab[0x4F] = SpcOp4F;
+    opcjmptab[0x50] = SpcOp50;
+    opcjmptab[0x51] = SpcOp51;
+    opcjmptab[0x52] = SpcOp52;
+    opcjmptab[0x53] = SpcOp53;
+    opcjmptab[0x54] = SpcOp54;
+    opcjmptab[0x55] = SpcOp55;
+    opcjmptab[0x56] = SpcOp56;
+    opcjmptab[0x57] = SpcOp57;
+    opcjmptab[0x58] = SpcOp58;
+    opcjmptab[0x59] = SpcOp59;
+    opcjmptab[0x5A] = SpcOp5A;
+    opcjmptab[0x5B] = SpcOp5B;
+    opcjmptab[0x5C] = SpcOp5C;
+    opcjmptab[0x5D] = SpcOp5D;
+    opcjmptab[0x5E] = SpcOp5E;
+    opcjmptab[0x5F] = SpcOp5F;
+    opcjmptab[0x60] = SpcOp60;
+    opcjmptab[0x61] = SpcOp61;
+    opcjmptab[0x62] = SpcOp62;
+    opcjmptab[0x63] = SpcOp63;
+    opcjmptab[0x64] = SpcOp64;
+    opcjmptab[0x65] = SpcOp65;
+    opcjmptab[0x66] = SpcOp66;
+    opcjmptab[0x67] = SpcOp67;
+    opcjmptab[0x68] = SpcOp68;
+    opcjmptab[0x69] = SpcOp69;
+    opcjmptab[0x6A] = SpcOp6A;
+    opcjmptab[0x6B] = SpcOp6B;
+    opcjmptab[0x6C] = SpcOp6C;
+    opcjmptab[0x6D] = SpcOp6D;
+    opcjmptab[0x6E] = SpcOp6E;
+    opcjmptab[0x6F] = SpcOp6F;
+    opcjmptab[0x70] = SpcOp70;
+    opcjmptab[0x71] = SpcOp71;
+    opcjmptab[0x72] = SpcOp72;
+    opcjmptab[0x73] = SpcOp73;
+    opcjmptab[0x74] = SpcOp74;
+    opcjmptab[0x75] = SpcOp75;
+    opcjmptab[0x76] = SpcOp76;
+    opcjmptab[0x77] = SpcOp77;
+    opcjmptab[0x78] = SpcOp78;
+    opcjmptab[0x79] = SpcOp79;
+    opcjmptab[0x7A] = SpcOp7A;
+    opcjmptab[0x7B] = SpcOp7B;
+    opcjmptab[0x7C] = SpcOp7C;
+    opcjmptab[0x7D] = SpcOp7D;
+    opcjmptab[0x7E] = SpcOp7E;
+    opcjmptab[0x7F] = SpcOp7F;
+    opcjmptab[0x80] = SpcOp80;
+    opcjmptab[0x81] = SpcOp81;
+    opcjmptab[0x82] = SpcOp82;
+    opcjmptab[0x83] = SpcOp83;
+    opcjmptab[0x84] = SpcOp84;
+    opcjmptab[0x85] = SpcOp85;
+    opcjmptab[0x86] = SpcOp86;
+    opcjmptab[0x87] = SpcOp87;
+    opcjmptab[0x88] = SpcOp88;
+    opcjmptab[0x89] = SpcOp89;
+    opcjmptab[0x8A] = SpcOp8A;
+    opcjmptab[0x8B] = SpcOp8B;
+    opcjmptab[0x8C] = SpcOp8C;
+    opcjmptab[0x8D] = SpcOp8D;
+    opcjmptab[0x8E] = SpcOp8E;
+    opcjmptab[0x8F] = SpcOp8F;
+    opcjmptab[0x90] = SpcOp90;
+    opcjmptab[0x91] = SpcOp91;
+    opcjmptab[0x92] = SpcOp92;
+    opcjmptab[0x93] = SpcOp93;
+    opcjmptab[0x94] = SpcOp94;
+    opcjmptab[0x95] = SpcOp95;
+    opcjmptab[0x96] = SpcOp96;
+    opcjmptab[0x97] = SpcOp97;
+    opcjmptab[0x98] = SpcOp98;
+    opcjmptab[0x99] = SpcOp99;
+    opcjmptab[0x9A] = SpcOp9A;
+    opcjmptab[0x9B] = SpcOp9B;
+    opcjmptab[0x9C] = SpcOp9C;
+    opcjmptab[0x9D] = SpcOp9D;
+    opcjmptab[0x9E] = SpcOp9E;
+    opcjmptab[0x9F] = SpcOp9F;
+    opcjmptab[0xA0] = SpcOpA0;
+    opcjmptab[0xA1] = SpcOpA1;
+    opcjmptab[0xA2] = SpcOpA2;
+    opcjmptab[0xA3] = SpcOpA3;
+    opcjmptab[0xA4] = SpcOpA4;
+    opcjmptab[0xA5] = SpcOpA5;
+    opcjmptab[0xA6] = SpcOpA6;
+    opcjmptab[0xA7] = SpcOpA7;
+    opcjmptab[0xA8] = SpcOpA8;
+    opcjmptab[0xA9] = SpcOpA9;
+    opcjmptab[0xAA] = SpcOpAA;
+    opcjmptab[0xAB] = SpcOpAB;
+    opcjmptab[0xAC] = SpcOpAC;
+    opcjmptab[0xAD] = SpcOpAD;
+    opcjmptab[0xAE] = SpcOpAE;
+    opcjmptab[0xAF] = SpcOpAF;
+    opcjmptab[0xB0] = SpcOpB0;
+    opcjmptab[0xB1] = SpcOpB1;
+    opcjmptab[0xB2] = SpcOpB2;
+    opcjmptab[0xB3] = SpcOpB3;
+    opcjmptab[0xB4] = SpcOpB4;
+    opcjmptab[0xB5] = SpcOpB5;
+    opcjmptab[0xB6] = SpcOpB6;
+    opcjmptab[0xB7] = SpcOpB7;
+    opcjmptab[0xB8] = SpcOpB8;
+    opcjmptab[0xB9] = SpcOpB9;
+    opcjmptab[0xBA] = SpcOpBA;
+    opcjmptab[0xBB] = SpcOpBB;
+    opcjmptab[0xBC] = SpcOpBC;
+    opcjmptab[0xBD] = SpcOpBD;
+    opcjmptab[0xBE] = SpcOpBE;
+    opcjmptab[0xBF] = SpcOpBF;
+    opcjmptab[0xC0] = SpcOpC0;
+    opcjmptab[0xC1] = SpcOpC1;
+    opcjmptab[0xC2] = SpcOpC2;
+    opcjmptab[0xC3] = SpcOpC3;
+    opcjmptab[0xC4] = SpcOpC4;
+    opcjmptab[0xC5] = SpcOpC5;
+    opcjmptab[0xC6] = SpcOpC6;
+    opcjmptab[0xC7] = SpcOpC7;
+    opcjmptab[0xC8] = SpcOpC8;
+    opcjmptab[0xC9] = SpcOpC9;
+    opcjmptab[0xCA] = SpcOpCA;
+    opcjmptab[0xCB] = SpcOpCB;
+    opcjmptab[0xCC] = SpcOpCC;
+    opcjmptab[0xCD] = SpcOpCD;
+    opcjmptab[0xCE] = SpcOpCE;
+    opcjmptab[0xCF] = SpcOpCF;
+    opcjmptab[0xD0] = SpcOpD0;
+    opcjmptab[0xD1] = SpcOpD1;
+    opcjmptab[0xD2] = SpcOpD2;
+    opcjmptab[0xD3] = SpcOpD3;
+    opcjmptab[0xD4] = SpcOpD4;
+    opcjmptab[0xD5] = SpcOpD5;
+    opcjmptab[0xD6] = SpcOpD6;
+    opcjmptab[0xD7] = SpcOpD7;
+    opcjmptab[0xD8] = SpcOpD8;
+    opcjmptab[0xD9] = SpcOpD9;
+    opcjmptab[0xDA] = SpcOpDA;
+    opcjmptab[0xDB] = SpcOpDB;
+    opcjmptab[0xDC] = SpcOpDC;
+    opcjmptab[0xDD] = SpcOpDD;
+    opcjmptab[0xDE] = SpcOpDE;
+    opcjmptab[0xDF] = SpcOpDF;
+    opcjmptab[0xE0] = SpcOpE0;
+    opcjmptab[0xE1] = SpcOpE1;
+    opcjmptab[0xE2] = SpcOpE2;
+    opcjmptab[0xE3] = SpcOpE3;
+    opcjmptab[0xE4] = SpcOpE4;
+    opcjmptab[0xE5] = SpcOpE5;
+    opcjmptab[0xE6] = SpcOpE6;
+    opcjmptab[0xE7] = SpcOpE7;
+    opcjmptab[0xE8] = SpcOpE8;
+    opcjmptab[0xE9] = SpcOpE9;
+    opcjmptab[0xEA] = SpcOpEA;
+    opcjmptab[0xEB] = SpcOpEB;
+    opcjmptab[0xEC] = SpcOpEC;
+    opcjmptab[0xED] = SpcOpED;
+    opcjmptab[0xEE] = SpcOpEE;
+    opcjmptab[0xEF] = SpcOpEF;
+    opcjmptab[0xF0] = SpcOpF0;
+    opcjmptab[0xF1] = SpcOpF1;
+    opcjmptab[0xF2] = SpcOpF2;
+    opcjmptab[0xF3] = SpcOpF3;
+    opcjmptab[0xF4] = SpcOpF4;
+    opcjmptab[0xF5] = SpcOpF5;
+    opcjmptab[0xF6] = SpcOpF6;
+    opcjmptab[0xF7] = SpcOpF7;
+    opcjmptab[0xF8] = SpcOpF8;
+    opcjmptab[0xF9] = SpcOpF9;
+    opcjmptab[0xFA] = SpcOpFA;
+    opcjmptab[0xFB] = SpcOpFB;
+    opcjmptab[0xFC] = SpcOpFC;
+    opcjmptab[0xFD] = SpcOpFD;
+    opcjmptab[0xFE] = SpcOpFE;
+    opcjmptab[0xFF] = SpcOpFF;
 }
 
 void LPFstereo(s4* esi)
@@ -996,23 +998,25 @@ void MixEcho2(void)
     }
 }
 
-// --- BRR sample decoder (ported from cpu/dspproc.asm) -----------------------
+// --- BRR sample decoder (cpu/dspproc.asm) -----------------------------------
 //
-// A BRR block is 9 bytes: a header (range<<4 | filter<<2 | loop<<1 | end) then
-// 8 data bytes, each holding two 4-bit samples, for 16 samples per block. The
-// filter is a 2-tap IIR using the previous two output samples (prev0, prev1).
-// prev0/prev1 hold the running history and are updated per sample; the stored
-// sample is the (clamped, doubled, 16-bit-truncated) new prev0. All the shifts
-// are arithmetic, matching the original sar/imul code exactly.
+// A BRR block is 9 bytes: a header (range<<4 | filter<<2 | loop<<1 | end) and
+// 8 data bytes of two 4-bit samples each, so 16 samples. The filter is a 2-tap
+// IIR over prev0/prev1, the running output history; the stored sample is the
+// clamped, doubled, truncated new prev0. Every shift is arithmetic.
 
 // filter0 coefficient key selected by the header's filter field (0..3).
 static s4 brr_filter0(u1 const hdr)
 {
     switch ((hdr >> 2) & 0x03) {
-    case 1:  return 240;
-    case 2:  return 488;
-    case 3:  return 460;
-    default: return 0;
+    case 1:
+        return 240;
+    case 2:
+        return 488;
+    case 3:
+        return 460;
+    default:
+        return 0;
     }
 }
 
@@ -1039,11 +1043,13 @@ static s2 brr_next_sample(u1 const nibble, u1 const bshift, s4 const filter0)
         out += p0 + ((-(13 * p0)) >> 7) - (p1 >> 1) + (((p1 >> 1) + p1) >> 4);
     }
 
-    if (out < -32768) out = -32768;
-    if (out > 32767) out = 32767;
+    if (out < -32768)
+        out = -32768;
+    if (out > 32767)
+        out = 32767;
 
     prev1 = (u4)p0;
-    out = (s2)(out << 1); // double and truncate to 16 bits
+    out = (s2)((u4)out << 1); // double and truncate to 16 bits
     prev0 = (u4)out;
     return (s2)out;
 }
@@ -1184,8 +1190,8 @@ void BRRDecode(u4 const voice, u1* esi, s2* edi)
     }
 }
 
-extern u1 NoiseData[];   // defined in ui.c
-extern u4 NoiseInc;      // defined in cpu/dspproc.c
+extern u1 NoiseData[]; // defined in ui.c
+extern u4 NoiseInc; // defined in cpu/dspproc.c
 extern u4 NoisePointer;
 extern u1 PModBuffer[];
 
@@ -1250,7 +1256,7 @@ static void ProcessVoiceStuff(u4 const p1)
     };
 
     {
-        u2 const ax = *(u2 const*)&DSPMem[16 * p1 + 2];
+        u2 const ax = ld16u(&DSPMem[16 * p1 + 2]);
         if (Voice0Pitch[p1] != ax) { // Pitchc.
             Voice0Pitch[p1] = ax;
             // modpitch
@@ -1260,7 +1266,7 @@ static void ProcessVoiceStuff(u4 const p1)
 
     u4 esi = 0;
 
-SkipProcess2 : {
+SkipProcess2: {
     u1 const al = VolumeTableD[DSPMem[16 * p1 + 0]];
     u1 const bl = VolumeTableD[DSPMem[16 * p1 + 1]];
     Voice0VolumeRe[p1] = al;
@@ -1355,11 +1361,6 @@ SkipProcess2 : {
 
     ProcessBRR:
         if (Voice0End[p1] == 1) { // No decode 1 block.
-#if 0 // XXX was commented out
-			DSPMem[0x5C]    &= ~(1U << p1);
-			DSPMem[0x4C]    &= ~(1U << p1);
-			Voice0Looped[p1] = 0;
-#endif
             if (Voice0Loop[p1] != 1) { // End sample.
                 DSPMem[0x7C] |= 1U << p1;
                 DSPMem[16 * p1 + 8] = 0;
@@ -1367,39 +1368,14 @@ SkipProcess2 : {
                 DLPFsamples[p1][17] = 0;
                 DLPFsamples[p1][18] = 0;
                 DLPFsamples[p1][19] = 0;
-#if 0 // XXX was commented out
-				DSPMem[0x5C]        &= ~(1U << p1);
-#endif
                 Voice0EnvInc[p1] = 0;
                 Voice0IncNumber[p1] = 0;
                 Voice0Status[p1] = 0;
-#if 0 // XXX was commented out
-				DSPMem[16 * p1 + 9]  = 0;
-#endif
                 return;
             }
-#if 0 // XXX was commented out
-			Voice0Looped[p1] = 1;
-#endif
             SoundLooped0[p1] = 1;
             DSPMem[0x7C] |= 1U << p1;
-#if 0 // XXX was commented out
-			Voice0Prev0[p1] = 0;
-			Voice0Prev1[p1] = 0;
-#endif
-
-#if 0 // XXX was commented out
-			{
-				u2 const ax = DSPMem[0x5D] * 256 + DSPMem[16 * p1 + 4] * 4;
-				Voice0Ptr[p1]     = *(u2 const*)&SPCRAM[ax];
-				Voice0LoopPtr[p1] = *(u2 const*)&SPCRAM[ax + 2];
-			}
-#endif
-
             Voice0Ptr[p1] = Voice0LoopPtr[p1];
-#if 0 // XXX was commented out
-			Voice0Prev1[p1] = Voice0Prev0[p1];
-#endif
         }
 
         // Decode 1 block.
@@ -1446,7 +1422,9 @@ SkipProcess2 : {
         Voice0Prev1[p1] = prev1;
         Voice0Loop[p1] = loopbl;
         Voice0End[p1] = lastbl;
-        Voice0Ptr[p1] += 9;
+        /* A 16-bit address, as on the chip: a stream with no end flag walked
+           this past 64K and took the decode buffer with it. */
+        Voice0Ptr[p1] = (Voice0Ptr[p1] + 9) & 0xFFFFu;
     }
 
 ProcessNextEnvelope:

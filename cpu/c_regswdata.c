@@ -1,17 +1,13 @@
-/* The .data and .bss blocks that were in cpu/regsw.inc.
- *
- * The six sprite tables were file-local labels inside reg2101w, indexed as
- * `.objsize1+ebx`; they are global here because the block left the file, so
- * the handler names them reg2101w_* now. Their order and adjacency is what
- * that indexing relies on. Data-only file so the layout test can link it
- * alone; see cpu/c_regsdata.c for the rest of the register file.
- */
+/* The .data and .bss blocks from cpu/regsw.inc. The six sprite tables were
+   file-local labels inside reg2101w, indexed `.objsize1+ebx`; they are global
+   here (reg2101w_*) and that indexing still relies on their order and
+   adjacency. Data-only so the layout test can link it alone. */
 #include "../asmdata.h"
 
 /* clang-format off */
 
 __asm__(
-    ASM_SEC_DATA(".data")
+    ASM_SEC_DATA_ALIGNED(".data")
     ASM_GSYM(reg2101w_objsize1)
     ".byte 1, 1, 1, 4, 4, 16, 8, 8\n"
     ASM_GSYM(reg2101w_objsize2)
@@ -21,22 +17,22 @@ __asm__(
     ASM_GSYM(reg2101w_objmovs2)
     ".byte 2, 4, 8, 4, 8, 8, 4, 4\n"
     ASM_GSYM(reg2101w_objadds1)
-    ".word 14, 14, 14, 14, 14, 12, 14, 14\n"
+    ".short 14, 14, 14, 14, 14, 12, 14, 14\n"
     ASM_GSYM(reg2101w_objadds2)
-    ".word 14, 12, 8, 12, 8, 8, 12, 12\n"
+    ".short 14, 12, 8, 12, 8, 8, 12, 12\n"
     ASM_GSYM(bgscrolPrev)
     ".byte 0\n"
     ASM_GSYM(bg1scrolx_m7)
-    ".word 0\n"
+    ".short 0\n"
     ASM_GSYM(bg1scroly_m7)
-    ".word 0\n"
+    ".short 0\n"
     ASM_GSYM(multchange)
     ".byte 1\n"
     ASM_GSYM(m7byte)
     ".byte 0\n"
     ASM_SEC_END
 
-    ASM_SEC_BSS(".bss")
+    ASM_SEC_BSS_ALIGNED(".bss")
     ASM_GSYM(prevoamptr)
     ".skip 1\n"
     ASM_GSYM(oamlow)

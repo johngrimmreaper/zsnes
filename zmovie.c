@@ -1,30 +1,11 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
+#include "types.h" /* IGNORE_RESULT */
 
 #ifdef __UNIXSDL__
 #include "gblhdr.h"
 #include <signal.h>
 #define WRITE_BINARY "w"
 #define NULL_FILE "/dev/null"
-#include "linux/safelib.h"
+#include "unix/safelib.h"
 #else
 #define _POSIX_
 #include <ctype.h>
@@ -48,7 +29,6 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #ifndef _MSC_VER
 #include <unistd.h>
 #endif
-#include "asm_call.h"
 #include "c_init.h"
 #include "cfg.h"
 #include "cpu/dspproc.h"
@@ -72,7 +52,8 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #define NUMCONV_FW4
 #include "numconv.h"
 
-extern uint32_t versionNumber, CRC32, cur_zst_size;
+extern uint32_t versionNumber, CRC32;
+extern size_t cur_zst_size; /* size_t in zstate.c */
 extern uint8_t GUIReset, GUIQuit;
 bool MovieWaiting = false;
 
@@ -95,8 +76,6 @@ bool zst_compressed_loader(FILE*);
 
 u1 lameExists = 0;
 u1 mencoderExists = 0;
-
-/////////////////////////////////////////////////////////
 
 #ifdef DEBUG_INPUT
 #define debug_input_start useda = usedb = usedc = usedd = usede = 0;
@@ -142,14 +121,10 @@ static void print_bin(uint32_t num, uint32_t* used)
 #define debug_input_used
 #endif
 
-/////////////////////////////////////////////////////////
-
 /*
 ZMV Format
 
------------------------------------------------------------------
 Header
------------------------------------------------------------------
 
 3 bytes  -  "ZMV"
 2 bytes  -  ZMV Version # (version of ZSNES)
@@ -180,10 +155,7 @@ Header
 3 bytes  -  1 bit for compressed or not, 23 bits for size
 ZST size -  ZST (no thumbnail)
 
-
------------------------------------------------------------------
 Key input  -  Repeated for all input / internal chapters
------------------------------------------------------------------
 
 1 byte   - Flag Byte
   1 bit  -  Controller 1 changed
@@ -218,17 +190,11 @@ variable - Input
   Minimum 2 bytes (12 controller bits + 4 padded bits)
   Maximum 9 bytes (20 scope controller bits + 48 regular controller bits [12*4] + 4 padded bits)
 
-
------------------------------------------------------------------
 Internal chapter offsets  -  Repeated for all internal chapters
------------------------------------------------------------------
 
 4 bytes  -  Offset to chapter from beginning of file (after input flag byte for ZST)
 
-
------------------------------------------------------------------
 External chapters  -  Repeated for all external chapters
------------------------------------------------------------------
 
 ZST Size -  ZST (never compressed)
 4 bytes  -  Frame #
@@ -236,26 +202,17 @@ ZST Size -  ZST (never compressed)
 9 bytes  -  Maximum previous input (1 Scope [20] + 4 Regular [12*4] + 4 padded bits)
 4 bytes  -  Offset to input for current chapter from beginning of file
 
-
------------------------------------------------------------------
 External chapter count
------------------------------------------------------------------
 
 2 bytes  - Number of external chapters
 
------------------------------------------------------------------
 Author name
------------------------------------------------------------------
 
 Name Len - Author's name
 
 */
 
-/*
-
-ZMV header types, vars, and functions
-
-*/
+/* ZMV header types, vars, and functions */
 
 enum zmv_start_methods { zmv_sm_zst,
     zmv_sm_power,
@@ -362,23 +319,23 @@ static bool zmv_header_read(struct zmv_header* zmv_head, FILE* fp)
 {
     uint8_t flag;
 
-    fread(zmv_head->magic, 3, 1, fp);
+    IGNORE_RESULT(fread(zmv_head->magic, 3, 1, fp));
     zmv_head->zsnes_version = fread2(fp);
     zmv_head->rom_crc32 = fread4(fp);
     zmv_head->frames = fread4(fp);
     zmv_head->rerecords = fread4(fp);
     zmv_head->removed_frames = fread4(fp);
     zmv_head->incr_frames = fread4(fp);
-    fread(&zmv_head->average_fps, 1, 1, fp);
+    IGNORE_RESULT(fread(&zmv_head->average_fps, 1, 1, fp));
     zmv_head->key_combos = fread4(fp);
     zmv_head->internal_chapters = fread2(fp);
     zmv_head->author_len = fread2(fp);
     zmv_head->zst_size = fread3(fp);
     zmv_head->initial_input = fread2(fp);
-    fread(&flag, 1, 1, fp);
+    IGNORE_RESULT(fread(&flag, 1, 1, fp));
 
     if (feof(fp)) {
-        return (false);
+        return false;
     }
 
     switch (flag & (BIT(7) | BIT(6))) {
@@ -410,17 +367,13 @@ static bool zmv_header_read(struct zmv_header* zmv_head, FILE* fp)
     }
 
     if (flag & (BIT(4) | BIT(3) | BIT(2) | BIT(1) | BIT(0))) {
-        return (false);
+        return false;
     }
 
-    return (true);
+    return true;
 }
 
-/*
-
-Internal chapter types, vars, and functions
-
-*/
+/* Internal chapter types, vars, and functions */
 
 #define INTERNAL_CHAPTER_BUF_LIM 16
 struct internal_chapter_buf {
@@ -437,6 +390,9 @@ static void internal_chapter_add_offset(struct internal_chapter_buf* icb, size_t
 
     if (icb->used == INTERNAL_CHAPTER_BUF_LIM) {
         icb->next = (struct internal_chapter_buf*)malloc(sizeof(struct internal_chapter_buf));
+        if (!icb->next) {
+            return;
+        }
         icb = icb->next;
         memset(icb, 0, sizeof(struct internal_chapter_buf));
     }
@@ -567,19 +523,9 @@ static size_t internal_chapter_count_until(struct internal_chapter_buf* icb, siz
     return (chapter_count);
 }
 
-/*
+/* Bit Encoder and Decoder */
 
-Bit Encoder and Decoder
-
-*/
-
-/*
-When working with bits, you have to find the bits in a byte.
-
-Divide the amount of bits by 8 (bit_count >> 3) to find the proper byte.
-The proper bit number in the byte is the amount of bits modulo 8 (bit_count & 7).
-To get the most signifigant bit, you want the bit which is 7 minus the proper bit number.
-*/
+/* Bit n lives in byte n>>3, at bit 7 - (n & 7). */
 size_t bit_encoder(uint32_t data, uint32_t mask, uint8_t* buffer, size_t skip_bits)
 {
     uint_fast8_t bit_loop;
@@ -623,11 +569,7 @@ size_t bit_decoder(uint32_t* data, uint32_t mask, uint8_t* buffer, size_t skip_b
     return (skip_bits);
 }
 
-/*
-
-Shared var between record/replay functions
-
-*/
+/* Shared var between record/replay functions */
 
 #define WRITE_BUFFER_SIZE 1024
 static struct
@@ -700,6 +642,7 @@ static size_t pad_bit_encoder(uint8_t pad, uint8_t* buffer, size_t skip_bits)
 
             break;
         }
+        /* fallthrough */
 
     case 1:
         if ((zmv_vars.inputs_enabled & ((pad == 1) ? BIT(0xA) : BIT(0x9)))) // Mouse ?
@@ -770,6 +713,7 @@ static size_t pad_bit_decoder(uint8_t pad, uint8_t* buffer, size_t skip_bits)
 
             break;
         }
+        /* fallthrough */
 
     case 1:
         if (zmv_vars.inputs_enabled & ((pad == 1) ? BIT(0xA) : BIT(0x9))) // Mouse ?
@@ -830,11 +774,11 @@ static void write_last_joy_state(FILE* fp)
 
 static void read_last_joy_state(FILE* fp)
 {
-    fread(zmv_vars.write_buffer, 11, 1, fp);
+    IGNORE_RESULT(fread(zmv_vars.write_buffer, 11, 1, fp));
     load_last_joy_state(zmv_vars.write_buffer);
 }
 
-static void flush_input_buffer()
+static void flush_input_buffer(void)
 {
     if (zmv_vars.write_buffer_loc) {
         fwrite(zmv_vars.write_buffer, zmv_vars.write_buffer_loc, 1, zmv_vars.fp);
@@ -856,7 +800,7 @@ static void flush_input_buffer()
     zmv_vars.header.author_len = 0; // If we're writing, then author is erased if there
 }
 
-static void flush_input_if_needed()
+static void flush_input_if_needed(void)
 {
     if (zmv_vars.write_buffer_loc > WRITE_BUFFER_SIZE - 15) // 14 is a RLE buffer (5) + flag (1) + largest input (9)
     {
@@ -878,11 +822,7 @@ static size_t internal_chapter_length(size_t offset)
     return (icl);
 }
 
-/*
-
-Create and record ZMV
-
-*/
+/* Create and record ZMV */
 
 static bool zmv_create(char* filename)
 {
@@ -923,16 +863,21 @@ static bool zmv_create(char* filename)
 
         zst_save(zmv_vars.fp, false, true);
         zmv_vars.filename = (char*)malloc(filename_len + 1); //+1 for null
+        if (!zmv_vars.filename) {
+            fclose(zmv_vars.fp);
+            zmv_vars.fp = 0;
+            return false;
+        }
         strcpy(zmv_vars.filename, filename);
 
         debug_input_start;
 
-        return (true);
+        return true;
     }
-    return (false);
+    return false;
 }
 
-static void zmv_rle_flush()
+static void zmv_rle_flush(void)
 {
     if (zmv_vars.rle_count) {
         if (zmv_vars.rle_count > 5) {
@@ -1049,7 +994,7 @@ static void zmv_record(bool pause, uint8_t combos_used, uint8_t slow)
     zmv_vars.header.frames++;
 }
 
-static bool zmv_insert_chapter()
+static bool zmv_insert_chapter(void)
 {
     if ((zmv_vars.header.internal_chapters < 65535) && zmv_vars.header.frames && (zmv_vars.last_internal_chapter_offset != (ftell(zmv_vars.fp) + zmv_vars.write_buffer_loc - INT_CHAP_SIZE(zmv_vars.last_internal_chapter_offset)))) {
         uint8_t flag = BIT(2);
@@ -1066,12 +1011,12 @@ static bool zmv_insert_chapter()
         fwrite4(zmv_vars.header.frames, zmv_vars.fp);
         write_last_joy_state(zmv_vars.fp);
 
-        return (true);
+        return true;
     }
-    return (false);
+    return false;
 }
 
-static void zmv_record_finish()
+static void zmv_record_finish(void)
 {
     FILE* fp;
 
@@ -1096,7 +1041,7 @@ static void zmv_record_finish()
     internal_chapter_write(&zmv_vars.internal_chapters, zmv_vars.fp);
     internal_chapter_free_chain(zmv_vars.internal_chapters.next);
 
-    if (!zmv_vars.filename) {
+    if (zmv_vars.filename) {
         free(zmv_vars.filename);
         zmv_vars.filename = 0;
     }
@@ -1114,16 +1059,12 @@ static void zmv_record_finish()
     debug_input_used;
 }
 
-static size_t zmv_frames_recorded()
+static size_t zmv_frames_recorded(void)
 {
     return (zmv_vars.header.frames);
 }
 
-/*
-
-Open and replay ZMV
-
-*/
+/* Open and replay ZMV */
 
 typedef struct internal_chapter_buf external_chapter_buf;
 
@@ -1214,13 +1155,18 @@ static bool zmv_open(char* filename)
         fseek(zmv_vars.fp, zmv_open_vars.input_start_pos, SEEK_SET);
 
         zmv_vars.filename = (char*)malloc(filename_len + 1); //+1 for null
+        if (!zmv_vars.filename) {
+            fclose(zmv_vars.fp);
+            zmv_vars.fp = 0;
+            return false;
+        }
         strcpy(zmv_vars.filename, filename);
 
         debug_input_start;
 
-        return (true);
+        return true;
     }
-    return (false);
+    return false;
 }
 
 static bool zmv_replay_command(enum zmv_commands command)
@@ -1230,7 +1176,7 @@ static bool zmv_replay_command(enum zmv_commands command)
     default:
         break;
     }
-    return (false);
+    return false;
 }
 
 static void replay_pad(uint8_t pad, uint8_t flag, uint8_t* buffer, size_t* skip_bits)
@@ -1276,7 +1222,7 @@ static void replay_pad(uint8_t pad, uint8_t flag, uint8_t* buffer, size_t* skip_
             size_t leftover_bits = (8 - (*skip_bits & 7)) & 7;
             bits_needed -= leftover_bits;
 
-            fread(buffer + (*skip_bits >> 3) + ((*skip_bits & 7) ? 1 : 0), 1, (bits_needed >> 3) + ((bits_needed & 7) ? 1 : 0), zmv_vars.fp);
+            IGNORE_RESULT(fread(buffer + (*skip_bits >> 3) + ((*skip_bits & 7) ? 1 : 0), 1, (bits_needed >> 3) + ((bits_needed & 7) ? 1 : 0), zmv_vars.fp));
             *skip_bits = pad_bit_decoder(pad, buffer, *skip_bits);
         }
     }
@@ -1285,9 +1231,12 @@ static void replay_pad(uint8_t pad, uint8_t flag, uint8_t* buffer, size_t* skip_
     latchy = zmv_vars.last_joy_state.latchy;
 }
 
-static bool zmv_replay()
+/* A loop rather than the tail recursion this had: a command, an RLE run and a
+   chapter marker each continued the scan, and a movie made of markers - none
+   of which costs a frame - nested one call per marker. */
+static bool zmv_replay(void)
 {
-    if (zmv_open_vars.frames_replayed < zmv_vars.header.frames) {
+    while (zmv_open_vars.frames_replayed < zmv_vars.header.frames) {
         if (zmv_vars.rle_count) {
             JoyAOrig = zmv_vars.last_joy_state.A;
             JoyBOrig = zmv_vars.last_joy_state.B;
@@ -1303,7 +1252,7 @@ static bool zmv_replay()
             uint8_t flag = 0;
             zmv_vars.rle_count = 0;
 
-            fread(&flag, 1, 1, zmv_vars.fp);
+            IGNORE_RESULT(fread(&flag, 1, 1, zmv_vars.fp));
 
             if (flag & BIT(0)) // Command
             {
@@ -1311,24 +1260,24 @@ static bool zmv_replay()
                 if (command == zmv_command_reset) {
                     GUIReset = 1;
                     ReturnFromSPCStall = 0;
-                    return (true);
+                    return true;
                 }
                 if (zmv_replay_command(command)) {
-                    return (zmv_replay());
+                    continue;
                 }
-                return (false);
+                return false;
             }
 
             else if (flag & BIT(1)) // RLE
             {
                 zmv_vars.rle_count = fread4(zmv_vars.fp) - zmv_open_vars.frames_replayed;
-                return (zmv_replay());
+                continue;
             }
 
             else if (flag & BIT(2)) // Internal Chapter
             {
                 fseek(zmv_vars.fp, INT_CHAP_SIZE(ftell(zmv_vars.fp)), SEEK_CUR);
-                return (zmv_replay());
+                continue;
             }
 
             else {
@@ -1346,13 +1295,13 @@ static bool zmv_replay()
         }
 
         zmv_open_vars.frames_replayed++;
-        return (true);
+        return true;
     }
 
-    return (false);
+    return false;
 }
 
-static bool zmv_next_chapter()
+static bool zmv_next_chapter(void)
 {
     size_t current_loc = ftell(zmv_vars.fp);
 
@@ -1387,14 +1336,14 @@ static bool zmv_next_chapter()
         }
 
         zmv_vars.rle_count = 0;
-        return (true);
+        return true;
     }
 
-    return (false);
+    return false;
 }
 
 // Have playback start movie from beginning
-static void zmv_rewind_playback()
+static void zmv_rewind_playback(void)
 {
     fseek(zmv_vars.fp, zmv_open_vars.first_chapter_pos, SEEK_SET);
     zst_compressed_loader(zmv_vars.fp);
@@ -1405,7 +1354,7 @@ static void zmv_rewind_playback()
     memset(&zmv_vars.last_joy_state, 0, sizeof(zmv_vars.last_joy_state));
 }
 
-static void zmv_prev_chapter()
+static void zmv_prev_chapter(void)
 {
     size_t current_loc = ftell(zmv_vars.fp);
 
@@ -1468,7 +1417,7 @@ static void zmv_prev_chapter()
 }
 
 // External chapter
-static void zmv_add_chapter()
+static void zmv_add_chapter(void)
 {
     if ((zmv_open_vars.external_chapter_count < 65535) && zmv_open_vars.frames_replayed) {
         size_t current_loc = ftell(zmv_vars.fp);
@@ -1479,7 +1428,7 @@ static void zmv_add_chapter()
         if ((internal_chapter_pos(&zmv_open_vars.external_chapters, current_loc)) == 0xFFFFFFFF) {
             // Check if we have internal right here
             uint8_t flag;
-            fread(&flag, 1, 1, zmv_vars.fp);
+            IGNORE_RESULT(fread(&flag, 1, 1, zmv_vars.fp));
 
             if (!(flag & BIT(2))) {
                 char* author = 0;
@@ -1490,7 +1439,7 @@ static void zmv_add_chapter()
                 if (zmv_vars.header.author_len) {
                     if ((author = (char*)malloc(zmv_vars.header.author_len))) {
                         fseek(zmv_vars.fp, -(zmv_vars.header.author_len), SEEK_END);
-                        fread(author, zmv_vars.header.author_len, 1, zmv_vars.fp);
+                        IGNORE_RESULT(fread(author, zmv_vars.header.author_len, 1, zmv_vars.fp));
                     }
                 }
 
@@ -1516,11 +1465,11 @@ static void zmv_add_chapter()
     }
 }
 
-static void zmv_replay_finished()
+static void zmv_replay_finished(void)
 {
     internal_chapter_free_chain(zmv_vars.internal_chapters.next);
     internal_chapter_free_chain(zmv_open_vars.external_chapters.next);
-    if (!zmv_vars.filename) {
+    if (zmv_vars.filename) {
         free(zmv_vars.filename);
         zmv_vars.filename = 0;
     }
@@ -1530,7 +1479,7 @@ static void zmv_replay_finished()
     }
 }
 
-static void zmv_replay_to_record()
+static void zmv_replay_to_record(void)
 {
     internal_chapter_free_chain(zmv_open_vars.external_chapters.next);
     zmv_vars.header.rerecords++;
@@ -1546,10 +1495,10 @@ static void zmv_replay_to_record()
         zmv_vars.rle_count = 0;
     }
 
-    ftruncate(fileno(zmv_vars.fp), ftell(zmv_vars.fp));
+    IGNORE_RESULT(ftruncate(fileno(zmv_vars.fp), ftell(zmv_vars.fp)));
 }
 
-static size_t zmv_frames_replayed()
+static size_t zmv_frames_replayed(void)
 {
     return (zmv_open_vars.frames_replayed);
 }
@@ -1575,19 +1524,15 @@ static bool zmv_append(char* filename)
 
                 zmv_replay_to_record();
                 zmv_vars.header.rerecords--; // Remove the rerecord count added by replay to record
-                return (true);
+                return true;
             }
         }
         mzt_chdir_down();
         zmv_replay_finished();
     }
-    return (false);
+    return false;
 }
-/*
-
-Rewind related functions and vars
-
-*/
+/* Rewind related functions and vars */
 
 struct zmv_rewind {
     uint8_t last_joy_state[10];
@@ -1603,7 +1548,7 @@ static void zmv_alloc_rewind_buffer(uint8_t rewind_states)
     zmv_rewind_buffer = (struct zmv_rewind*)malloc(sizeof(struct zmv_rewind) * rewind_states);
 }
 
-static void zmv_dealloc_rewind_buffer()
+static void zmv_dealloc_rewind_buffer(void)
 {
     if (zmv_rewind_buffer) {
         free(zmv_rewind_buffer);
@@ -1613,6 +1558,9 @@ static void zmv_dealloc_rewind_buffer()
 
 void zmv_rewind_save(size_t state, bool playback)
 {
+    if (!zmv_rewind_buffer) {
+        return;
+    }
     save_last_joy_state(zmv_rewind_buffer[state].last_joy_state);
     zmv_rewind_buffer[state].file_pos = ftell(zmv_vars.fp) + zmv_vars.write_buffer_loc;
     zmv_rewind_buffer[state].frames = playback ? zmv_open_vars.frames_replayed : zmv_vars.header.frames;
@@ -1621,7 +1569,12 @@ void zmv_rewind_save(size_t state, bool playback)
 
 void zmv_rewind_load(size_t state, bool playback)
 {
-    size_t file_pos = zmv_rewind_buffer[state].file_pos;
+    size_t file_pos;
+
+    if (!zmv_rewind_buffer) {
+        return;
+    }
+    file_pos = zmv_rewind_buffer[state].file_pos;
     load_last_joy_state(zmv_rewind_buffer[state].last_joy_state);
 
     if (playback) {
@@ -1637,20 +1590,16 @@ void zmv_rewind_load(size_t state, bool playback)
         zmv_vars.rle_count = zmv_rewind_buffer[state].rle_count;
 
         fseek(zmv_vars.fp, file_pos, SEEK_SET);
-        ftruncate(fileno(zmv_vars.fp), file_pos);
+        IGNORE_RESULT(ftruncate(fileno(zmv_vars.fp), file_pos));
 
         zmv_vars.header.internal_chapters = internal_chapter_delete_after(&zmv_vars.internal_chapters, file_pos);
         zmv_vars.last_internal_chapter_offset = internal_chapter_lesser(&zmv_vars.internal_chapters, ~0);
     }
 }
 
-/*
+/* Save and load MZT */
 
-Save and load MZT
-
-*/
-
-size_t mzt_filename_generate()
+size_t mzt_filename_generate(void)
 {
     size_t filename_len = strlen(zmv_vars.filename);
     memcpy(zmv_vars.filename + filename_len - 3, "mz", 2);
@@ -1663,14 +1612,14 @@ size_t mzt_filename_generate()
     return (filename_len);
 }
 
-void mzt_chdir_up()
+void mzt_chdir_up(void)
 {
     mzt_filename_generate();
     strcat(ZMoviePath, zmv_vars.filename);
     strcatslash(ZMoviePath);
 }
 
-void mzt_chdir_down()
+void mzt_chdir_down(void)
 {
     strdirname(ZMoviePath);
     strcatslash(ZMoviePath);
@@ -1838,7 +1787,7 @@ bool mzt_load(int position, bool playback)
 
                     fseek(zmv_vars.fp, rewind_point, SEEK_SET);
                     zmv_vars.last_internal_chapter_offset = internal_chapter_lesser(&zmv_vars.internal_chapters, ~0);
-                    ftruncate(fileno(zmv_vars.fp), ftell(zmv_vars.fp));
+                    IGNORE_RESULT(ftruncate(fileno(zmv_vars.fp), ftell(zmv_vars.fp)));
                 }
             } else {
                 zmv_open_vars.frames_replayed = current_frame;
@@ -1852,13 +1801,7 @@ bool mzt_load(int position, bool playback)
     return (mzt_loaded);
 }
 
-/////////////////////////////////////////////////////////
-
-/*
-
-Code for dumping raw video
-
-*/
+/* Code for dumping raw video */
 
 #define RAW_WIDTH 256
 #define RAW_HEIGHT 224
@@ -1883,20 +1826,16 @@ Code for dumping raw video
 // Code using this by Bisqwit
 // Used by raw videos for calculating sample rate
 
-static const uint32_t freqtab[] = { 8000, 11025, 22050, 44100, 16000, 32000, 48000 };
-#define RATE freqtab[SoundQuality]
+/* Matches what the mixer renders at (unix/audio.c). */
+#define RATE 32000
 
 // 0 = None; 1 Logging, but not now, 2 Log now
 uint8_t AudioLogging;
 
 extern uint8_t ZMVRawDump;
 
-/*
-Replaces a substring of str. The replace begins at the beginning of str for rep_len length.
-The new charaters are taken from new_str. The entire length of str will not exceed n.
-Amount need to contain the entire replaced str is returned.
-Thus if return is <= n, the replace was performed.
-*/
+/* Replace the first rep_len bytes of str with new_str, capped at n. Returns the
+   length the result needs; <= n means it was written. */
 static size_t string_replace(char* str, size_t rep_len, const char* new_str, size_t n)
 {
     size_t str_len = strlen(str);
@@ -2063,7 +2002,7 @@ static void raw_embed_logo(bool audio)
 
 static uint8_t movie_current_pass = 0;
 
-static void raw_video_close()
+static void raw_video_close(void)
 {
     bool audio_and_video = raw_vid.vp && raw_vid.ap;
 
@@ -2120,7 +2059,7 @@ static void raw_video_close()
     signal(SIGPIPE, SIG_IGN);
 }
 
-static bool raw_video_open()
+static bool raw_video_open(void)
 {
     if (ZMVRawDump) // Command line
     {
@@ -2152,12 +2091,12 @@ static bool raw_video_open()
             if (*md_logo) {
                 raw_embed_logo(false);
             }
-            return (true);
+            return true;
         }
         break;
 
     default:
-        return (false);
+        return false;
         break;
     }
 
@@ -2165,7 +2104,7 @@ static bool raw_video_open()
         if (*md_logo) {
             raw_embed_logo(false);
         }
-        return (true);
+        return true;
     }
 
     if ((!MovieVideoMode || raw_vid.vp) && MovieAudio) {
@@ -2206,12 +2145,12 @@ static bool raw_video_open()
             if (MovieVideoMode && *md_logo) {
                 raw_embed_logo(true);
             }
-            return (true);
+            return true;
         }
     }
 
     raw_video_close();
-    return (false);
+    return false;
 }
 
 static void raw_audio_write(uint32_t samples)
@@ -2244,7 +2183,7 @@ static void raw_audio_write(uint32_t samples)
     }
 }
 
-static void raw_video_write_frame()
+static void raw_video_write_frame(void)
 {
     if (raw_vid.vp) {
         size_t x, y;
@@ -2271,24 +2210,11 @@ static void raw_video_write_frame()
     }
 }
 
-/////////////////////////////////////////////////////////
+/* Movie subtitles. gamename.zmv takes gamename.sub beside it, gamename.zm1
+   takes gamename.su1, and so on. One "startframe:duration:message" per line:
 
-/*
-Nach's insane subtitle library for movies files :)
-
-The filename would be gamename.sub in the same directory the ZMV would be in.
-If you're playing gamename.zm1, then the sub file will be gamename.su1 etc...
-
-Format of the sub file:
-Start Frame:Frame Duration:Message
-
-Example:
-1:180:Hi how are you?
-300:180:Isn't this cool?
-700:180:This is great :)
-2500:375:Kill 'em!
-3500:20:Did you see this? Of course not
-*/
+     1:180:Hi how are you?
+     2500:375:Kill 'em! */
 
 static struct
 {
@@ -2304,7 +2230,7 @@ static void MovieSub_Open(const char* filename)
     MovieSub.fp = fopen_dir(ZMoviePath, filename, "r");
 }
 
-static void MovieSub_Close()
+static void MovieSub_Close(void)
 {
     if (MovieSub.fp) {
         fclose(MovieSub.fp);
@@ -2352,7 +2278,7 @@ static char* MovieSub_GetData(size_t frame_count)
     return (0);
 }
 
-static void MovieSub_ResetStream()
+static void MovieSub_ResetStream(void)
 {
     if (MovieSub.fp) {
         rewind(MovieSub.fp);
@@ -2361,12 +2287,10 @@ static void MovieSub_ResetStream()
     }
 }
 
-static size_t MovieSub_GetDuration()
+static size_t MovieSub_GetDuration(void)
 {
     return (MovieSub.message_duration);
 }
-
-/////////////////////////////////////////////////////////
 
 bool RawDumpInProgress = false;
 bool PrevSRAMState;
@@ -2434,13 +2358,9 @@ static void DumpVideoFrame(bool playback_over)
     }
 }
 
-/*
+/* Code to playback old ZMVs */
 
-Code to playback old ZMVs
-
-*/
-
-static void OldMovieReplay()
+static void OldMovieReplay(void)
 {
     uint8_t byte;
 
@@ -2451,11 +2371,11 @@ static void OldMovieReplay()
 
             if (byte == 0) // 0 means the input has changed
             {
-                fread(&old_movie.last_joy_state.A, 1, 4, old_movie.fp);
-                fread(&old_movie.last_joy_state.B, 1, 4, old_movie.fp);
-                fread(&old_movie.last_joy_state.C, 1, 4, old_movie.fp);
-                fread(&old_movie.last_joy_state.D, 1, 4, old_movie.fp);
-                fread(&old_movie.last_joy_state.E, 1, 4, old_movie.fp);
+                IGNORE_RESULT(fread(&old_movie.last_joy_state.A, 1, 4, old_movie.fp));
+                IGNORE_RESULT(fread(&old_movie.last_joy_state.B, 1, 4, old_movie.fp));
+                IGNORE_RESULT(fread(&old_movie.last_joy_state.C, 1, 4, old_movie.fp));
+                IGNORE_RESULT(fread(&old_movie.last_joy_state.D, 1, 4, old_movie.fp));
+                IGNORE_RESULT(fread(&old_movie.last_joy_state.E, 1, 4, old_movie.fp));
             }
 
             JoyAOrig = old_movie.last_joy_state.A;
@@ -2502,7 +2422,7 @@ static void OldMoviePlay(FILE* fp)
 {
     uint8_t RecData[16];
     extern uint8_t NextLineCache;
-    void loadstate2();
+    void loadstate2(void);
 
     memset(&old_movie, 0, sizeof(old_movie));
     old_movie.fp = fp;
@@ -2512,7 +2432,7 @@ static void OldMoviePlay(FILE* fp)
     SetMovieMode(MOVIE_OFF);
 
     fseek(fp, Totalbyteloaded, SEEK_SET);
-    fread(RecData, 1, 16, fp);
+    IGNORE_RESULT(fread(RecData, 1, 16, fp));
     printf("Movie made with version: %d\n", RecData[1]);
 
     if (RecData[2] == 1) {
@@ -2529,7 +2449,7 @@ static void OldMoviePlay(FILE* fp)
 
     if (soundon == RecData[0]) {
         if (ramsize) {
-            fread(sram, 1, ramsize, fp);
+            IGNORE_RESULT(fread(sram, 1, ramsize, fp));
         }
 
         SetMovieMode(MOVIE_OLD_PLAY);
@@ -2625,7 +2545,7 @@ void MovieSeekBehind(void)
     MessageOn = MsgCount;
 }
 
-void Replay()
+void Replay(void)
 {
     if (zmv_replay()) {
         char* sub;
@@ -2654,7 +2574,7 @@ void Replay()
     }
 }
 
-void ProcessMovies()
+void ProcessMovies(void)
 {
     switch (MovieProcessing) {
     case MOVIE_PLAYBACK:
@@ -2687,7 +2607,7 @@ void SkipMovie(void)
     MovieRecordWinVal = 0;
 }
 
-void MovieStop()
+void MovieStop(void)
 {
     if (MovieProcessing && !MovieWaiting) {
         if ((MovieForcedLengthEnabled == 2) || movie_current_pass) {
@@ -2736,9 +2656,9 @@ void MovieStop()
     MovieWaiting = false;
 }
 
-void InitRewindVarsForMovie();
+void InitRewindVarsForMovie(void);
 
-void MoviePlay()
+void MoviePlay(void)
 {
     if (!MovieProcessing) {
         size_t fname_len = strlen(ZSaveName);
@@ -2753,7 +2673,7 @@ void MoviePlay()
 
         if ((fp = fopen_dir(ZMoviePath, ZSaveName, "rb"))) {
             char header_buf[3];
-            fread(header_buf, 3, 1, fp);
+            IGNORE_RESULT(fread(header_buf, 3, 1, fp));
 
             if (!strncmp("ZMV", header_buf, 3)) // New Enhanced Format
             {
@@ -2789,7 +2709,7 @@ void MoviePlay()
     }
 }
 
-void MovieRecord()
+void MovieRecord(void)
 {
     if (MovieProcessing == MOVIE_PLAYBACK) {
         zmv_replay_to_record();
@@ -2847,7 +2767,7 @@ void MovieRecord()
     }
 }
 
-void MovieAppend()
+void MovieAppend(void)
 {
     if (!MovieProcessing) {
         size_t fname_len = strlen(ZSaveName);
@@ -2916,7 +2836,7 @@ void MovieDumpRaw(void)
     }
 }
 
-bool MovieInProgress()
+bool MovieInProgress(void)
 {
     return ((MovieProcessing == MOVIE_PLAYBACK) || (MovieProcessing == MOVIE_RECORD));
 }

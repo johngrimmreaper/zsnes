@@ -2,7 +2,6 @@
 #include <string.h>
 #include <strings.h>
 
-#include "asm_call.h"
 #include "c_init.h"
 #include "c_intrf.h"
 #include "cfg.h"
@@ -172,7 +171,7 @@ static void ProcSNESMouse(u4* const device)
         d |= 0x00100000;
     if (mousebuttons & 0x01)
         d |= 0x00400000;
-    d = d & 0xFFFF0000 | 0x00010000 | (mouseypos & 0x7F) << 8 | (mousexpos & 0x7F);
+    d = (d & 0xFFFF0000) | 0x00010000 | (mouseypos & 0x7F) << 8 | (mousexpos & 0x7F);
     if (mouseydir & 0x01)
         d |= 0x00008000;
     if (mousexdir & 0x01)
@@ -271,12 +270,10 @@ static void PlayerDeviceFix(u4* const device)
     *device = d;
 }
 
-// Debug: scripted player-1 input, driven by the DEBUG_INPUT_SCRIPT env var.
-// Format is a comma-separated list of BUTTON,MS pairs, e.g. "A,200,B,200"
-// (hold A for 200ms, then hold B for 200ms). Buttons are case-insensitive:
-// A B X Y L R START SELECT UP DOWN LEFT RIGHT. Timing is frame-deterministic
-// (converted to NTSC 60fps frames), so it replays identically regardless of
-// host speed. Meant for headless reproduction (see ASCII_SCREENSHOT_EVERY_FIVE).
+// Debug: scripted player-1 input from DEBUG_INPUT_SCRIPT, a comma-separated
+// list of BUTTON,MS pairs like "A,200,B,200". Buttons are case-insensitive:
+// A B X Y L R START SELECT UP DOWN LEFT RIGHT NONE. Times convert to NTSC
+// frames, so a run replays identically whatever the host speed.
 static u4 DebugInputButtonMask(const char* name, size_t len)
 {
     static const struct {
@@ -293,6 +290,62 @@ static u4 DebugInputButtonMask(const char* name, size_t len)
             return tbl[i].mask;
     return 0;
 }
+
+#ifdef ZSNES_DEBUG_HOOKS
+/* ZSNES_HOTKEY="save:240,load:300,rewind:400": press the save-state,
+   load-state or rewind key at an emulated frame, so the path a player takes
+   through F-keys can be driven headlessly. Each entry fires once. */
+extern u4 KeySaveState, KeyLoadState, KeyRewind;
+extern unsigned zsnes_emulated_frame;
+
+static void DebugHotkeyScript(void)
+{
+    static struct {
+        u4 frame;
+        u1 key; /* 0 save, 1 load, 2 rewind */
+        u1 done;
+    } steps[16];
+    static u4 nsteps = 0;
+    static int inited = 0;
+    u4 i;
+
+    if (!inited) {
+        char const* s = getenv("ZSNES_HOTKEY");
+
+        inited = 1;
+        while (s && *s && nsteps < 16) {
+            u1 const key = strncasecmp(s, "load", 4) == 0 ? 1
+                : strncasecmp(s, "rewind", 6) == 0        ? 2
+                                                          : 0;
+
+            while (*s && *s != ':')
+                s++;
+            if (*s == ':')
+                s++;
+            steps[nsteps].frame = 0;
+            while (*s >= '0' && *s <= '9')
+                steps[nsteps].frame = steps[nsteps].frame * 10 + (u4)(*s++ - '0');
+            steps[nsteps].key = key;
+            nsteps++;
+            if (*s == ',')
+                s++;
+        }
+    }
+
+    for (i = 0; i < nsteps; i++) {
+        if (steps[i].done || steps[i].frame != zsnes_emulated_frame)
+            continue;
+        u4 const key = steps[i].key == 2 ? KeyRewind : steps[i].key == 1 ? KeyLoadState
+                                                                         : KeySaveState;
+
+        steps[i].done = 1;
+        pressed[key] = 1;
+        fprintf(stderr, "HOTKEY frame=%u %s\n", zsnes_emulated_frame,
+            steps[i].key == 2 ? "rewind" : steps[i].key == 1 ? "load"
+                                                             : "save");
+    }
+}
+#endif
 
 // Returns the scripted player-1 button mask for the current frame, or 0.
 static u4 DebugInputScript(void)
@@ -402,7 +455,7 @@ void ReadInputDevice(void)
         ProcSNESMouse(&JoyBOrig);
     } else if (device2 == 2) {
         processmouse2();
-        u4 j = JoyBOrig & 0x0000FFFF | 0x00FF0000 | ssautosw << 24;
+        u4 j = (JoyBOrig & 0x0000FFFF) | 0x00FF0000 | ssautosw << 24;
         if (mousebuttons & 0x01)
             j |= 0x80000000;
         if (pressed[SSPause] != 0)
@@ -553,6 +606,10 @@ void ReadInputDevice(void)
         if (device2 == 0)
             JoyBOrig = JoyDOrig;
     }
+
+#ifdef ZSNES_DEBUG_HOOKS
+    DebugHotkeyScript();
+#endif
 
     // Debug scripted input (DEBUG_INPUT_SCRIPT) overrides player-1 buttons.
     u4 scripted = DebugInputScript();
