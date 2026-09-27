@@ -1,24 +1,30 @@
 #include <stdio.h>
+#ifdef __UNIXSDL__
+#include "../unix/audio.h"
+#include "../unix/sdllink.h"
+#endif
 #include <string.h>
 
 #ifdef __UNIXSDL__
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netdb.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
-#include "../asm_call.h"
 #include "../c_init.h"
 #include "../c_intrf.h"
-#include "../cfg.h"
 #include "../cpu/regs.h"
-#include "../input.h"
+#include "../gblhdr.h"
+#include "../net/netplay.h"
 #include "../ui.h"
 #include "../ver.h"
 #include "../zmovie.h"
@@ -27,15 +33,17 @@
 #include "../ztimec.h"
 #include "c_gui.h"
 #include "c_guiwindp.h"
+#include "cfg.h"
 #include "gui.h"
 #include "guicombo.h"
 #include "guifuncs.h"
 #include "guikeys.h"
 #include "guitools.h"
 #include "guiwindp.h"
+#include "input.h"
 
 #if defined __UNIXSDL__ && defined __OPENGL__
-#include "../linux/gl_draw.h"
+#include "../unix/gl_draw.h"
 #endif
 
 char CMovieExt = 'v';
@@ -46,7 +54,6 @@ char GUIChoseSlotTextX[] = "-";
 char GUIComboTextH[21];
 char GUILoadTextA[38];
 u1 GUIFreshInputSelect = 1;
-u1 NetplayUDPConfig = 1;
 u1 GUILoadPos;
 u1 GUIStatesText5 = 0;
 u1 GUIWincoladd;
@@ -303,64 +310,64 @@ static void GUIDrawTabs(u4 const* const p1, u4* const peax, u4 const ebx) // tab
  * - if p2 has the form a + b, then 2 * b must be added to p4
  * - if p3 has the form a + b, then 2 * b must be added to p5
  */
-static void DrawGUIWinBox(u4 const p1, u4 const p2, u4 const p3, u4 const p4, u4 const p5, u4 const p6)
+static void DrawGUIWinBox(u4 const p1, u4 const x, u4 const y, u4 const p4, u4 const p5, u4 const p6)
 {
-    s4 const eax = GUIwinposx[p1] + p2;
-    s4 const ebx = GUIwinposy[p1] + p3;
-    s4 const ecx = eax + p4 - p2 + 1;
-    u4 const esi = p5 - p3 + 1;
+    s4 const eax = GUIwinposx[p1] + x;
+    s4 const ebx = GUIwinposy[p1] + y;
+    s4 const ecx = eax + p4 - x + 1;
+    u4 const esi = p5 - y + 1;
     GUIRect(eax, ecx, ebx, esi, p6);
 }
 
-static void DrawGUIButton(u4 const p1, u4 const p2, u4 const p3, u4 const p4, u4 const p5, char const* const p6, u4 const p7, u4 const p8, u4 const p9)
+static void DrawGUIButton(u4 const p1, u4 const x, u4 const y, u4 const p4, u4 const p5, char const* const p6, u4 const p7, u4 const p8, u4 const p9)
 {
     u1 const colour = GUIWincoladd == 0 ? 217 : 211;
     bool const held = GUICBHold == p7;
-    DrawGUIWinBox(p1, p2, p3, p4, p3, colour + (held ? -18 : -5));
-    DrawGUIWinBox(p1, p2, p3, p2, p5, colour + (held ? -16 : -8));
-    DrawGUIWinBox(p1, p2 + 1, p3 + 1, p4, p5, colour + (held ? -14 : -11));
-    DrawGUIWinBox(p1, p4 + 1, p3 + 1, p4, p5, colour + (held ? -12 : -14));
-    DrawGUIWinBox(p1, p2, p5, p4 - 1, p5, colour + (held ? -10 : -17));
+    DrawGUIWinBox(p1, x, y, p4, y, colour + (held ? -18 : -5));
+    DrawGUIWinBox(p1, x, y, x, p5, colour + (held ? -16 : -8));
+    DrawGUIWinBox(p1, x + 1, y + 1, p4, p5, colour + (held ? -14 : -11));
+    DrawGUIWinBox(p1, p4 + 1, y + 1, p4, p5, colour + (held ? -12 : -14));
+    DrawGUIWinBox(p1, x, p5, p4 - 1, p5, colour + (held ? -10 : -17));
     if (!held) {
-        GUIOuttextwin2(p1, p2 + 5 + p8, p3 + 4 + p9, p6, colour - 15);
-        GUIOuttextwin2(p1, p2 + 4 + p8, p3 + 3 + p9, p6, colour);
+        GUIOuttextwin2(p1, x + 5 + p8, y + 4 + p9, p6, colour - 15);
+        GUIOuttextwin2(p1, x + 4 + p8, y + 3 + p9, p6, colour);
     } else {
-        GUIOuttextwin2(p1, p2 + 6 + p8, p3 + 5 + p9, p6, colour - 18);
-        GUIOuttextwin2(p1, p2 + 5 + p8, p3 + 4 + p9, p6, colour - 3);
+        GUIOuttextwin2(p1, x + 6 + p8, y + 5 + p9, p6, colour - 18);
+        GUIOuttextwin2(p1, x + 5 + p8, y + 4 + p9, p6, colour - 3);
     }
 }
 
-static void GUIDisplayTextY(u4 const p1, u4 const p2, u4 const p3, char const* const p4) // Yellow Text&Shadow
+static void GUIDisplayTextY(u4 const p1, u4 const x, u4 const y, char const* const p4) // Yellow Text&Shadow
 {
-    GUIOuttextwin2(p1, p2, p3, p4, GUIWincol);
-    GUIOuttextwin2(p1, p2 - 1, p3 - 1, p4, GUIWincoladd == 0 ? 163 : 164);
+    GUIOuttextwin2(p1, x, y, p4, GUIWincol);
+    GUIOuttextwin2(p1, x - 1, y - 1, p4, GUIWincoladd == 0 ? 163 : 164);
 }
 
-static void GUIDisplayText(u4 const p1, u4 const p2, u4 const p3, char const* const p4) // Text&Shadow
+static void GUIDisplayText(u4 const p1, u4 const x, u4 const y, char const* const p4) // Text&Shadow
 {
     u1 const colour = GUIWincoladd == 0 ? 202 : 196;
-    GUIOuttextwin2(p1, p2, p3, p4, colour);
-    GUIOuttextwin2(p1, p2 - 1, p3 - 1, p4, colour + 15);
+    GUIOuttextwin2(p1, x, y, p4, colour);
+    GUIOuttextwin2(p1, x - 1, y - 1, p4, colour + 15);
 }
 
-static void GUIDisplayBBox(u4 const p1, u4 const p2, u4 const p3, u4 const p4, u4 const p5, u4 const p6) // Black Box W/Border
+static void GUIDisplayBBox(u4 const p1, u4 const x, u4 const y, u4 const p4, u4 const p5, u4 const p6) // Black Box W/Border
 {
     GUIWincol = cwindrawn == 0 ? 148 : cwindrawn == 1 ? 148 + 5
                                                       : 148 + 10;
-    DrawGUIWinBox(p1, p2, p3, p4, p5, p6);
-    DrawGUIWinBox(p1, p2, p3 - 3 + 2, p4, p3 - 1, GUIWincol);
-    DrawGUIWinBox(p1, p2 - 1, p3, p2 - 2, p5, GUIWincol + 1);
-    DrawGUIWinBox(p1, p2, p5 + 1, p4, p5 + 1, GUIWincol + 4);
-    DrawGUIWinBox(p1, p4 + 2, p3, p4 + 1, p5, GUIWincol + 3);
+    DrawGUIWinBox(p1, x, y, p4, p5, p6);
+    DrawGUIWinBox(p1, x, y - 3 + 2, p4, y - 1, GUIWincol);
+    DrawGUIWinBox(p1, x - 1, y, x - 2, p5, GUIWincol + 1);
+    DrawGUIWinBox(p1, x, p5 + 1, p4, p5 + 1, GUIWincol + 4);
+    DrawGUIWinBox(p1, p4 + 2, y, p4 + 1, p5, GUIWincol + 3);
 }
 
-static void GUIDisplayTextG(u4 const p1, u4 const p2, u4 const p3, char const* const p4) // Green Text&Shadow
+static void GUIDisplayTextG(u4 const p1, u4 const x, u4 const y, char const* const p4) // Green Text&Shadow
 {
-    GUIOuttextwin2(p1, p2, p3, p4, 223);
-    GUIOuttextwin2(p1, p2 - 1, p3 - 1, p4, GUIWincoladd == 0 ? 221 : 222);
+    GUIOuttextwin2(p1, x, y, p4, 223);
+    GUIOuttextwin2(p1, x - 1, y - 1, p4, GUIWincoladd == 0 ? 221 : 222);
 }
 
-static void GUIOuttextwin2d(u4 const p1, u4 const p2, u4 const p3, char const* const p4, u4 const p5, char** const p6, u4 const p7) // Boxed, green text, limited to 5th param
+static void GUIOuttextwin2d(u4 const p1, u4 const x, u4 const y, char const* const p4, u4 const p5, char** const p6, u4 const p7) // Boxed, green text, limited to 5th param
 {
     char const* ecx = p4; // Move pointer to text into ecx
     while (*ecx != '\0')
@@ -369,41 +376,41 @@ static void GUIOuttextwin2d(u4 const p1, u4 const p2, u4 const p3, char const* c
     if (eax > p5)
         eax = p5; // Restrict to length to display
 
-    GUIDisplayTextG(p1, p2, p3, ecx - eax);
+    GUIDisplayTextG(p1, x, y, ecx - eax);
     if (GUIInputBox == p7 + 1 && p6[p7] == p4) {
         static u1 GUIBlinkCursorLoop = 0;
         if (++GUIBlinkCursorLoop == 60)
             GUIBlinkCursorLoop = 0;
         if (GUIBlinkCursorLoop < 30) {
-            GUIDisplayTextG(p1, eax * 6 /* 6 pixels */ + p2, p3, "_");
+            GUIDisplayTextG(p1, eax * 6 /* 6 pixels */ + x, y, "_");
         }
     }
 }
 
-static void GUIDisplayBBoxS(u4 const p1, u4 const p2, u4 const p3, u4 const p4, u4 const p5, u4 const p6) // Black Box W/Border
+static void GUIDisplayBBoxS(u4 const p1, u4 const x, u4 const y, u4 const p4, u4 const p5, u4 const p6) // Black Box W/Border
 {
     // Minus right side
     GUIWincol = cwindrawn == 0 ? 148 : cwindrawn == 1 ? 148 + 5
                                                       : 148 + 10;
-    DrawGUIWinBox(p1, p2, p3, p4, p5, p6);
-    DrawGUIWinBox(p1, p2, p3 - 3 + 2, p4, p3 - 1, GUIWincol);
-    DrawGUIWinBox(p1, p2 - 1, p3, p2 - 2, p5, GUIWincol + 1);
-    DrawGUIWinBox(p1, p2, p5 + 1, p4, p5 + 1, GUIWincol + 4);
+    DrawGUIWinBox(p1, x, y, p4, p5, p6);
+    DrawGUIWinBox(p1, x, y - 3 + 2, p4, y - 1, GUIWincol);
+    DrawGUIWinBox(p1, x - 1, y, x - 2, p5, GUIWincol + 1);
+    DrawGUIWinBox(p1, x, p5 + 1, p4, p5 + 1, GUIWincol + 4);
 }
 
-static void DrawGUIWinBox2(u4 const p1, u4 const p2, u4 const p3, u4 const p4, u4 const p5, s4 const ebx)
+static void DrawGUIWinBox2(u4 const p1, u4 const x, u4 const y, u4 const p4, u4 const p5, s4 const ebx)
 {
-    s4 const eax = GUIwinposx[p1] + p2;
-    s4 const ecx = GUIwinposx[p1] + p3 + 1;
+    s4 const eax = GUIwinposx[p1] + x;
+    s4 const ecx = GUIwinposx[p1] + y + 1;
     u1 const edx = GUIWincoladd == 0 ? p5 : p5 + 1;
     GUIRect(eax, ecx, ebx + GUIwinposy[p1], p4, edx);
 }
 
-static void GUIDisplayTextu(u4 const p1, u4 const p2, u4 const p3, char const* const p4, u4 const p5) // Text&Shadow With Underline
+static void GUIDisplayTextu(u4 const p1, u4 const x, u4 const y, char const* const p4, u4 const p5) // Text&Shadow With Underline
 {
     u1 const colour = GUIWincoladd == 0 ? 202 : 196;
-    GUIOuttextwin2u(p1, p2, p3, p4, colour, p5);
-    GUIOuttextwin2(p1, p2 - 1, p3 - 1, p4, colour + 15);
+    GUIOuttextwin2u(p1, x, y, p4, colour, p5);
+    GUIOuttextwin2(p1, x - 1, y - 1, p4, colour + 15);
 }
 
 static u1 const GUIIconDataCheckBoxUC[] = {
@@ -615,9 +622,11 @@ void DisplayGUILoad(void)
     cloadmaxlen = 39;
     u1 const colour = GUIWincoladd == 0 ? 202 : 196;
     if (GUIcurrentfilewin != 0) {
-        char const* const eax = d_names[GUIcurrentdircursloc + 2];
-        GUIOuttextwin2l(1, 6, 158, eax, colour);
-        GUIOuttextwin2l(1, 5, 157, eax, colour + 15);
+        if (d_names && (u4)GUIcurrentdircursloc < (u4)GUIdirentries) {
+            char const* const eax = d_names[GUIcurrentdircursloc + 2];
+            GUIOuttextwin2l(1, 6, 158, eax, colour);
+            GUIOuttextwin2l(1, 5, 157, eax, colour + 15);
+        }
     } else if (GUIfileentries != 0) {
         s4 const eax = GUIcurrentcursloc;
         if ((u4)eax < (u4)GUIfileentries) {
@@ -873,6 +882,9 @@ void DisplayGUIInput(void)
     GUIDisplayCheckboxu(3, 105, 160, &SNESRumble, "P1 Rumble", 3);
     GUIDisplayCheckboxu(3, 105, 170, &Turbo30hz, "TURBO AT 30HZ", 0);
     GUIDisplayCheckboxu(3, 5, 180, &pl12s34, "USE PL3/4 AS PL1/2", 0);
+#ifdef __UNIXSDL__
+    GUIDisplayCheckboxu(3, 5, 190, &InputPhysicalKeys, "PHYSICAL KEYS", 0);
+#endif
 
     DrawGUIButton(3, 123, 34, 153, 45, "SET", 14, 0, 0); // Buttons
     DrawGUIButton(3, 123, 50, 177, 61, "SET KEYS", 40, 0, 0);
@@ -921,46 +933,52 @@ void DisplayGUIOption(void)
     }
 
     if (GUIOptionTabs[0] == 1) { // Basic
-        GUIDisplayTextY(4, 11, 26, "SYSTEM:");
-        GUIDisplayCheckboxu(4, 11, 41, &Show224Lines, "SHOW 224 LINES", 9);
+        s4 row[OPT_BAS_COUNT];
 
-        GUIDisplayTextY(4, 11, 66, "GFX ENGINES:");
-        GUIDisplayCheckboxu(4, 11, 71, &newengen, "USE NEW GFX ENG", 4);
+        GUIOptionBasicRows(row);
+        GUIDisplayTextY(4, 11, (u4)row[OPT_BAS_SYSLABEL], "SYSTEM:");
+        GUIDisplayCheckboxu(4, 11, (u4)row[OPT_BAS_224], &Show224Lines, "SHOW 224 LINES", 9);
+
+        GUIDisplayTextY(4, 11, (u4)row[OPT_BAS_GFXLABEL], "GFX ENGINES:");
+        GUIDisplayCheckboxu(4, 11, (u4)row[OPT_BAS_NEWENG], &newengen, "USE NEW GFX ENG", 4);
         if (newengen == 0) {
-            GUIDisplayCheckboxu(4, 11, 81, &bgfixer, "USE ALT OLD GFX ENG", 4);
+            GUIDisplayCheckboxu(4, 11, (u4)row[OPT_BAS_ALTENG], &bgfixer, "USE ALT OLD GFX ENG", 4);
         }
 
-        GUIDisplayTextY(4, 11, 106, "ROM:");
-        GUIDisplayCheckboxu(4, 11, 111, &AutoPatch, "ENABLE IPS AUTO-PATCHING", 7);
-        GUIDisplayCheckboxu(4, 11, 121, &DisplayInfo, "SHOW ROM INFO ON LOAD", 5);
-        GUIDisplayCheckboxu(4, 11, 131, &RomInfo, "LOG ROM INFO", 2);
+        GUIDisplayTextY(4, 11, (u4)row[OPT_BAS_ROMLABEL], "ROM:");
+        GUIDisplayCheckboxu(4, 11, (u4)row[OPT_BAS_PATCH], &AutoPatch, "ENABLE IPS AUTO-PATCHING", 7);
+        GUIDisplayCheckboxu(4, 11, (u4)row[OPT_BAS_ROMINFODISP], &DisplayInfo, "SHOW ROM INFO ON LOAD", 5);
+        GUIDisplayCheckboxu(4, 11, (u4)row[OPT_BAS_ROMLOG], &RomInfo, "LOG ROM INFO", 2);
 
 #ifdef __WIN32__
-        GUIDisplayTextY(4, 11, 156, "WINDOWS SPECIFIC:");
-        GUIDisplayCheckboxu(4, 11, 161, &PauseFocusChange, "PAUSE EMU IN BACKGROUND", 13);
-        GUIDisplayCheckboxu(4, 11, 171, &HighPriority, "INCREASE EMU PRIORITY", 13);
+        GUIDisplayTextY(4, 11, (u4)row[OPT_BAS_WINLABEL], "WINDOWS SPECIFIC:");
+        GUIDisplayCheckboxu(4, 11, (u4)row[OPT_BAS_PAUSEBG], &PauseFocusChange, "PAUSE EMU IN BACKGROUND", 13);
+        GUIDisplayCheckboxu(4, 11, (u4)row[OPT_BAS_PRIORITY], &HighPriority, "INCREASE EMU PRIORITY", 13);
 #endif
-        GUIDisplayCheckboxu(4, 11, 181, &DisableScreenSaver, "DISABLE POWER MANAGEMENT", 0);
+        GUIDisplayCheckboxu(4, 11, (u4)row[OPT_BAS_SAVER], &DisableScreenSaver, "DISABLE POWER MANAGEMENT", 0);
     }
 
     if (GUIOptionTabs[0] == 2) {
-        GUIDisplayTextY(4, 11, 26, "OVERLAYS:");
-        GUIDisplayCheckboxu(4, 11, 31, &FPSAtStart, "SHOW FPS CNTR ON EMU LOAD", 5);
-        GUIDisplayCheckboxu(4, 11, 41, &CPUAtStart, "SHOW CPU PCNT ON EMU LOAD", 7);
-        GUIDisplayCheckboxu(4, 11, 51, &TimerEnable, "SHOW CLOCK", 5);
+        s4 row[OPT_OVR_COUNT];
+
+        GUIOptionOverlayRows(row);
+        GUIDisplayTextY(4, 11, (u4)row[OPT_OVR_LABEL], "OVERLAYS:");
+        GUIDisplayCheckboxu(4, 11, (u4)row[OPT_OVR_FPS], &FPSAtStart, "SHOW FPS CNTR ON EMU LOAD", 5);
+        GUIDisplayCheckboxu(4, 11, (u4)row[OPT_OVR_CPU], &CPUAtStart, "SHOW CPU PCNT ON EMU LOAD", 7);
+        GUIDisplayCheckboxu(4, 11, (u4)row[OPT_OVR_CLOCK], &TimerEnable, "SHOW CLOCK", 5);
         if (TimerEnable == 1) {
-            GUIDisplayCheckboxu(4, 89, 51, &TwelveHourClock, "12 HOUR MODE", 3);
-            GUIDisplayCheckboxu(4, 11, 61, &ClockBox, "SHOW CLOCK BOX", 13);
+            GUIDisplayCheckboxu(4, 89, (u4)row[OPT_OVR_CLOCK], &TwelveHourClock, "12 HOUR MODE", 3);
+            GUIDisplayCheckboxu(4, 11, (u4)row[OPT_OVR_CLOCKBOX], &ClockBox, "SHOW CLOCK BOX", 13);
         }
 
-        GUIDisplayTextY(4, 11, 86, "MESSAGES:");
-        GUIDisplayCheckboxu(4, 11, 91, &SmallMsgText, "USE SMALL MESSAGE TEXT", 4);
-        GUIDisplayCheckboxu(4, 11, 101, &GUIEnableTransp, "USE TRANSPARENT TEXT", 4);
+        GUIDisplayTextY(4, 11, (u4)row[OPT_OVR_MSGLABEL], "MESSAGES:");
+        GUIDisplayCheckboxu(4, 11, (u4)row[OPT_OVR_SMALLTEXT], &SmallMsgText, "USE SMALL MESSAGE TEXT", 4);
+        GUIDisplayCheckboxu(4, 11, (u4)row[OPT_OVR_TRANSP], &GUIEnableTransp, "USE TRANSPARENT TEXT", 4);
 
-        GUIDisplayTextY(4, 11, 126, "SCREENSHOT FORMAT:");
-        GUIDisplayButtonHoleTu(4, 11, 131, &ScreenShotFormat, 0, "BMP", 0);
+        GUIDisplayTextY(4, 11, (u4)row[OPT_OVR_SHOTLABEL], "SCREENSHOT FORMAT:");
+        GUIDisplayButtonHoleTu(4, 11, (u4)row[OPT_OVR_BMP], &ScreenShotFormat, 0, "BMP", 0);
 #ifndef NO_PNG
-        GUIDisplayButtonHoleTu(4, 11, 141, &ScreenShotFormat, 1, "PNG", 0);
+        GUIDisplayButtonHoleTu(4, 11, (u4)row[OPT_OVR_PNG], &ScreenShotFormat, 1, "PNG", 0);
 #endif
     }
 }
@@ -973,7 +991,9 @@ static u1 glscslidSet(void const* const p1) // slider variable
 static char const* glscslidText(void const* const p1) // slider var, text
 {
     static char GUIVideoTextB2z[] = "---%";
-    sprintf(GUIVideoTextB2z, "%3d", *(u1 const*)p1);
+    /* The percent sign is part of the label: the asm wrote digits into the
+       leading columns only, so sprintf must put its NUL past it. */
+    sprintf(GUIVideoTextB2z, "%3d%%", *(u1 const*)p1);
     return GUIVideoTextB2z;
 }
 
@@ -985,37 +1005,32 @@ static u1 NTSCslidSet(void const* const p1) // slider variable
 static char const* NTSCslidText(void const* const p1) // slider var, text
 {
     static char GUIVideoTextCD3[] = "----%";
-    sprintf(GUIVideoTextCD3, "%4d", *(s1 const*)p1);
+    sprintf(GUIVideoTextCD3, "%4d%%", *(s1 const*)p1);
     return GUIVideoTextCD3;
 }
 
+/* A caret beside the slider the keyboard is on, so up and down have something
+   visible to move. Drawn only for the focused row. */
+static void GUICrtFocusMark(s4 const* const row, u4 const focus, u4 const which)
+{
+    if (GUIFocus == focus) {
+        GUIDisplayTextG(5, 6, (u4)row[which] - 1, ">");
+    }
+}
+
+/* Which monitor row draws as filled; recomputed from MonitorID each redraw. */
+static u1 monitorrow;
+
 void DisplayGUIVideo(void)
 {
-    // Check features
-    if (newgfx16b == 0) {
-        En2xSaI = 0;
-        hqFilter = 0;
-    }
-
-    if (En2xSaI != 0) {
-        hqFilter = 0;
-        scanlines = 0;
-        antienab = 0;
-    }
-
-    if (hqFilter != 0) {
-        En2xSaI = 0;
-        scanlines = 0;
-        antienab = 0;
-    }
+    GUIFilterForMode(); // a filter with no box in this mode is not left on
 
     GUIDrawWindowBox(5, "VIDEO CONFIG");
 
     if (GUINTVID[cvidmode] == 0) { // not NTSC
-        NTSCFilter = 0;
         GUIVntscTab[0] = 0;
         if ((GUIVideoTabs[0] & 0xFF) == 0)
-            GUIVideoTabs[0] = GUIVideoTabs[0] & 0xFFFFFF00 | 1;
+            GUIVideoTabs[0] = (GUIVideoTabs[0] & 0xFFFFFF00) | 1;
     }
 
     {
@@ -1029,29 +1044,36 @@ void DisplayGUIVideo(void)
 
     if (GUIVideoTabs[0] == 1) // Video Modes List/Options Tab
     {
-        DrawGUIButton(5, 128, 30, 164, 41, "SET", 4, 0, 0); // Mode Set Button
+        s4 row[MODE_ROW_COUNT];
 
-        GUIDisplayTextY(5, 130, 50, "LEGEND:");
-        GUIDisplayText(5, 130, 58, "D = ALLOW FILTERS");
-        GUIDisplayText(5, 130, 66, "S = STRETCH");
-        GUIDisplayText(5, 130, 74, "R = KEEP 8:7 RATIO");
-        GUIDisplayText(5, 130, 82, "W = WINDOWED");
-        GUIDisplayText(5, 130, 90, "F = FULLSCREEN");
+        GUIModeRows(row);
+        DrawGUIButton(5, 128, (u4)row[MODE_ROW_SET], 164,
+            (u4)row[MODE_ROW_SET] + 11, "SET", 4, 0, 0); // Mode Set Button
+
+        GUIDisplayTextY(5, 130, (u4)row[MODE_ROW_LEGEND], "LEGEND:");
+        GUIDisplayText(5, 130, (u4)row[MODE_ROW_LEGEND1], "D = ALLOW FILTERS");
+        GUIDisplayText(5, 130, (u4)row[MODE_ROW_LEGEND2], "S = STRETCH");
+        GUIDisplayText(5, 130, (u4)row[MODE_ROW_LEGEND3], "R = KEEP 8:7 RATIO");
+        GUIDisplayText(5, 130, (u4)row[MODE_ROW_LEGEND4], "W = WINDOWED");
+        GUIDisplayText(5, 130, (u4)row[MODE_ROW_LEGEND5], "F = FULLSCREEN");
 #ifdef __OPENGL__
-        GUIDisplayText(5, 130, 98, "O = USES OPENGL");
+        GUIDisplayText(5, 130, (u4)row[MODE_ROW_LEGEND6], "O = USES OPENGL");
 #endif
 
-        DrawGUIButton(5, 180, 115, 216, 126, "SET", 12, 0, 0); // Custom Set Button
+        DrawGUIButton(5, 180, (u4)row[MODE_ROW_CUSTOM] - 5, 216,
+            (u4)row[MODE_ROW_CUSTOM] + 6, "SET", 12, 0, 0); // Custom Set Button
 
-        GUIDisplayText(5, 130, 120, "CUSTOM:");
-        GUIDisplayText(5, 180, 135, "X");
-        GUIDisplayBBox(5, 130, 130, 170, 140, 167);
-        GUIDisplayBBox(5, 191, 130, 231, 140, 167);
+        GUIDisplayText(5, 130, (u4)row[MODE_ROW_CUSTOM], "CUSTOM:");
+        GUIDisplayText(5, 180, (u4)row[MODE_ROW_CUSTOMBOX] + 5, "X");
+        GUIDisplayBBox(5, 130, (u4)row[MODE_ROW_CUSTOMBOX], 170,
+            (u4)row[MODE_ROW_CUSTOMBOX] + 10, 167);
+        GUIDisplayBBox(5, 191, (u4)row[MODE_ROW_CUSTOMBOX], 231,
+            (u4)row[MODE_ROW_CUSTOMBOX] + 10, 167);
 
         GetCustomXY();
 
-        GUIOuttextwin2d(5, 138, 133, GUICustomX, 4, GUICustomResTextPtr, 0);
-        GUIOuttextwin2d(5, 199, 133, GUICustomY, 4, GUICustomResTextPtr, 1);
+        GUIOuttextwin2d(5, 138, (u4)row[MODE_ROW_CUSTOMBOX] + 3, GUICustomX, 4, GUICustomResTextPtr, 0);
+        GUIOuttextwin2d(5, 199, (u4)row[MODE_ROW_CUSTOMBOX] + 3, GUICustomY, 4, GUICustomResTextPtr, 1);
 
         GUIDisplayBBoxS(5, 5, 26, 115, 189, 167); // Video Modes Box
         DrawSlideBar(5, 117, 26, GUIcurrentvideoviewloc, NumVideoModes, 20, 164, GUIVStA, 5, 6);
@@ -1070,15 +1092,105 @@ void DisplayGUIVideo(void)
     }
 
     // Filters tab
+    if (GUIVideoTabs[0] == 3) { // Retro tab
+        /* Everything that makes the picture look like a tube rather than a
+           panel, in the order it is applied: the beam, the light it costs, and
+           the light bright areas spill. Positions come from GUICrtRows, which
+           the click handling reads too. */
+        s4 row[CRT_ROW_COUNT];
+
+        GUICrtRows(row);
+        GUIDisplayTextY(5, 13, (u4)row[CRT_ROW_SCANLABEL], "SCANLINES:");
+        GUICrtFocusMark(row, CRT_FOCUS_SCANLINES, CRT_ROW_SCAN);
+        if (GUIScanlineSlider()) {
+            GUIDrawSlider(5, 23, 100, (u4)row[CRT_ROW_SCAN], &sl_intensity,
+                glscslidSet, glscslidText);
+        } else if (GUIDSIZE[cvidmode] != 0) {
+            /* Where the blitter dims by a fixed step rather than a slider. */
+            u4 const y = (u4)row[CRT_ROW_SCAN] - 2;
+
+            GUIDisplayButtonHoleTu(5, 18, y, &scanlines, 0, "NONE", 1);
+            GUIDisplayButtonHoleTu(5, 68, y, &scanlines, 2, "25%", 0);
+            GUIDisplayButtonHoleTu(5, 118, y, &scanlines, 3, "50%", 0);
+            GUIDisplayButtonHoleTu(5, 168, y, &scanlines, 1, "FULL", 0);
+        }
+
+        GUIDisplayTextY(5, 13, (u4)row[CRT_ROW_VIBLABEL], "VIBRANCY:");
+        GUICrtFocusMark(row, CRT_FOCUS_VIBRANCY, CRT_ROW_VIB);
+        GUIDrawSlider(5, 23, 100, (u4)row[CRT_ROW_VIB], &sl_vibrancy, glscslidSet,
+            glscslidText);
+
+        GUIDisplayTextY(5, 13, (u4)row[CRT_ROW_BLOOMLABEL], "BLOOM:");
+        GUICrtFocusMark(row, CRT_FOCUS_BLOOM, CRT_ROW_BLOOM);
+        GUIDrawSlider(5, 23, 100, (u4)row[CRT_ROW_BLOOM], &BloomLevel, glscslidSet,
+            glscslidText);
+
+        /* One button to take the tube back to a flat panel. The id (99) is one
+           no held-button handler sets, so it always draws unpressed. */
+        DrawGUIButton(5, 150, 176, 232, 188, "RESET ALL", 99, 0, 0);
+    }
+
+    if (GUIVideoTabs[0] == 4) { // Monitors tab
+        /* Listed by the short ID the setting stores, so what is in the config
+           can be matched against what is on screen. The filled row is worked
+           out from that ID each time rather than kept as a number, because SDL
+           renumbers displays between runs. */
+        u4 const count = VideoMonitorCount();
+        s4 row[MON_ROW_COUNT];
+        u4 i;
+
+        GUIMonitorRows(row);
+
+        monitorrow = (u1)VideoMonitorSelected();
+        GUIDisplayTextY(5, 13, (u4)row[MON_ROW_LABEL], "OPEN ON MONITOR:");
+        if (count == 0) {
+            GUIDisplayText(5, 18, (u4)row[MON_ROW_LIST], "NONE REPORTED");
+        }
+        for (i = 0; i < count && i < (u4)MON_MAX; i++) {
+            char id[16], line[34];
+
+            char const* const name = VideoMonitorName(i);
+            char const* const hdr = VideoMonitorIsHDR(i) ? " (HDR)" : "";
+
+            VideoMonitorID(i, id, (u4)sizeof(id));
+            /* HDR is not a choice, so the list only says which monitors have
+               it; nothing is said about the ones that do not. The name is only
+               added when the ID does not already spell it out. */
+            if (VideoMonitorNameRedundant(id, name)) {
+                snprintf(line, sizeof(line), "%-10.10s%s", id, hdr);
+            } else {
+                snprintf(line, sizeof(line), "%-10.10s %.14s%s", id, name, hdr);
+            }
+            GUIDisplayButtonHoleTu(5, 18, (u4)(row[MON_ROW_LIST] + (s4)i * MON_PITCH), &monitorrow, (u4)i,
+                line, 0);
+        }
+
+        GUIDisplayText(5, 13, (u4)row[MON_ROW_NOTE], "APPLIES ON SET,");
+        GUIDisplayText(5, 13, (u4)row[MON_ROW_NOTE] + 10, "IN THE MODES TAB.");
+
+#if !defined __UNIXSDL__ || defined __OPENGL__
+#ifdef __UNIXSDL__
+        if (allow_glvsync == 1 && GUIBIFIL[cvidmode] != 0)
+#endif
+        {
+            GUIDisplayTextY(5, 13, (u4)row[MON_ROW_SYNCLABEL], "MONITOR SYNC:");
+            GUIDisplayCheckboxu(5, 18, (u4)row[MON_ROW_SYNC], &vsyncon, "VSYNC", 0); // -w
+        }
+#endif
+    }
+
     if (GUIVideoTabs[0] == 2) {
+        s4 row[FILT_ROW_COUNT];
+
+        GUIFilterRows(row);
         // Video Filters
         {
             {
                 char const* const GUIVideoTextB1 = "VIDEO FILTERS:"; // Filters.Exclusive
                 // Bilinear
                 if (GUIBIFIL[cvidmode] != 0) {
-                    GUIDisplayTextY(5, 13, 30, GUIVideoTextB1);
-                    GUIDisplayCheckboxu(5, 18, 35, &BilinearFilter, "BILINEAR FILTER", 1);
+                    GUIDisplayTextY(5, 13, (u4)row[FILT_ROW_LABEL], GUIVideoTextB1);
+                    GUIDisplayCheckboxu(5, 18, (u4)row[FILT_ROW_TOP], &BilinearFilter, "BILINEAR FILTER", 1);
                 } else {
                     // Interpolations
 #ifdef __WIN32__
@@ -1087,85 +1199,59 @@ void DisplayGUIVideo(void)
                     if (GUII2VID[cvidmode] != 0)
 #endif
                     {
-                        GUIDisplayTextY(5, 13, 30, GUIVideoTextB1);
-                        GUIDisplayCheckboxu(5, 18, 35, &antienab, "INTERPOLATION", 0); // -y
+                        GUIDisplayTextY(5, 13, (u4)row[FILT_ROW_LABEL], GUIVideoTextB1);
+                        GUIDisplayCheckboxu(5, 18, (u4)row[FILT_ROW_TOP], &antienab, "INTERPOLATION", 0); // -y
                     }
                 }
 
                 // NTSC filter
                 if (GUINTVID[cvidmode] != 0)
-                    GUIDisplayCheckboxu(5, 128, 35, &NTSCFilter, "NTSC FILTER", 0);
+                    GUIDisplayCheckboxu(5, 128, (u4)row[FILT_ROW_TOP], &NTSCFilter, "NTSC FILTER", 0);
+
+                // Kreed 2x filters
+                if (GUIDSIZE[cvidmode] != 0) {
+                    GUIDisplayCheckboxun(5, 18, (u4)row[FILT_ROW_SAI1], &En2xSaI, 1, "2XSAI ENGINE", 2); // 2x
+                    GUIDisplayCheckboxun(5, 128, (u4)row[FILT_ROW_SAI1], &En2xSaI, 2, "SUPER EAGLE", 6); // Seagle
+                    GUIDisplayCheckboxun(5, 18, (u4)row[FILT_ROW_SAI2], &En2xSaI, 3, "SUPER 2XSAI", 2); // S2x
+                }
 
                 // Hq*x
                 if (GUIHQ2X[cvidmode] != 0) {
-                    GUIDisplayCheckboxu(5, 128, 55, &hqFilter, "HQ FILTER", 1);
+                    GUIDisplayCheckboxu(5, 128, (u4)row[FILT_ROW_SAI2], &hqFilter, "HQ FILTER", 1);
                     if (hqFilter != 0) {
-                        GUIDisplayButtonHoleTu(5, 128, 68, &hqFilterlevel, 2, "2X", 1);
-                        goto hq_x;
-                    }
-                } else {
-                hq_x:;
-                    if (GUIHQ3X[cvidmode] != 0)
-                        GUIDisplayButtonHoleTu(5, 158, 68, &hqFilterlevel, 3, "3X", 0);
-                    if (GUIHQ4X[cvidmode] != 0)
-                        GUIDisplayButtonHoleTu(5, 188, 68, &hqFilterlevel, 4, "4X", 0);
-                }
-            }
+                        u4 const y = (u4)row[FILT_ROW_HQLEVEL];
 
-            char const* const GUIVideoTextB2 = "SCANLINES:"; // Filters.Scanlines
-            // GL Scanlines
-            if (GUIBIFIL[cvidmode] != 0) {
-                GUIDisplayTextY(5, 13, 80, GUIVideoTextB2); // Scanlines text
-                GUIDrawSlider(5, 23, 100, 90, &sl_intensity, glscslidSet, glscslidText);
-            } else {
-                // Scanlines
-                if (GUIDSIZE[cvidmode] != 0) {
-                    GUIDisplayTextY(5, 13, 80, GUIVideoTextB2); // Scanlines text
-                    GUIDisplayButtonHoleTu(5, 18, 87, &scanlines, 0, "NONE", 1); // None
-                    GUIDisplayButtonHoleTu(5, 168, 87, &scanlines, 1, "FULL", 0); // Full
-                }
-                if (GUIDSIZE[cvidmode] != 0) {
-                    GUIDisplayButtonHoleTu(5, 68, 87, &scanlines, 2, "25%", 0); // 25%
-                    GUIDisplayButtonHoleTu(5, 118, 87, &scanlines, 3, "50%", 0); // 50%
+                        GUIDisplayButtonHoleTu(5, 128, y, &hqFilterlevel, 2, "2X", 1);
+                        if (GUIHQ3X[cvidmode] != 0)
+                            GUIDisplayButtonHoleTu(5, 158, y, &hqFilterlevel, 3, "3X", 0);
+                        if (GUIHQ4X[cvidmode] != 0)
+                            GUIDisplayButtonHoleTu(5, 188, y, &hqFilterlevel, 4, "4X", 0);
+                    }
                 }
             }
         }
 
-        GUIDisplayTextY(5, 13, 110, "MISC FILTERS:"); // Filters.Other
-        GUIDisplayCheckboxu(5, 18, 115, &GrayscaleMode, "GRAYSCALE MODE", 0); // -v8
+        GUIDisplayTextY(5, 13, (u4)row[FILT_ROW_MISCLABEL], "MISC FILTERS:"); // Filters.Other
+        GUIDisplayCheckboxu(5, 18, (u4)row[FILT_ROW_MISC], &GrayscaleMode, "GRAYSCALE MODE", 0); // -v8
 
         // Hires Mode7
         if (GUIM7VID[cvidmode] != 0 && newengen != 0) {
-            GUIDisplayCheckboxu(5, 128, 115, &Mode7HiRes16b, "HI-RES MODE 7", 0);
+            GUIDisplayCheckboxu(5, 128, (u4)row[FILT_ROW_MISC], &Mode7HiRes16b, "HI-RES MODE 7", 0);
         }
 
-        // Monitor Refresh
-        // VSync
-#if !defined __UNIXSDL__ || defined __OPENGL__
-#ifdef __UNIXSDL__
-        if (allow_glvsync == 1 && GUIBIFIL[cvidmode] != 0)
-#endif
-        {
-            GUIDisplayTextY(5, 13, 140, "MONITOR SYNC:"); // Video.Sync
-            GUIDisplayCheckboxu(5, 18, 145, &vsyncon, "VSYNC", 0); // -w
-        }
-#endif
-
-        // Triple Buffering
-#ifndef __UNIXSDL__
-        char const* const GUIVideoTextB4b = "TRIPLE BUFFERING"; // -3
-#endif
+        // Triple Buffering. VSync sits with the monitor it syncs to.
 #ifdef __WIN32__
         if (GUIWFVID[cvidmode] != 0) {
-            GUIDisplayCheckboxu(5, 128, 145, &TripleBufferWin, GUIVideoTextB4b, 0);
+            GUIDisplayCheckboxu(5, 18, (u4)row[FILT_ROW_SYNC], &TripleBufferWin,
+                "TRIPLE BUFFERING", 0); // -3
         }
 #endif
 
         char const* const GUIVideoTextB5 = "DISPLAY OPTIONS:"; // Video.Display
         // Keep 4:3 Ratio
         if (GUIKEEP43[cvidmode] != 0 && Keep43Check()) {
-            GUIDisplayTextY(5, 13, 170, GUIVideoTextB5);
-            GUIDisplayCheckboxu(5, 18, 175, &Keep4_3Ratio, "USE 4:3 RATIO", 8);
+            GUIDisplayTextY(5, 13, (u4)row[FILT_ROW_DISPLABEL], GUIVideoTextB5);
+            GUIDisplayCheckboxu(5, 18, (u4)row[FILT_ROW_DISP], &Keep4_3Ratio, "USE 4:3 RATIO", 8);
         }
     }
 
@@ -1221,40 +1307,56 @@ void DisplayGUIVideo(void)
 
 void DisplayGUISound(void)
 {
+    s4 row[SND_ROW_COUNT];
+
+    GUISoundRows(row);
     GUIDrawWindowBox(6, "SOUND CONFIG");
 
-    GUIDisplayTextY(6, 6, 16, "SOUND SWITCHES:");
-    GUIDisplayCheckboxu(6, 11, 21, &SPCDisable, "DISABLE SPC EMULATION", 0);
+    GUIDisplayTextY(6, 6, (u4)row[SND_ROW_LABEL], "SOUND SWITCHES:");
+    GUIDisplayCheckboxu(6, 11, (u4)(row[SND_ROW_OPTS] + 0 * SND_PITCH), &SPCDisable, "DISABLE SPC EMULATION", 0);
     if (SPCDisable == 0) {
-        GUIDisplayCheckboxu(6, 11, 31, &soundon, "ENABLE SOUND", 0);
+        GUIDisplayCheckboxu(6, 11, (u4)(row[SND_ROW_OPTS] + 1 * SND_PITCH), &soundon, "ENABLE SOUND", 0);
         if (soundon == 1) {
-            GUIDisplayCheckboxu(6, 11, 41, &StereoSound, "ENABLE STEREO SOUND", 7);
+            GUIDisplayCheckboxu(6, 11, (u4)(row[SND_ROW_OPTS] + 2 * SND_PITCH), &StereoSound, "ENABLE STEREO SOUND", 7);
             if (StereoSound == 1) {
-                GUIDisplayCheckboxu(6, 11, 51, &RevStereo, "REVERSE STEREO CHANNELS", 2);
-                GUIDisplayCheckboxu(6, 11, 61, &Surround, "SIMULATE SURROUND SOUND", 2);
+                GUIDisplayCheckboxu(6, 11, (u4)(row[SND_ROW_OPTS] + 3 * SND_PITCH), &RevStereo, "REVERSE STEREO CHANNELS", 2);
+                GUIDisplayCheckboxu(6, 11, (u4)(row[SND_ROW_OPTS] + 4 * SND_PITCH), &Surround, "SIMULATE SURROUND SOUND", 2);
             }
 #ifdef __WIN32__
-            GUIDisplayCheckboxu(6, 11, 71, &PrimaryBuffer, "USE PRIMARY BUFFER", 4);
+            GUIDisplayCheckboxu(6, 11, (u4)(row[SND_ROW_OPTS] + 5 * SND_PITCH), &PrimaryBuffer, "USE PRIMARY BUFFER", 4);
 #endif
         }
     }
 
     char const* const GUISoundTextF = "NONE";
 
-    GUIDisplayTextY(6, 6, 152, "INTERPOLATION:");
-    GUIDisplayButtonHoleTu(6, 11, 157, &SoundInterpType, 0, GUISoundTextF, 0);
-    GUIDisplayButtonHoleTu(6, 11, 167, &SoundInterpType, 1, "GAUSSIAN", 0);
-    GUIDisplayButtonHoleTu(6, 11, 177, &SoundInterpType, 2, "CUBIC SPLINE", 0);
-    GUIDisplayButtonHoleTu(6, 11, 187, &SoundInterpType, 3, "8-POINT", 0);
+    GUIDisplayTextY(6, 6, (u4)row[SND_ROW_LISTLABEL], "INTERPOLATION:");
+    GUIDisplayButtonHoleTu(6, 11, (u4)(row[SND_ROW_LIST] + 0 * SND_PITCH), &SoundInterpType, 0, GUISoundTextF, 0);
+    GUIDisplayButtonHoleTu(6, 11, (u4)(row[SND_ROW_LIST] + 1 * SND_PITCH), &SoundInterpType, 1, "GAUSSIAN", 0);
+    GUIDisplayButtonHoleTu(6, 11, (u4)(row[SND_ROW_LIST] + 2 * SND_PITCH), &SoundInterpType, 2, "CUBIC SPLINE", 0);
+    GUIDisplayButtonHoleTu(6, 11, (u4)(row[SND_ROW_LIST] + 3 * SND_PITCH), &SoundInterpType, 3, "8-POINT", 0);
 
-    GUIDisplayTextY(6, 106, 152, "LOWPASS:");
-    GUIDisplayButtonHoleTu(6, 111, 157, &LowPassFilterType, 0, GUISoundTextF, 1);
-    GUIDisplayButtonHoleTu(6, 111, 167, &LowPassFilterType, 1, "SIMPLE", 1);
-    GUIDisplayButtonHoleTu(6, 111, 177, &LowPassFilterType, 2, "DYNAMIC", 1);
+    GUIDisplayTextY(6, 106, (u4)row[SND_ROW_LISTLABEL], "LOWPASS:");
+    GUIDisplayButtonHoleTu(6, 111, (u4)(row[SND_ROW_LIST] + 0 * SND_PITCH), &LowPassFilterType, 0, GUISoundTextF, 1);
+    GUIDisplayButtonHoleTu(6, 111, (u4)(row[SND_ROW_LIST] + 1 * SND_PITCH), &LowPassFilterType, 1, "SIMPLE", 1);
+    GUIDisplayButtonHoleTu(6, 111, (u4)(row[SND_ROW_LIST] + 2 * SND_PITCH), &LowPassFilterType, 2, "DYNAMIC", 1);
 
-    GUIDisplayTextY(6, 6, 93, "SAMPLING RATE:");
+#ifdef __UNIXSDL__
+    /* SDL, PipeWire and libao all render at the DSP's own rate and resample
+       onward, so there is no rate to choose here: report what comes out
+       instead of offering settings that do nothing. */
+    GUIDisplayTextY(6, 6, (u4)row[SND_ROW_RATELABEL], "OUTPUT RATE:");
     {
-        GUIDisplayBBox(6, 15, 101, 69, 109, 167); // Sampling Rate Box
+        static char rate[8];
+
+        GUIDisplayBBox(6, 15, (u4)row[SND_ROW_RATEBOX], 69, 109, 167);
+        snprintf(rate, sizeof(rate), "%5uHZ", (unsigned)AUDIO_OUTPUT_RATE);
+        GUIDisplayTextG(6, 23, (u4)row[SND_ROW_RATEBOX] + 3, rate);
+    }
+#else
+    GUIDisplayTextY(6, 6, (u4)row[SND_ROW_RATELABEL], "SAMPLING RATE:");
+    {
+        GUIDisplayBBox(6, 15, (u4)row[SND_ROW_RATEBOX], 69, 109, 167); // Sampling Rate Box
         static char const GUISoundTextB1[][8] = {
             " 8000HZ",
             "11025HZ",
@@ -1264,11 +1366,12 @@ void DisplayGUISound(void)
             "32000HZ",
             "48000HZ"
         };
-        GUIDisplayTextG(6, 23, 104, GUISoundTextB1[SoundQuality]);
+        GUIDisplayTextG(6, 23, (u4)row[SND_ROW_RATEBOX] + 3, GUISoundTextB1[SoundQuality]);
     }
+#endif
 
-    GUIDisplayTextY(6, 6, 116, "VOLUME LEVEL:");
-    GUIDrawSlider(6, 15, 100, 131, &MusicRelVol, glscslidSet, glscslidText);
+    GUIDisplayTextY(6, 6, (u4)row[SND_ROW_VOLLABEL], "VOLUME LEVEL:");
+    GUIDrawSlider(6, 15, 100, (u4)row[SND_ROW_VOL], &MusicRelVol, glscslidSet, glscslidText);
 }
 
 static char const* DisplayGUICheatConv(u1 const* const c)
@@ -1670,686 +1773,8 @@ void DisplayGUISearch(void)
     DrawGUIButton(13, 95, 140, 140, 152, "START", 50, 0, 1);
 }
 
-enum {
-    NETPLAY_IDLE = 0,
-    NETPLAY_WAITING = 1,
-    NETPLAY_CONNECTING = 2,
-    NETPLAY_CONNECTED = 3,
-    NETPLAY_JOINING = 4
-};
-
-typedef struct {
-    u4 magic;
-    u4 seq;
-    u4 joy;
-    u4 crc;
-} NetplayInputPacket;
-
-static char NetplayStatusLine[64] = "IDLE";
-static char NetplayLastEvent[64] = "";
-static int NetplayClientSocket = -1;
-static int NetplayServerSocket = -1;
-static u1 NetplaySessionState = NETPLAY_IDLE;
-static uint16_t const NetplayDefaultPort = 7845;
-static u1 NetplayHostRole = 0;
-static u4 NetplayLocalSeq = 0;
-static u4 NetplayRemoteSeq = 0;
-static u4 NetplayRemoteJoy = 0x00008000;
-char NetplayHostName[32] = "127.0.0.1";
+/* The panel binds its text box to the hostname netplay owns. */
 char* GUINetplayTextPtr[1] = { NetplayHostName };
-static u1 NetplayPendingRemoteValid = 0;
-static NetplayInputPacket NetplayPendingRemote;
-static u4 const NetplayMagic = 0x4E455450; // "NETP"
-
-#define NETPLAY_INPUT_DELAY 3
-#define NETPLAY_FRAME_MS 17
-
-#ifdef __UNIXSDL__
-static char NetplayExternalIP[24] = "";
-static u4 NetplayInputQueue[NETPLAY_INPUT_DELAY];
-static int NetplayInputQueuePos = 0;
-static int NetplayInputQueueFilled = 0;
-static volatile int NetplayStunActive = 0;
-static volatile int NetplayJoinActive = 0;
-static volatile int NetplayJoinCancel = 0;
-static int NetplayJoinFd = -1;
-static int NetplayJoinResult = 0;
-static int NetplayJoinIsUDP = 0;
-static char NetplayJoinHostCopy[32] = "";
-
-static void NetplaySetNonBlocking(int const fd)
-{
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0)
-        return;
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
-
-static void NetplaySetTCPOptions(int const fd)
-{
-    int const one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
-#ifdef TCP_KEEPIDLE
-    int const idle = 5;
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
-#endif
-#ifdef TCP_KEEPINTVL
-    int const intvl = 2;
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
-#endif
-#ifdef TCP_KEEPCNT
-    int const cnt = 3;
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
-#endif
-}
-
-static int NetplayWaitFD(int const fd, int const want_write, int timeout_ms)
-{
-    if (timeout_ms < 0)
-        timeout_ms = 0;
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(fd, &fds);
-    struct timeval timeout;
-    timeout.tv_sec = timeout_ms / 1000;
-    timeout.tv_usec = (timeout_ms % 1000) * 1000;
-    if (want_write != 0)
-        return select(fd + 1, NULL, &fds, NULL, &timeout);
-    return select(fd + 1, &fds, NULL, NULL, &timeout);
-}
-
-static void NetplayPacketHton(NetplayInputPacket* const p)
-{
-    p->magic = htonl(p->magic);
-    p->seq = htonl(p->seq);
-    p->joy = htonl(p->joy);
-    p->crc = htonl(p->crc);
-}
-
-static void NetplayPacketNtoh(NetplayInputPacket* const p)
-{
-    p->magic = ntohl(p->magic);
-    p->seq = ntohl(p->seq);
-    p->joy = ntohl(p->joy);
-    p->crc = ntohl(p->crc);
-}
-
-static int NetplaySendExact(int const fd, void const* const data, size_t size, int timeout_ms)
-{
-    size_t sent = 0;
-    char const* ptr = (char const*)data;
-    while (sent < size) {
-        if (NetplayWaitFD(fd, 1, timeout_ms) <= 0)
-            return 0;
-        int flags = 0;
-#ifdef MSG_NOSIGNAL
-        flags = MSG_NOSIGNAL;
-#endif
-        ssize_t n = send(fd, ptr + sent, size - sent, flags);
-        if (n > 0) {
-            sent += (size_t)n;
-            continue;
-        }
-        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
-            continue;
-        return 0;
-    }
-    return 1;
-}
-
-static int NetplayRecvExact(int const fd, void* const data, size_t size, int timeout_ms)
-{
-    size_t recvd = 0;
-    char* ptr = (char*)data;
-    while (recvd < size) {
-        if (NetplayWaitFD(fd, 0, timeout_ms) <= 0)
-            return 0;
-        ssize_t n = recv(fd, ptr + recvd, size - recvd, 0);
-        if (n > 0) {
-            recvd += (size_t)n;
-            continue;
-        }
-        if (n == 0)
-            return 0;
-        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
-            continue;
-        return 0;
-    }
-    return 1;
-}
-
-static int NetplaySendPacket(int const fd, NetplayInputPacket const* const packet, int timeout_ms)
-{
-    NetplayInputPacket wire = *packet;
-    NetplayPacketHton(&wire);
-    if (NetplayUDPConfig == 0)
-        return NetplaySendExact(fd, &wire, sizeof(wire), timeout_ms);
-    if (NetplayWaitFD(fd, 1, timeout_ms) <= 0)
-        return 0;
-    int flags = 0;
-#ifdef MSG_NOSIGNAL
-    flags = MSG_NOSIGNAL;
-#endif
-    ssize_t n = send(fd, &wire, sizeof(wire), flags);
-    return n == (ssize_t)sizeof(wire);
-}
-
-static int NetplayRecvPacket(int const fd, NetplayInputPacket* const packet, int timeout_ms)
-{
-    if (NetplayUDPConfig == 0) {
-        if (!NetplayRecvExact(fd, packet, sizeof(*packet), timeout_ms))
-            return 0;
-        NetplayPacketNtoh(packet);
-        return 1;
-    }
-    for (;;) {
-        if (NetplayWaitFD(fd, 0, timeout_ms) <= 0)
-            return 0;
-        NetplayInputPacket tmp;
-        ssize_t n = recv(fd, &tmp, sizeof(tmp), 0);
-        if (n == (ssize_t)sizeof(tmp)) {
-            NetplayPacketNtoh(&tmp);
-            if (tmp.magic == NetplayMagic) {
-                *packet = tmp;
-                return 1;
-            }
-            continue;
-        }
-        if (n == 0)
-            return 0;
-        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
-            continue;
-        return 0;
-    }
-}
-
-static void NetplayFetchExternalIP(void)
-{
-    // RFC 5389 STUN Binding Request — no attributes, fixed transaction ID
-    static u1 const req[20] = {
-        0x00,
-        0x01, // Binding Request
-        0x00,
-        0x00, // Attributes length: 0
-        0x21,
-        0x12,
-        0xA4,
-        0x42, // Magic cookie
-        0x6E,
-        0x65,
-        0x74,
-        0x70, // Transaction ID
-        0x6C,
-        0x61,
-        0x79,
-        0x5A,
-        0x53,
-        0x4E,
-        0x45,
-        0x53,
-    };
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-    struct addrinfo* res = NULL;
-    if (getaddrinfo("stun.l.google.com", "19302", &hints, &res) != 0 || res == NULL)
-        return;
-
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        freeaddrinfo(res);
-        return;
-    }
-
-    struct timeval tv;
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    sendto(fd, req, sizeof(req), 0, res->ai_addr, res->ai_addrlen);
-    freeaddrinfo(res);
-
-    u1 resp[256];
-    ssize_t n = recv(fd, resp, sizeof(resp), 0);
-    close(fd);
-    if (n < 20)
-        return;
-
-    uint16_t msg_len;
-    memcpy(&msg_len, resp + 2, 2);
-    msg_len = ntohs(msg_len);
-
-    int pos = 20;
-    while (pos + 4 <= (int)n && pos < 20 + (int)msg_len) {
-        uint16_t attr_type, attr_len;
-        memcpy(&attr_type, resp + pos, 2);
-        memcpy(&attr_len, resp + pos + 2, 2);
-        attr_type = ntohs(attr_type);
-        attr_len = ntohs(attr_len);
-
-        if (attr_type == 0x0020 && attr_len >= 8) { // XOR-MAPPED-ADDRESS
-            u4 xaddr;
-            memcpy(&xaddr, resp + pos + 8, 4);
-            u4 const ip = ntohl(xaddr) ^ 0x2112A442u;
-            snprintf(NetplayExternalIP, sizeof(NetplayExternalIP), "%u.%u.%u.%u",
-                (ip >> 24) & 0xFFu, (ip >> 16) & 0xFFu,
-                (ip >> 8) & 0xFFu, ip & 0xFFu);
-            return;
-        }
-        if (attr_type == 0x0001 && attr_len >= 8) { // MAPPED-ADDRESS fallback
-            u4 addr;
-            memcpy(&addr, resp + pos + 8, 4);
-            u4 const ip = ntohl(addr);
-            snprintf(NetplayExternalIP, sizeof(NetplayExternalIP), "%u.%u.%u.%u",
-                (ip >> 24) & 0xFFu, (ip >> 16) & 0xFFu,
-                (ip >> 8) & 0xFFu, ip & 0xFFu);
-            return;
-        }
-        pos += 4 + (int)((attr_len + 3u) & ~3u);
-    }
-}
-
-static void* NetplayStunThreadFunc(void* arg)
-{
-    (void)arg;
-    NetplayFetchExternalIP();
-    NetplayStunActive = 0;
-    return NULL;
-}
-
-static void NetplayStartStunLookup(void)
-{
-    NetplayExternalIP[0] = '\0';
-    NetplayStunActive = 1;
-    pthread_t t;
-    if (pthread_create(&t, NULL, NetplayStunThreadFunc, NULL) == 0)
-        pthread_detach(t);
-    else
-        NetplayStunActive = 0;
-}
-
-static u4 NetplayStateHash(void)
-{
-    if (wramdata == NULL)
-        return 0;
-    u4 h = 2166136261u;
-    for (int i = 0; i < 256; i++) {
-        h ^= (u4)wramdata[i];
-        h *= 16777619u;
-    }
-    return h;
-}
-
-static void* NetplayJoinThreadFunc(void* arg)
-{
-    (void)arg;
-    int const type = NetplayJoinIsUDP != 0 ? SOCK_DGRAM : SOCK_STREAM;
-
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = type;
-    char portstr[8];
-    snprintf(portstr, sizeof(portstr), "%u", (unsigned)NetplayDefaultPort);
-
-    if (getaddrinfo(NetplayJoinHostCopy, portstr, &hints, &res) != 0 || res == NULL || NetplayJoinCancel != 0) {
-        if (res)
-            freeaddrinfo(res);
-        NetplayJoinResult = 0;
-        NetplayJoinActive = 0;
-        return NULL;
-    }
-
-    int fd = socket(AF_INET, type, 0);
-    if (fd < 0 || NetplayJoinCancel != 0) {
-        if (fd >= 0)
-            close(fd);
-        freeaddrinfo(res);
-        NetplayJoinResult = 0;
-        NetplayJoinActive = 0;
-        return NULL;
-    }
-
-    if (type == SOCK_STREAM) {
-        int rc = connect(fd, res->ai_addr, res->ai_addrlen);
-        freeaddrinfo(res);
-        if (rc != 0 || NetplayJoinCancel != 0) {
-            close(fd);
-            NetplayJoinResult = 0;
-            NetplayJoinActive = 0;
-            return NULL;
-        }
-    } else {
-        connect(fd, res->ai_addr, res->ai_addrlen);
-        freeaddrinfo(res);
-        if (NetplayJoinCancel != 0) {
-            close(fd);
-            NetplayJoinResult = 0;
-            NetplayJoinActive = 0;
-            return NULL;
-        }
-        NetplayInputPacket hello;
-        memset(&hello, 0, sizeof(hello));
-        hello.magic = NetplayMagic;
-        hello.joy = 0x00008000u;
-        int flags = 0;
-#ifdef MSG_NOSIGNAL
-        flags = MSG_NOSIGNAL;
-#endif
-        NetplayInputPacket wire = hello;
-        NetplayPacketHton(&wire);
-        for (int i = 0; i < 3 && NetplayJoinCancel == 0; i++) {
-            send(fd, &wire, sizeof(wire), flags);
-            if (i < 2)
-                usleep(50000);
-        }
-    }
-
-    if (NetplayJoinCancel != 0) {
-        close(fd);
-        NetplayJoinResult = 0;
-        NetplayJoinActive = 0;
-        return NULL;
-    }
-
-    NetplayJoinFd = fd;
-    NetplayJoinResult = 1;
-    NetplayJoinActive = 0;
-    return NULL;
-}
-#endif
-
-void NetplayDisconnectSession(void)
-{
-#ifdef __UNIXSDL__
-    if (NetplayClientSocket >= 0) {
-        close(NetplayClientSocket);
-        NetplayClientSocket = -1;
-    }
-    if (NetplayServerSocket >= 0) {
-        close(NetplayServerSocket);
-        NetplayServerSocket = -1;
-    }
-    NetplayInputQueuePos = 0;
-    NetplayInputQueueFilled = 0;
-    NetplayExternalIP[0] = '\0';
-    NetplayLastEvent[0] = '\0';
-    NetplayJoinCancel = 1;
-    if (NetplayJoinFd >= 0) {
-        close(NetplayJoinFd);
-        NetplayJoinFd = -1;
-    }
-#endif
-    NetplaySessionState = NETPLAY_IDLE;
-    NetplayHostRole = 0;
-    NetplayLocalSeq = 0;
-    NetplayRemoteSeq = 0;
-    NetplayRemoteJoy = 0x00008000;
-    NetplayPendingRemoteValid = 0;
-}
-
-void NetplayHostSession(void)
-{
-#ifndef __UNIXSDL__
-    strcpy(NetplayStatusLine, "UNSUPPORTED ON THIS PORT");
-    NetplaySessionState = NETPLAY_IDLE;
-#else
-    int const type = NetplayUDPConfig != 0 ? SOCK_DGRAM : SOCK_STREAM;
-    int fd = socket(AF_INET, type, 0);
-    if (fd < 0) {
-        strcpy(NetplayLastEvent, "SERVER SOCKET FAILED");
-        return;
-    }
-
-    int reuse = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(NetplayDefaultPort);
-
-    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        close(fd);
-        strcpy(NetplayLastEvent, "BIND FAILED");
-        return;
-    }
-
-    NetplayDisconnectSession();
-    NetplayHostRole = 1;
-    NetplaySetNonBlocking(fd);
-    if (type == SOCK_STREAM) {
-        if (listen(fd, 1) != 0) {
-            close(fd);
-            strcpy(NetplayLastEvent, "LISTEN FAILED");
-            return;
-        }
-        NetplayServerSocket = fd;
-        NetplaySessionState = NETPLAY_WAITING;
-        NetplayStartStunLookup();
-    } else {
-        NetplayClientSocket = fd;
-        NetplaySessionState = NETPLAY_WAITING;
-        NetplayStartStunLookup();
-    }
-#endif
-}
-
-void NetplayJoinSession(void)
-{
-#ifndef __UNIXSDL__
-    strcpy(NetplayLastEvent, "UNSUPPORTED ON THIS PORT");
-    NetplaySessionState = NETPLAY_IDLE;
-#else
-    if (NetplayJoinActive != 0)
-        return;
-    NetplayDisconnectSession();
-    NetplayHostRole = 0;
-    NetplayJoinIsUDP = NetplayUDPConfig != 0 ? 1 : 0;
-    NetplayJoinFd = -1;
-    NetplayJoinResult = 0;
-    NetplayJoinCancel = 0;
-    memcpy(NetplayJoinHostCopy, NetplayHostName, sizeof(NetplayJoinHostCopy));
-    NetplayJoinActive = 1;
-    pthread_t t;
-    if (pthread_create(&t, NULL, NetplayJoinThreadFunc, NULL) == 0) {
-        pthread_detach(t);
-        NetplaySessionState = NETPLAY_JOINING;
-    } else {
-        NetplayJoinActive = 0;
-        strcpy(NetplayLastEvent, "THREAD FAILED");
-    }
-#endif
-}
-
-static void NetplayAdvanceState(int timeout_ms)
-{
-#ifdef __UNIXSDL__
-    if (NetplaySessionState == NETPLAY_WAITING && NetplayUDPConfig == 0 && NetplayServerSocket >= 0) {
-        if (NetplayWaitFD(NetplayServerSocket, 0, timeout_ms) > 0) {
-            int fd = accept(NetplayServerSocket, NULL, NULL);
-            if (fd >= 0) {
-                NetplayClientSocket = fd;
-                NetplaySetNonBlocking(fd);
-                NetplaySetTCPOptions(fd);
-                close(NetplayServerSocket);
-                NetplayServerSocket = -1;
-                NetplayInputQueuePos = 0;
-                NetplayInputQueueFilled = 0;
-                NetplaySessionState = NETPLAY_CONNECTED;
-                strcpy(NetplayLastEvent, "TCP CLIENT CONNECTED");
-            }
-        }
-    }
-
-    if (NetplaySessionState == NETPLAY_WAITING && NetplayUDPConfig != 0 && NetplayClientSocket >= 0 && NetplayHostRole != 0) {
-        if (NetplayWaitFD(NetplayClientSocket, 0, timeout_ms) > 0) {
-            struct sockaddr_in peer;
-            socklen_t peer_len = sizeof(peer);
-            NetplayInputPacket packet;
-            ssize_t n = recvfrom(NetplayClientSocket, &packet, sizeof(packet), 0, (struct sockaddr*)&peer, &peer_len);
-            if (n == (ssize_t)sizeof(packet)) {
-                NetplayPacketNtoh(&packet);
-                if (packet.magic == NetplayMagic) {
-                    connect(NetplayClientSocket, (struct sockaddr*)&peer, peer_len);
-                    NetplayPendingRemote = packet;
-                    NetplayPendingRemoteValid = 1;
-                    NetplayInputQueuePos = 0;
-                    NetplayInputQueueFilled = 0;
-                    NetplaySessionState = NETPLAY_CONNECTED;
-                    strcpy(NetplayLastEvent, "UDP PEER CONNECTED");
-                }
-            }
-        }
-    }
-
-    if (NetplaySessionState == NETPLAY_CONNECTING && NetplayClientSocket >= 0) {
-        if (NetplayWaitFD(NetplayClientSocket, 1, timeout_ms) > 0) {
-            int so_error = 0;
-            socklen_t len = sizeof(so_error);
-            if (getsockopt(NetplayClientSocket, SOL_SOCKET, SO_ERROR, &so_error, &len) == 0 && so_error == 0) {
-                NetplaySetTCPOptions(NetplayClientSocket);
-                NetplayInputQueuePos = 0;
-                NetplayInputQueueFilled = 0;
-                NetplaySessionState = NETPLAY_CONNECTED;
-                strcpy(NetplayLastEvent, "TCP CONNECTED");
-            } else if (so_error != 0) {
-                NetplayDisconnectSession();
-                strcpy(NetplayLastEvent, "CONNECT FAILED");
-            }
-        }
-    }
-
-    if (NetplaySessionState == NETPLAY_JOINING && NetplayJoinActive == 0) {
-        if (NetplayJoinResult != 0 && NetplayJoinFd >= 0) {
-            int const fd = NetplayJoinFd;
-            NetplayJoinFd = -1;
-            NetplaySetNonBlocking(fd);
-            if (NetplayJoinIsUDP == 0)
-                NetplaySetTCPOptions(fd);
-            NetplayClientSocket = fd;
-            NetplayInputQueuePos = 0;
-            NetplayInputQueueFilled = 0;
-            NetplaySessionState = NETPLAY_CONNECTED;
-            strcpy(NetplayLastEvent, NetplayJoinIsUDP != 0 ? "UDP CONNECTED" : "TCP CONNECTED");
-        } else {
-            NetplaySessionState = NETPLAY_IDLE;
-            strcpy(NetplayLastEvent, "CONNECT FAILED");
-        }
-    }
-#else
-    (void)timeout_ms;
-#endif
-}
-
-void NetplaySyncInputs(unsigned int* joy_a, unsigned int* joy_b)
-{
-#ifdef __UNIXSDL__
-    NetplayAdvanceState(0);
-    if (NetplaySessionState != NETPLAY_CONNECTED || NetplayClientSocket < 0)
-        return;
-
-    u4 const raw = NetplayHostRole != 0 ? (u4)*joy_a : (u4)*joy_b;
-
-    // Delay local input by NETPLAY_INPUT_DELAY frames so the peer has time to
-    // receive it before the frame executes — absorbs up to ~50ms of jitter.
-    u4 delayed;
-    if (NetplayInputQueueFilled < NETPLAY_INPUT_DELAY) {
-        delayed = 0x00008000u; // neutral during warmup
-        NetplayInputQueueFilled++;
-    } else {
-        delayed = NetplayInputQueue[NetplayInputQueuePos];
-    }
-    NetplayInputQueue[NetplayInputQueuePos] = raw;
-    NetplayInputQueuePos = (NetplayInputQueuePos + 1) % NETPLAY_INPUT_DELAY;
-
-    if (NetplayHostRole != 0)
-        *joy_a = delayed;
-    else
-        *joy_b = delayed;
-
-    u4 const local_crc = NetplayStateHash();
-
-    NetplayInputPacket local;
-    local.magic = NetplayMagic;
-    local.seq = NetplayLocalSeq++;
-    local.joy = delayed;
-    local.crc = local_crc;
-
-    int const timeout = NETPLAY_INPUT_DELAY * NETPLAY_FRAME_MS;
-
-    NetplayInputPacket remote;
-    int ok = 0;
-    if (NetplayHostRole != 0) {
-        if (NetplayPendingRemoteValid != 0) {
-            remote = NetplayPendingRemote;
-            NetplayPendingRemoteValid = 0;
-            ok = 1;
-        } else {
-            ok = NetplayRecvPacket(NetplayClientSocket, &remote, timeout);
-        }
-        if (ok != 0)
-            ok = NetplaySendPacket(NetplayClientSocket, &local, timeout);
-    } else {
-        ok = NetplaySendPacket(NetplayClientSocket, &local, timeout);
-        if (ok != 0)
-            ok = NetplayRecvPacket(NetplayClientSocket, &remote, timeout);
-    }
-
-    if (ok == 0) {
-        NetplayDisconnectSession();
-        strcpy(NetplayLastEvent, "CONNECTION LOST");
-        return;
-    }
-
-    if (local_crc != 0 && remote.crc != 0 && remote.crc != local_crc && NetplayLocalSeq > NETPLAY_INPUT_DELAY + 2)
-        strcpy(NetplayLastEvent, "DESYNC DETECTED");
-
-    NetplayRemoteSeq = remote.seq;
-    NetplayRemoteJoy = remote.joy;
-    if (NetplayHostRole != 0)
-        *joy_b = NetplayRemoteJoy;
-    else
-        *joy_a = NetplayRemoteJoy;
-#else
-    (void)joy_a;
-    (void)joy_b;
-#endif
-}
-
-static void NetplayUpdateStatus(void)
-{
-#ifdef __UNIXSDL__
-    switch ((int)NetplaySessionState) {
-    case NETPLAY_IDLE:
-        snprintf(NetplayStatusLine, sizeof(NetplayStatusLine), "%s",
-            NetplayLastEvent[0] != '\0' ? NetplayLastEvent : "IDLE");
-        return;
-    case NETPLAY_WAITING:
-        if (NetplayStunActive == 0 && NetplayExternalIP[0] != '\0')
-            snprintf(NetplayStatusLine, sizeof(NetplayStatusLine), "%s - EXT: %s",
-                NetplayUDPConfig != 0 ? "WAITING UDP" : "WAITING TCP",
-                NetplayExternalIP);
-        else
-            snprintf(NetplayStatusLine, sizeof(NetplayStatusLine), "%s",
-                NetplayUDPConfig != 0 ? "WAITING FOR UDP PEER" : "WAITING FOR TCP CLIENT");
-        return;
-    case NETPLAY_CONNECTING:
-        snprintf(NetplayStatusLine, sizeof(NetplayStatusLine), "CONNECTING (TCP)");
-        return;
-    case NETPLAY_JOINING:
-        snprintf(NetplayStatusLine, sizeof(NetplayStatusLine), "RESOLVING %s...", NetplayJoinHostCopy);
-        return;
-    case NETPLAY_CONNECTED:
-        snprintf(NetplayStatusLine, sizeof(NetplayStatusLine), "%s",
-            NetplayLastEvent[0] != '\0' ? NetplayLastEvent : "CONNECTED");
-        return;
-    }
-#endif
-}
 
 void DisplayNetOptns(void)
 {
@@ -2366,12 +1791,22 @@ void DisplayNetOptns(void)
     GUIDisplayBBox(8, 38, 24, 214, 34, 167);
     GUIOuttextwin2d(8, 40, 28, NetplayHostName, 26, GUINetplayTextPtr, 0);
     GUIDisplayText(8, 6, 46, NetplayHostRole != 0 ? "ROLE: HOST (P1)" : "ROLE: CLIENT (P2)");
-    GUIDisplayText(8, 6, 56, NetplayUDPConfig != 0 ? "PORT: 7845 (UDP LOCKSTEP)" : "PORT: 7845 (TCP LOCKSTEP)");
-    GUIDisplayCheckbox(8, 8, 66, &NetplayUDPConfig, "USE UDP");
+    if (NetplayRelayConfig != 0)
+        GUIDisplayText(8, 6, 56, "VIA RELAY (TCP LOCKSTEP)");
+    else {
+        char port[32];
 
-    DrawGUIButton(8, 8, 74, 56, 85, "HOST", 85, 0, 0);
-    DrawGUIButton(8, 66, 74, 114, 85, "JOIN", 86, 0, 0);
-    DrawGUIButton(8, 124, 74, 212, 85, "DISCONNECT", 87, 0, 0);
+        snprintf(port, sizeof(port), "PORT: %u (%s LOCKSTEP)", NetplayPort(),
+            NetplayUDPConfig != 0 ? "UDP" : "TCP");
+        GUIDisplayText(8, 6, 56, port);
+    }
+    GUIDisplayCheckbox(8, 8, 66, &NetplayUDPConfig, "USE UDP");
+    GUIDisplayCheckbox(8, 110, 66, &NetplayRelayConfig, "USE RELAY");
+
+    u4 const y = 80;
+    DrawGUIButton(8, 8, y, 56, y + 10, "HOST", 85, 0, 0);
+    DrawGUIButton(8, 66, y, 114, y + 10, "JOIN", 86, 0, 0);
+    DrawGUIButton(8, 124, y, 212, y + 10, "DISCONNECT", 87, 0, 0);
 }
 
 void DisplayGameOptns(void)
@@ -2466,7 +1901,7 @@ static u1 GUICslidSet(void const* const p1) // slider var
 
 static char const* GUICslidText(void const* p1) // slider var, text
 {
-    static char GUIGUIOptnsTextD2[3];
+    static char GUIGUIOptnsTextD2[12];
     sprintf(GUIGUIOptnsTextD2, "%2u", *(u1 const*)p1);
     return GUIGUIOptnsTextD2;
 }
@@ -2553,30 +1988,52 @@ void DisplayGUIOptns(void)
 
 void DisplayGUIAbout(void)
 {
-    // This will attach compile date onto the end of GUIGUIAboutText1
-    static char GUIGUIAboutTextA1[] = "ZSNES V" ZVER "             "; // Need room for date
-    VERSION_STR = GUIGUIAboutTextA1;
-    placedate();
+    static char const about_version[] = "ZSNES V" ZVER "  " __DATE__;
+    char compiled_for[64];
+    char compiled_with[96] = "";
+    char compiled_with_next[96] = "";
+    size_t library_count = 0;
+
+    while (VERSION_LIBRARIES[library_count])
+        library_count++;
+
+    snprintf(compiled_for, sizeof(compiled_for), "Compiled for %s (%s)%c",
+        VERSION_PLATFORM, VERSION_ARCH, library_count ? ',' : '.');
+
+    if (library_count) {
+        strcpy(compiled_with, "with ");
+        for (size_t i = 0; i < library_count; i++) {
+            if (i)
+                strcat(compiled_with, i + 1 == library_count ? " and " : ", ");
+            strcat(compiled_with, VERSION_LIBRARIES[i]);
+        }
+        strcat(compiled_with, ".");
+
+        if (strlen(compiled_with) > 34) {
+            char* split = compiled_with + 34;
+            while (split != compiled_with && *split != ' ')
+                split--;
+            strcpy(compiled_with_next, split + 1);
+            *split = '\0';
+        }
+    }
+
+    if (GUIwinposx[11] + GUIwinsizex[11] > 255)
+        GUIwinposx[11] = 255 - GUIwinsizex[11];
 
     GUIDrawWindowBox(11, "ABOUT");
     if (EEgg != 1) {
-        GUIDisplayText(11, 6, 16, GUIGUIAboutTextA1); // Text
-        GUIDisplayTextY(11, 6, 46, "CODED BY:");
-        GUIDisplayText(11, 6, 56, "    ZSKNIGHT      _DEMO_");
-        GUIDisplayText(11, 6, 66, "    PAGEFAULT     NACH");
-        GUIDisplayTextY(11, 6, 76, "ASSISTANT CODERS:");
-        GUIDisplayText(11, 6, 86, "    PHAROS        STATMAT");
-        GUIDisplayText(11, 6, 96, "    TEUF          HPSOLO");
-        GUIDisplayText(11, 6, 106, "    THEODDONE33   SILOH");
-        GUIDisplayText(11, 6, 116, "    IPHER         GRINVADER");
-        GUIDisplayText(11, 6, 126, "    JONAS QUINN   DEATHLIKE");
-        GUIDisplayText(11, 15, 151, "ZSNES is released under");
-        GUIDisplayText(11, 15, 161, "the GPL2 license. See the");
-        GUIDisplayText(11, 15, 171, "contents of the `COPYING`");
-        GUIDisplayText(11, 15, 181, "file for more information.");
-
-        DrawGUIButton(11, 90, 27, 175, 37, "WWW.ZSNES.COM", 65, 0, 0);
-        DrawGUIButton(11, 90, 38, 175, 48, "DOCUMENTATION", 66, 0, 0);
+        GUIDisplayText(11, 6, 16, about_version);
+        DrawGUIButton(11, 70, 28, 165, 38, "GITHUB PROJECT", 65, 0, 0);
+        GUIDisplayText(11, 6, 56, compiled_for);
+        if (library_count)
+            GUIDisplayText(11, 6, 66, compiled_with);
+        if (compiled_with_next[0])
+            GUIDisplayText(11, 6, 76, compiled_with_next);
+        GUIDisplayText(11, 15, 121, "ZSNES is released under");
+        GUIDisplayText(11, 15, 131, "the GPL2 license. See the");
+        GUIDisplayText(11, 15, 141, "contents of the `COPYING`");
+        GUIDisplayText(11, 15, 151, "file for more information.");
     } else { // Playground
         GUIDisplayText(11, 42, 36, "HIDDEN MESSAGE!");
         GUIDisplayText(11, 30, 96, "PRESS 'E' TO RETURN");
@@ -2769,7 +2226,7 @@ void DisplayGUICombo(void)
         ComboData const* const esi = &(GUIComboGameSpec == 0 ? CombinDataGlob : CombinDataLocl)[GUIccombcursloc];
         memcpy(GUIComboTextH, esi->name, sizeof(esi->name));
         memcpy(GUIComboData, esi->combo, sizeof(esi->combo));
-        GUIComboKey = GUIComboKey & 0xFFFF0000 | esi->key;
+        GUIComboKey = (GUIComboKey & 0xFFFF0000) | (esi->key);
         GUIComboPNum = esi->player;
         GUIComboLHorz = esi->ff;
         // determine length of combo data
@@ -3173,6 +2630,17 @@ void DisplayGUIChipConfig(void)
     }
 }
 
+/* One path row: the label, the box under it, and what is in the box. */
+static void GUIDrawPathRow(u4 const i, char const* const label,
+    char const* const path, char** const tabptr)
+{
+    u4 const y = (u4)GUIPathRow(i);
+
+    GUIDisplayText(19, 8, y, label);
+    GUIDisplayBBox(19, 8, y + 10, 236, y + 20, 167);
+    GUIOuttextwin2d(19, 10, y + 14, path, 37, tabptr, i);
+}
+
 void DisplayGUIPaths(void)
 {
     GUIDrawWindowBox(19, "SETUP PATHS");
@@ -3182,21 +2650,12 @@ void DisplayGUIPaths(void)
     GUIDrawTabs(GUIPathTabs, &eax, ebx);
 
     if (GUIPathTabs[0] == 1) { // General
-        GUIDisplayText(19, 8, 31, "SAVES:"); // Text
-        GUIDisplayText(19, 8, 66, "SAVESTATES:");
-        GUIDisplayText(19, 8, 101, "MOVIES:");
-        GUIDisplayText(19, 8, 136, "IPS:");
-        GUIDisplayText(19, 8, 171, "RELATIVE PATH BASE:");
+        GUIDrawPathRow(0, "SAVES:", SRAMPath, GUIPathsTab1Ptr);
+        GUIDrawPathRow(1, "SAVESTATES:", SStatePath, GUIPathsTab1Ptr);
+        GUIDrawPathRow(2, "MOVIES:", MoviePath, GUIPathsTab1Ptr);
+        GUIDrawPathRow(3, "IPS:", IPSPath, GUIPathsTab1Ptr);
 
-        GUIDisplayBBox(19, 8, 41, 236, 51, 167); // Input boxes
-        GUIDisplayBBox(19, 8, 76, 236, 86, 167);
-        GUIDisplayBBox(19, 8, 111, 236, 121, 167);
-        GUIDisplayBBox(19, 8, 146, 236, 156, 167);
-        // Green Text
-        GUIOuttextwin2d(19, 10, 45, SRAMPath, 37, GUIPathsTab1Ptr, 0);
-        GUIOuttextwin2d(19, 10, 80, SStatePath, 37, GUIPathsTab1Ptr, 1);
-        GUIOuttextwin2d(19, 10, 115, MoviePath, 37, GUIPathsTab1Ptr, 2);
-        GUIOuttextwin2d(19, 10, 150, IPSPath, 37, GUIPathsTab1Ptr, 3);
+        GUIDisplayText(19, 8, (u4)GUIPathRow(4), "RELATIVE PATH BASE:");
 
         // Display Radio buttons
         char const* const GUIPathsTextA5A = "CONFIG DIR";
@@ -3214,40 +2673,18 @@ void DisplayGUIPaths(void)
     }
 
     if (GUIPathTabs[0] == 2) { // More paths
-        GUIDisplayText(19, 8, 31, "SNAPSHOTS:");
-        GUIDisplayText(19, 8, 66, "SPCS:");
-        GUIDisplayText(19, 8, 101, "CHEATS:");
-        GUIDisplayText(19, 8, 136, "COMBOS:");
-        GUIDisplayText(19, 8, 171, "GAME SPECIFIC INPUT:");
-
-        GUIDisplayBBox(19, 8, 41, 236, 51, 167);
-        GUIDisplayBBox(19, 8, 76, 236, 86, 167);
-        GUIDisplayBBox(19, 8, 111, 236, 121, 167);
-        GUIDisplayBBox(19, 8, 146, 236, 156, 167);
-        GUIDisplayBBox(19, 8, 181, 236, 191, 167);
-
-        GUIOuttextwin2d(19, 10, 45, SnapPath, 37, GUIPathsTab2Ptr, 0);
-        GUIOuttextwin2d(19, 10, 80, SPCPath, 37, GUIPathsTab2Ptr, 1);
-        GUIOuttextwin2d(19, 10, 115, CHTPath, 37, GUIPathsTab2Ptr, 2);
-        GUIOuttextwin2d(19, 10, 150, ComboPath, 37, GUIPathsTab2Ptr, 3);
-        GUIOuttextwin2d(19, 10, 185, INPPath, 37, GUIPathsTab2Ptr, 4);
+        GUIDrawPathRow(0, "SNAPSHOTS:", SnapPath, GUIPathsTab2Ptr);
+        GUIDrawPathRow(1, "SPCS:", SPCPath, GUIPathsTab2Ptr);
+        GUIDrawPathRow(2, "CHEATS:", CHTPath, GUIPathsTab2Ptr);
+        GUIDrawPathRow(3, "COMBOS:", ComboPath, GUIPathsTab2Ptr);
+        GUIDrawPathRow(4, "GAME SPECIFIC INPUT:", INPPath, GUIPathsTab2Ptr);
     }
 
     if (GUIPathTabs[0] == 3) { // bc
-        GUIDisplayText(19, 8, 31, "BS-X:");
-        GUIDisplayText(19, 8, 66, "SUFAMI TURBO:");
-        GUIDisplayText(19, 8, 101, "SD GUNDAM G-NEXT:");
-        GUIDisplayText(19, 8, 136, "SAME GAME:");
-
-        GUIDisplayBBox(19, 8, 41, 236, 51, 167);
-        GUIDisplayBBox(19, 8, 76, 236, 86, 167);
-        GUIDisplayBBox(19, 8, 111, 236, 121, 167);
-        GUIDisplayBBox(19, 8, 146, 236, 156, 167);
-
-        GUIOuttextwin2d(19, 10, 45, BSXPath, 37, GUIPathsTab3Ptr, 0);
-        GUIOuttextwin2d(19, 10, 80, STPath, 37, GUIPathsTab3Ptr, 1);
-        GUIOuttextwin2d(19, 10, 115, GNextPath, 37, GUIPathsTab3Ptr, 2);
-        GUIOuttextwin2d(19, 10, 150, SGPath, 37, GUIPathsTab3Ptr, 3);
+        GUIDrawPathRow(0, "BS-X:", BSXPath, GUIPathsTab3Ptr);
+        GUIDrawPathRow(1, "SUFAMI TURBO:", STPath, GUIPathsTab3Ptr);
+        GUIDrawPathRow(2, "SD GUNDAM G-NEXT:", GNextPath, GUIPathsTab3Ptr);
+        GUIDrawPathRow(3, "SAME GAME:", SGPath, GUIPathsTab3Ptr);
     }
 }
 
@@ -3276,18 +2713,18 @@ void DisplayGUISave(void)
     GUIDisplayText(20, 9 + 45 * 2, 150, "ST+");
     GUIDisplayText(20, 9 + 45 * 3, 150, "ST-");
 
-    GUIDisplayCheckboxu(20, 11, 38, &nosaveSRAM, "DO NOT SAVE SRAM", 0);
+    GUIDisplayCheckboxu(20, 11, (u4)GUISaveRow(0), &nosaveSRAM, "DO NOT SAVE SRAM", 0);
     if (nosaveSRAM == 0) {
-        GUIDisplayCheckboxu(20, 11, 48, &SRAMSave5Sec, "SRAM CHECK+SAVE", 5); // Checkboxes
+        GUIDisplayCheckboxu(20, 11, (u4)GUISaveRow(1), &SRAMSave5Sec, "SRAM CHECK+SAVE", 5); // Checkboxes
     }
-    GUIDisplayCheckboxu(20, 11, 58, &SRAMState, "LOAD SAVESTATE W/SRAM", 0);
-    GUIDisplayCheckboxu(20, 11, 68, &LatestSave, "START AT LATEST SAVE", 0);
-    GUIDisplayCheckboxu(20, 11, 78, &AutoIncSaveSlot, "AUTO INCREMENT SAVE SLOT", 5);
-    GUIDisplayCheckboxu(20, 11, 88, &AutoState, "AUTO STATE SAVE/LOAD", 0);
-    GUIDisplayCheckboxu(20, 11, 98, &PauseLoad, "PAUSE AFTER LOADING STATE", 0);
-    GUIDisplayCheckboxu(20, 11, 108, &PauseRewind, "PAUSE AFTER REWIND", 12);
+    GUIDisplayCheckboxu(20, 11, (u4)GUISaveRow(2), &SRAMState, "LOAD SAVESTATE W/SRAM", 0);
+    GUIDisplayCheckboxu(20, 11, (u4)GUISaveRow(3), &LatestSave, "START AT LATEST SAVE", 0);
+    GUIDisplayCheckboxu(20, 11, (u4)GUISaveRow(4), &AutoIncSaveSlot, "AUTO INCREMENT SAVE SLOT", 5);
+    GUIDisplayCheckboxu(20, 11, (u4)GUISaveRow(5), &AutoState, "AUTO STATE SAVE/LOAD", 0);
+    GUIDisplayCheckboxu(20, 11, (u4)GUISaveRow(6), &PauseLoad, "PAUSE AFTER LOADING STATE", 0);
+    GUIDisplayCheckboxu(20, 11, (u4)GUISaveRow(7), &PauseRewind, "PAUSE AFTER REWIND", 12);
 
-    char GUISaveTextZ3[3];
+    char GUISaveTextZ3[12];
 
     GUIDisplayBBox(20, 150, 17, 165, 24, 167); // Rewind States Box
     sprintf(GUISaveTextZ3, "%02u", RewindStates);
@@ -3297,18 +2734,17 @@ void DisplayGUISave(void)
     sprintf(GUISaveTextZ3, "%02u", RewindFrames);
     GUIDisplayTextG(20, 154, 31, GUISaveTextZ3);
 
-    DDrawBox(20, 26, 129, &KeyStateSlc0); // Boxes for State section
-    DDrawBox(20, 71, 129, &KeyStateSlc1);
-    DDrawBox(20, 116, 129, &KeyStateSlc2);
-    DDrawBox(20, 161, 129, &KeyStateSlc3);
-    DDrawBox(20, 26, 138, &KeyStateSlc4);
-    DDrawBox(20, 71, 138, &KeyStateSlc5);
-    DDrawBox(20, 116, 138, &KeyStateSlc6);
-    DDrawBox(20, 161, 138, &KeyStateSlc7);
-    DDrawBox(20, 26, 147, &KeyStateSlc8);
-    DDrawBox(20, 71, 147, &KeyStateSlc9);
-    DDrawBox(20, 116, 147, &KeyIncStateSlot);
-    DDrawBox(20, 161, 147, &KeyDecStateSlot);
+    { // Boxes for State section
+        u4 const* const slot[12] = { &KeyStateSlc0, &KeyStateSlc1, &KeyStateSlc2,
+            &KeyStateSlc3, &KeyStateSlc4, &KeyStateSlc5, &KeyStateSlc6,
+            &KeyStateSlc7, &KeyStateSlc8, &KeyStateSlc9, &KeyIncStateSlot,
+            &KeyDecStateSlot };
+        u4 i;
+
+        for (i = 0; i < 12; i++) {
+            DDrawBox(20, GUISaveSlotX(i % 4), GUISaveSlotY(i / 4), slot[i]);
+        }
+    }
     DDrawBox(20, 32, 156, &KeySaveState);
     DDrawBox(20, 89, 156, &KeyLoadState);
     DDrawBox(20, 146, 156, &KeyStateSelct);
@@ -3327,7 +2763,7 @@ static u1 SpdslidSet(void const* const p1) // slider var
 
 static char const* SpdslidText(void const* const p1) // slider var, text
 {
-    static char GUISpeedTextD1[4];
+    static char GUISpeedTextD1[12];
     u4 const al = *(u1 const*)p1; // currently emuspeed ranges from 0 to 58
     if (al >= 29) // this will turn it into '/30' to '30x'
     { // ff
@@ -3379,7 +2815,7 @@ void DisplayGUISpeed(void)
     GUIDisplayCheckboxu(21, 11, 135, &FastFwdToggle, "TOGGLED FFWD/SLWDWN", 0);
     GUIDisplayCheckboxun(21, 11, 145, &frameskip, 0, "AUTO FRAME RATE", 0);
 
-    char GUISpeedTextZ3[3];
+    char GUISpeedTextZ3[12];
 
     GUIDisplayBBox(21, 96, 24, 114, 31, 167); // FF Ratio Box
     sprintf(GUISpeedTextZ3, "%2u", FFRatio + 2);

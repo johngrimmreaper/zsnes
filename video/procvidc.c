@@ -1,23 +1,4 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
+#include "../types.h" /* IGNORE_RESULT */
 
 #ifdef __UNIXSDL__
 #include "../gblhdr.h"
@@ -35,6 +16,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #endif
 #include "../zmovie.h"
 #include "../zpath.h"
+#include "../zstate.h"
 #include "procvidc.h"
 
 extern uint8_t newengen;
@@ -42,7 +24,7 @@ extern uint32_t nggposng[];
 extern uint16_t PrevPicture[64 * 56];
 extern uint8_t *vidbuffer, *vidbufferofsb;
 
-void CapturePicture()
+void CapturePicture(void)
 {
     const uint16_t* vbuf = (uint16_t*)vidbuffer;
     unsigned short work1, work2, filter;
@@ -73,9 +55,10 @@ void CapturePicture()
     }
 }
 
-extern uint32_t cur_zst_size, old_zst_size;
+/* size_t in zstate.c, so it has to be size_t here too. */
+extern size_t cur_zst_size, v143_zst_size, old_zst_size;
 
-char* zst_name();
+char* zst_name(void);
 
 void LoadPicture(void)
 {
@@ -100,9 +83,12 @@ void LoadPicture(void)
         fseek(fp, 0, SEEK_END);
         file_size = ftell(fp);
 
-        if ((file_size - pic_size == cur_zst_size) || (file_size - pic_size == old_zst_size)) {
+        if ((file_size - pic_size == cur_zst_size)
+            || (file_size - pic_size == cur_zst_size + ZST_WIDE_EXTRA)
+            || (file_size - pic_size == v143_zst_size)
+            || (file_size - pic_size == old_zst_size)) {
             fseek(fp, -((signed)pic_size), SEEK_END);
-            fread(PrevPicture, 1, pic_size, fp);
+            IGNORE_RESULT(fread(PrevPicture, 1, pic_size, fp));
         }
 
         fclose(fp);

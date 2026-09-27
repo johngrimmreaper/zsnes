@@ -1,24 +1,3 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #define __ZSNES__
 
 #if (defined __ZSNES__ && __UNIXSDL__)
@@ -29,6 +8,8 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include <stdlib.h>
 #include <string.h>
 #endif
+#include <stddef.h>
+#include <stdint.h> /* the state table below; the Windows path skips gblhdr.h */
 // #define DebugDSP1
 
 #ifdef DebugDSP1
@@ -204,7 +185,7 @@ const unsigned short DSP1ROM[1024] = {
 *  DSP1 code                                                                *
 \***************************************************************************/
 
-void InitDSP()
+void InitDSP(void)
 {
 #ifdef DebugDSP1
     Start_Log();
@@ -215,7 +196,7 @@ short Op00Multiplicand;
 short Op00Multiplier;
 short Op00Result;
 
-void DSPOp00()
+void DSPOp00(void)
 {
     Op00Result = Op00Multiplicand * Op00Multiplier >> 15;
 
@@ -228,7 +209,7 @@ short Op20Multiplicand;
 short Op20Multiplier;
 short Op20Result;
 
-void DSPOp20()
+void DSPOp20(void)
 {
     Op20Result = Op20Multiplicand * Op20Multiplier >> 15;
     Op20Result++;
@@ -289,7 +270,7 @@ void DSP1_Inverse(short Coefficient, short Exponent, short* iCoefficient, short*
     }
 }
 
-void DSPOp10()
+void DSPOp10(void)
 {
     DSP1_Inverse(Op10Coefficient, Op10Exponent, &Op10CoefficientR, &Op10ExponentR);
 #ifdef DebugDSP1
@@ -480,13 +461,17 @@ short DSP1_Truncate(short C, short E)
         else if (C < 0)
             return -32767;
     } else {
+        /* The 1/2^n table at 0x31 only reaches n = 49; a smaller exponent
+           scaled by anything past it is zero. Pilotwings asks. */
+        if (E < -0x31)
+            return 0;
         if (E < 0)
             return C * DSP1ROM[0x0031 + E] >> 15;
     }
     return C;
 }
 
-void DSPOp04()
+void DSPOp04(void)
 {
     Op04Sin = DSP1_Sin(Op04Angle) * Op04Radius >> 15;
     Op04Cos = DSP1_Cos(Op04Angle) * Op04Radius >> 15;
@@ -498,7 +483,7 @@ short Op0CY1;
 short Op0CX2;
 short Op0CY2;
 
-void DSPOp0C()
+void DSPOp0C(void)
 {
     Op0CX2 = (Op0CY1 * DSP1_Sin(Op0CA) >> 15) + (Op0CX1 * DSP1_Cos(Op0CA) >> 15);
     Op0CY2 = (Op0CY1 * DSP1_Cos(Op0CA) >> 15) - (Op0CX1 * DSP1_Sin(Op0CA) >> 15);
@@ -684,7 +669,7 @@ short Op02VVA;
 short Op02CX;
 short Op02CY;
 
-void DSPOp02()
+void DSPOp02(void)
 {
     DSP1_Parameter(Op02FX, Op02FY, Op02FZ, Op02LFE, Op02LES, Op02AAS, Op02AZS, &Op02VOF, &Op02VVA, &Op02CX, &Op02CY);
 }
@@ -695,7 +680,7 @@ short Op0AB;
 short Op0AC;
 short Op0AD;
 
-void DSPOp0A()
+void DSPOp0A(void)
 {
     DSP1_Raster(Op0AVS, &Op0AA, &Op0AB, &Op0AC, &Op0AD);
     Op0AVS++;
@@ -787,7 +772,7 @@ short Op06H;
 short Op06V;
 short Op06M;
 
-void DSPOp06()
+void DSPOp06(void)
 {
     DSP1_Project(Op06X, Op06Y, Op06Z, &Op06H, &Op06V, &Op06M);
 }
@@ -809,7 +794,7 @@ short Op21Zr;
 short Op21Xr;
 short Op21Yr;
 
-void DSPOp01()
+void DSPOp01(void)
 {
     short SinAz = DSP1_Sin(Op01Zr);
     short CosAz = DSP1_Cos(Op01Zr);
@@ -833,7 +818,7 @@ void DSPOp01()
     matrixA[2][2] = (Op01m * CosAx >> 15) * CosAy >> 15;
 }
 
-void DSPOp11()
+void DSPOp11(void)
 {
     short SinAz = DSP1_Sin(Op11Zr);
     short CosAz = DSP1_Cos(Op11Zr);
@@ -857,7 +842,7 @@ void DSPOp11()
     matrixB[2][2] = (Op11m * CosAx >> 15) * CosAy >> 15;
 }
 
-void DSPOp21()
+void DSPOp21(void)
 {
     short SinAz = DSP1_Sin(Op21Zr);
     short CosAz = DSP1_Cos(Op21Zr);
@@ -900,7 +885,7 @@ short Op2DF;
 short Op2DL;
 short Op2DU;
 
-void DSPOp0D()
+void DSPOp0D(void)
 {
     Op0DF = (Op0DX * matrixA[0][0] >> 15) + (Op0DY * matrixA[0][1] >> 15) + (Op0DZ * matrixA[0][2] >> 15);
     Op0DL = (Op0DX * matrixA[1][0] >> 15) + (Op0DY * matrixA[1][1] >> 15) + (Op0DZ * matrixA[1][2] >> 15);
@@ -911,7 +896,7 @@ void DSPOp0D()
 #endif
 }
 
-void DSPOp1D()
+void DSPOp1D(void)
 {
     Op1DF = (Op1DX * matrixB[0][0] >> 15) + (Op1DY * matrixB[0][1] >> 15) + (Op1DZ * matrixB[0][2] >> 15);
     Op1DL = (Op1DX * matrixB[1][0] >> 15) + (Op1DY * matrixB[1][1] >> 15) + (Op1DZ * matrixB[1][2] >> 15);
@@ -922,7 +907,7 @@ void DSPOp1D()
 #endif
 }
 
-void DSPOp2D()
+void DSPOp2D(void)
 {
     Op2DF = (Op2DX * matrixC[0][0] >> 15) + (Op2DY * matrixC[0][1] >> 15) + (Op2DZ * matrixC[0][2] >> 15);
     Op2DL = (Op2DX * matrixC[1][0] >> 15) + (Op2DY * matrixC[1][1] >> 15) + (Op2DZ * matrixC[1][2] >> 15);
@@ -952,7 +937,7 @@ short Op23X;
 short Op23Y;
 short Op23Z;
 
-void DSPOp03()
+void DSPOp03(void)
 {
     Op03X = (Op03F * matrixA[0][0] >> 15) + (Op03L * matrixA[1][0] >> 15) + (Op03U * matrixA[2][0] >> 15);
     Op03Y = (Op03F * matrixA[0][1] >> 15) + (Op03L * matrixA[1][1] >> 15) + (Op03U * matrixA[2][1] >> 15);
@@ -963,7 +948,7 @@ void DSPOp03()
 #endif
 }
 
-void DSPOp13()
+void DSPOp13(void)
 {
     Op13X = (Op13F * matrixB[0][0] >> 15) + (Op13L * matrixB[1][0] >> 15) + (Op13U * matrixB[2][0] >> 15);
     Op13Y = (Op13F * matrixB[0][1] >> 15) + (Op13L * matrixB[1][1] >> 15) + (Op13U * matrixB[2][1] >> 15);
@@ -974,7 +959,7 @@ void DSPOp13()
 #endif
 }
 
-void DSPOp23()
+void DSPOp23(void)
 {
     Op23X = (Op23F * matrixC[0][0] >> 15) + (Op23L * matrixC[1][0] >> 15) + (Op23U * matrixC[2][0] >> 15);
     Op23Y = (Op23F * matrixC[0][1] >> 15) + (Op23L * matrixC[1][1] >> 15) + (Op23U * matrixC[2][1] >> 15);
@@ -995,7 +980,7 @@ short Op14Zrr;
 short Op14Xrr;
 short Op14Yrr;
 
-void DSPOp14()
+void DSPOp14(void)
 {
     short CSec, ESec, CTan, CSin, C, E;
 
@@ -1061,7 +1046,7 @@ short Op0EV;
 short Op0EX;
 short Op0EY;
 
-void DSPOp0E()
+void DSPOp0E(void)
 {
     DSP1_Target(Op0EH, Op0EV, &Op0EX, &Op0EY);
 }
@@ -1079,7 +1064,7 @@ short Op2BY;
 short Op2BZ;
 short Op2BS;
 
-void DSPOp0B()
+void DSPOp0B(void)
 {
     Op0BS = (Op0BX * matrixA[0][0] + Op0BY * matrixA[0][1] + Op0BZ * matrixA[0][2]) >> 15;
 
@@ -1088,7 +1073,7 @@ void DSPOp0B()
 #endif
 }
 
-void DSPOp1B()
+void DSPOp1B(void)
 {
     Op1BS = (Op1BX * matrixB[0][0] + Op1BY * matrixB[0][1] + Op1BZ * matrixB[0][2]) >> 15;
 
@@ -1098,7 +1083,7 @@ void DSPOp1B()
 #endif
 }
 
-void DSPOp2B()
+void DSPOp2B(void)
 {
     Op2BS = (Op2BX * matrixC[0][0] + Op2BY * matrixC[0][1] + Op2BZ * matrixC[0][2]) >> 15;
 
@@ -1109,7 +1094,7 @@ void DSPOp2B()
 
 short Op08X, Op08Y, Op08Z, Op08Ll, Op08Lh;
 
-void DSPOp08()
+void DSPOp08(void)
 {
     int Op08Size = (Op08X * Op08X + Op08Y * Op08Y + Op08Z * Op08Z) << 1;
     Op08Ll = Op08Size & 0xffff;
@@ -1123,7 +1108,7 @@ void DSPOp08()
 
 short Op18X, Op18Y, Op18Z, Op18R, Op18D;
 
-void DSPOp18()
+void DSPOp18(void)
 {
     Op18D = (Op18X * Op18X + Op18Y * Op18Y + Op18Z * Op18Z - Op18R * Op18R) >> 15;
 
@@ -1134,7 +1119,7 @@ void DSPOp18()
 
 short Op38X, Op38Y, Op38Z, Op38R, Op38D;
 
-void DSPOp38()
+void DSPOp38(void)
 {
     Op38D = (Op38X * Op38X + Op38Y * Op38Y + Op38Z * Op38Z - Op38R * Op38R) >> 15;
     Op38D++;
@@ -1149,7 +1134,7 @@ short Op28Y;
 short Op28Z;
 short Op28R;
 
-void DSPOp28()
+void DSPOp28(void)
 {
     int Radius = Op28X * Op28X + Op28Y * Op28Y + Op28Z * Op28Z;
 
@@ -1185,7 +1170,7 @@ short Op1CX2;
 short Op1CY2;
 short Op1CZ2;
 
-void DSPOp1C()
+void DSPOp1C(void)
 {
     // Rotate Around Op1CZ1
     Op1CX1 = (Op1CYBR * DSP1_Sin(Op1CZ) >> 15) + (Op1CXBR * DSP1_Cos(Op1CZ) >> 15);
@@ -1213,7 +1198,7 @@ void DSPOp1C()
 unsigned short Op0FRamsize;
 unsigned short Op0FPass;
 
-void DSPOp0F()
+void DSPOp0F(void)
 {
     Op0FPass = 0x0000;
 
@@ -1225,7 +1210,205 @@ void DSPOp0F()
 short Op2FUnknown;
 short Op2FSize;
 
-void DSPOp2F()
+void DSPOp2F(void)
 {
     Op2FSize = 0x100;
+}
+
+/* Save-state image of the DSP1 emulator. V143 copied fixed-length runs from
+   one variable of each group, which under -fdata-sections describes nothing
+   and overran the variables it named. Naming them all is the only guaranteed
+   layout. */
+#define S(v) { &(v), sizeof(v) }
+static const struct {
+    void* p;
+    size_t n;
+} dsp1_state[] = {
+    S(Op00Multiplicand),
+    S(Op00Multiplier),
+    S(Op00Result),
+    S(Op20Multiplicand),
+    S(Op20Multiplier),
+    S(Op20Result),
+    S(Op10Coefficient),
+    S(Op10Exponent),
+    S(Op10CoefficientR),
+    S(Op10ExponentR),
+    S(Op04Angle),
+    S(Op04Radius),
+    S(Op04Sin),
+    S(Op04Cos),
+    S(Op0CA),
+    S(Op0CX1),
+    S(Op0CY1),
+    S(Op0CX2),
+    S(Op0CY2),
+    S(CentreX),
+    S(CentreY),
+    S(VOffset),
+    S(VPlane_C),
+    S(VPlane_E),
+    S(SinAas),
+    S(CosAas),
+    S(SinAzs),
+    S(CosAzs),
+    S(SinAZS),
+    S(CosAZS),
+    S(SecAZS_C1),
+    S(SecAZS_E1),
+    S(SecAZS_C2),
+    S(SecAZS_E2),
+    S(Nx),
+    S(Ny),
+    S(Nz),
+    S(Gx),
+    S(Gy),
+    S(Gz),
+    S(C_Les),
+    S(E_Les),
+    S(G_Les),
+    S(Op02FX),
+    S(Op02FY),
+    S(Op02FZ),
+    S(Op02LFE),
+    S(Op02LES),
+    S(Op02AAS),
+    S(Op02AZS),
+    S(Op02VOF),
+    S(Op02VVA),
+    S(Op02CX),
+    S(Op02CY),
+    S(Op0AVS),
+    S(Op0AA),
+    S(Op0AB),
+    S(Op0AC),
+    S(Op0AD),
+    S(Op06X),
+    S(Op06Y),
+    S(Op06Z),
+    S(Op06H),
+    S(Op06V),
+    S(Op06M),
+    S(matrixC),
+    S(matrixB),
+    S(matrixA),
+    S(Op01m),
+    S(Op01Zr),
+    S(Op01Xr),
+    S(Op01Yr),
+    S(Op11m),
+    S(Op11Zr),
+    S(Op11Xr),
+    S(Op11Yr),
+    S(Op21m),
+    S(Op21Zr),
+    S(Op21Xr),
+    S(Op21Yr),
+    S(Op0DX),
+    S(Op0DY),
+    S(Op0DZ),
+    S(Op0DF),
+    S(Op0DL),
+    S(Op0DU),
+    S(Op1DX),
+    S(Op1DY),
+    S(Op1DZ),
+    S(Op1DF),
+    S(Op1DL),
+    S(Op1DU),
+    S(Op2DX),
+    S(Op2DY),
+    S(Op2DZ),
+    S(Op2DF),
+    S(Op2DL),
+    S(Op2DU),
+    S(Op03F),
+    S(Op03L),
+    S(Op03U),
+    S(Op03X),
+    S(Op03Y),
+    S(Op03Z),
+    S(Op13F),
+    S(Op13L),
+    S(Op13U),
+    S(Op13X),
+    S(Op13Y),
+    S(Op13Z),
+    S(Op23F),
+    S(Op23L),
+    S(Op23U),
+    S(Op23X),
+    S(Op23Y),
+    S(Op23Z),
+    S(Op14Zr),
+    S(Op14Xr),
+    S(Op14Yr),
+    S(Op14U),
+    S(Op14F),
+    S(Op14L),
+    S(Op14Zrr),
+    S(Op14Xrr),
+    S(Op14Yrr),
+    S(Op0EH),
+    S(Op0EV),
+    S(Op0EX),
+    S(Op0EY),
+    S(Op0BX),
+    S(Op0BY),
+    S(Op0BZ),
+    S(Op0BS),
+    S(Op1BX),
+    S(Op1BY),
+    S(Op1BZ),
+    S(Op1BS),
+    S(Op2BX),
+    S(Op2BY),
+    S(Op2BZ),
+    S(Op2BS),
+    S(Op08Lh),
+    S(Op08Ll),
+    S(Op08X),
+    S(Op08Y),
+    S(Op08Z),
+    S(Op18D),
+    S(Op18R),
+    S(Op18X),
+    S(Op18Y),
+    S(Op18Z),
+    S(Op38Z),
+    S(Op38D),
+    S(Op38R),
+    S(Op38X),
+    S(Op38Y),
+    S(Op28X),
+    S(Op28Y),
+    S(Op28Z),
+    S(Op28R),
+    S(Op1CX),
+    S(Op1CY),
+    S(Op1CZ),
+    S(Op1CXAR),
+    S(Op1CXBR),
+    S(Op1CYAR),
+    S(Op1CYBR),
+    S(Op1CZAR),
+    S(Op1CZBR),
+    S(Op1CX1),
+    S(Op1CY1),
+    S(Op1CZ1),
+    S(Op1CX2),
+    S(Op1CY2),
+    S(Op1CZ2),
+    S(Op0FRamsize),
+    S(Op0FPass),
+    S(Op2FUnknown),
+    S(Op2FSize),
+};
+#undef S
+
+void DSP1_copy_state(uint8_t** buffer, void (*copy_func)(uint8_t**, void*, size_t))
+{
+    size_t i;
+    for (i = 0; i < sizeof dsp1_state / sizeof *dsp1_state; i++)
+        copy_func(buffer, dsp1_state[i].p, dsp1_state[i].n);
 }

@@ -1,16 +1,12 @@
 /*
- * Mode 7 16-bit background renderers, ported from mode716b.asm,
- * mode716d.asm, mode716t.asm, m716text.asm, mode716e.asm, and
- * makev16b.asm.
+ * Mode 7 16-bit background renderers, from mode716b.asm and friends. The
+ * drawmode7 entry points keep the legacy register ABI (y scroll in ax, x in
+ * dx); the assembly tail-jumped to domosaic16b with dh holding curmosaicsz, so
+ * this reads the global instead.
  *
- * The drawmode7 entry points keep the legacy register ABI (y scroll
- * in AX, x scroll in DX) through i386 trampolines; the asm renderers
- * tail-jump to domosaic16b with DH holding curmosaicsz, so the C
- * version reads the global instead.
- *
- * Positions are 24.8 fixed point kept in 32-bit words.  The asm mixed
- * byte, word, and dword accesses into those words; the masked helpers
- * below reproduce its dropped carries exactly.
+ * Positions are 24.8 fixed point in 32-bit words, and the assembly mixed byte,
+ * word and dword accesses into them - the masked helpers below reproduce its
+ * dropped carries.
  */
 
 #include <string.h>
@@ -984,74 +980,5 @@ void domosaic16b(void)
     }
 }
 
-#if defined(__GNUC__) && defined(__i386__)
-
-#if defined(__APPLE__) || defined(__MINGW32__)
-#define CSYM(x) "_" #x
-#else
-#define CSYM(x) #x
-#endif
-
-__asm__(
-    ".globl " CSYM(drawmode716b) "\n" CSYM(drawmode716b) ":\n"
-                                                         "pushl %edx\n"
-                                                         "pushl %eax\n"
-                                                         "call " CSYM(c_drawmode716b) "\n"
-                                                                                      "addl $8, %esp\n"
-                                                                                      "ret\n");
-
-__asm__(
-    ".globl " CSYM(drawmode7dcolor) "\n" CSYM(drawmode7dcolor) ":\n"
-                                                               "pushl %edx\n"
-                                                               "pushl %eax\n"
-                                                               "call " CSYM(c_drawmode7dcolor) "\n"
-                                                                                               "addl $8, %esp\n"
-                                                                                               "ret\n");
-
-__asm__(
-    ".globl " CSYM(drawmode716t) "\n" CSYM(drawmode716t) ":\n"
-                                                         "pushl %edx\n"
-                                                         "pushl %eax\n"
-                                                         "call " CSYM(c_drawmode716t) "\n"
-                                                                                      "addl $8, %esp\n"
-                                                                                      "ret\n");
-
-__asm__(
-    ".globl " CSYM(drawmode716tb) "\n" CSYM(drawmode716tb) ":\n"
-                                                           "pushl %edx\n"
-                                                           "pushl %eax\n"
-                                                           "call " CSYM(c_drawmode716tb) "\n"
-                                                                                         "addl $8, %esp\n"
-                                                                                         "ret\n");
-
-__asm__(
-    ".globl " CSYM(drawmode716textbg) "\n" CSYM(drawmode716textbg) ":\n"
-                                                                   "pushl %edx\n"
-                                                                   "pushl %eax\n"
-                                                                   "call " CSYM(c_drawmode716textbg) "\n"
-                                                                                                     "addl $8, %esp\n"
-                                                                                                     "ret\n");
-
-__asm__(
-    ".globl " CSYM(drawmode716textbg2) "\n" CSYM(drawmode716textbg2) ":\n"
-                                                                     "pushl %ecx\n"
-                                                                     "call " CSYM(c_drawmode716textbg2) "\n"
-                                                                                                        "addl $4, %esp\n"
-                                                                                                        "ret\n");
-
-__asm__(
-    ".globl " CSYM(drawmode716extbg) "\n" CSYM(drawmode716extbg) ":\n"
-                                                                 "pushl %edx\n"
-                                                                 "pushl %eax\n"
-                                                                 "call " CSYM(c_drawmode716extbg) "\n"
-                                                                                                  "addl $8, %esp\n"
-                                                                                                  "ret\n");
-
-__asm__(
-    ".globl " CSYM(drawmode716extbg2) "\n" CSYM(drawmode716extbg2) ":\n"
-                                                                   "pushl %ecx\n"
-                                                                   "call " CSYM(c_drawmode716extbg2) "\n"
-                                                                                                     "addl $4, %esp\n"
-                                                                                                     "ret\n");
-
-#endif
+/* The register-ABI trampolines that used to stand in front of these are
+   gone: every caller is C and passes the arguments. */

@@ -10,8 +10,53 @@
 # linker's --gc-sections drops every function not reachable from main, so no
 # SDL, zlib, or audio symbols are pulled in.
 
-CC     := gcc
-CFLAGS := -m32 -std=gnu99 -I.. -Wall -Wextra -Wno-unused-parameter
+# The unit tests are portable C. They build -m32 on x86 Linux to match the
+# emulator's usual word size. macOS has had no 32-bit userland since 10.15
+# and no GNU linker at all; RISC-V and ARM have no -m32. Build those for
+# the host instead of not at all.
+HOST_OS := $(shell uname -s)
+HOST_CPU := $(shell uname -m 2>/dev/null | tr '[:upper:]' '[:lower:]')
+BSD_HOST := $(filter FreeBSD OpenBSD NetBSD DragonFly,$(HOST_OS))
+X86_HOST := $(if $(BSD_HOST),,$(filter x86_64 amd64 i386 i486 i586 i686,$(HOST_CPU)))
+ifeq ($(HOST_OS),Darwin)
+CC      := cc
+BITFLAG :=
+NOPIE   :=
+GCSECT  := -Wl,-dead_strip
+# Darwin reads _POSIX_C_SOURCE as a restriction, so SUSv4 there hides the BSD
+# side the tests use - INADDR_LOOPBACK in netplay_test.c among it. Same swap
+# the top-level Makefile makes.
+FEATURE  := -D_DARWIN_C_SOURCE
+else ifneq ($(BSD_HOST),)
+CC      := cc
+BITFLAG :=
+NOPIE   := -no-pie
+GCSECT  := -Wl,--gc-sections
+FEATURE  :=
+else ifneq ($(X86_HOST),)
+CC      := gcc
+BITFLAG := -m32
+NOPIE   := -no-pie
+GCSECT  := -Wl,--gc-sections
+FEATURE  := -D_XOPEN_SOURCE=700
+else
+CC      := gcc
+BITFLAG :=
+NOPIE   :=
+GCSECT  := -Wl,--gc-sections
+FEATURE  := -D_XOPEN_SOURCE=700
+endif
+
+# C11 with SUSv4, matching the emulator: the tests must not quietly depend
+# on extensions the build itself forbids, and strict c11 hides POSIX until
+# the macro asks for it.
+# Unoptimised by default so a failure is the port's and not the inliner's, but
+# the emulator ships -O3: `make regs OPT=-O3` runs the same comparison at
+# release settings, which is what catches layout the harness only gets right
+# by luck at -O0.
+OPT ?=
+CFLAGS := $(BITFLAG) -std=c11 $(FEATURE) $(OPT) \
+          -I.. -Wall -Wextra -Wno-unused-parameter
 
 BIN       := zsnes_test
 NETPLAY   := zsnes_netplay_test
@@ -25,8 +70,10 @@ SA1       := zsnes_sa1_test
 SPC7110   := zsnes_7110_test
 VCACHE    := zsnes_vcache_test
 SPRITES   := zsnes_sprites_test
+HQX       := zsnes_hqx_test
+FILTER    := zsnes_filter_test
 SRC       := main.c
-NETPLAY_SRC := netplay_test.c
+NETPLAY_SRC := netplay_test.c ../net/packet.c ../net/znp.c ../unix/net_transport.c
 ST10_SRC  := st10_test.c
 ST11_SRC  := st11_test.c
 OBC1_SRC  := obc1_test.c
@@ -37,105 +84,102 @@ SA1_SRC   := sa1_test.c
 SPC7110_SRC := 7110_test.c
 VCACHE_SRC := vcache_test.c
 SPRITES_SRC := sprites_test.c
+HQX_SRC   := hqx_test.c
+FILTER_SRC := filter_test.c ../video/filter.c ../video/c_hqx.c ../video/2xsaiw.c ../video/ntsc.c
 C4        := zsnes_c4_test
 C4_SRC    := c4proc_test.c
 MODE7     := zsnes_mode716b_test
 MODE7_SRC := mode716b_test.c
 ASMDATA   := zsnes_asmdata_test
 ASMDATA_SRC := asmdata_test.c
-OBJS      := ../zpath.o
+SAVELOAD  := zsnes_saveload_test
+SAVELOAD_SRC := saveload_test.c ../saveload.c
+# Objects from the parent tree belong to the real build, so let the top
+# Makefile make them. make's built-in %.o: %.c would use the flags below
+# instead, quietly dropping -fdata-sections and every -D the configuration
+# adds, and a test would link something the emulator never builds.
+# In a directory of its own, at the word size these links need: ../build holds
+# whatever target was last built.
+PBUILD     := ../build/test
+PBUILD_REL := build/test
+ifeq ($(HOST_OS),Darwin)
+PBUILD_TARGET :=
+else ifneq ($(X86_HOST),)
+PBUILD_TARGET := BITS=32 CPU=x86
+else
+PBUILD_TARGET :=
+endif
 
-.PHONY: all run clean spcdec fxtable fxops memops m7calc regs
+$(PBUILD)/%.o:
+	$(MAKE) -C .. $(PBUILD_TARGET) BUILD_DIR=$(PBUILD_REL) $(PBUILD_REL)/$*.o
 
-all: $(BIN) $(NETPLAY) $(ST10) $(ST11) $(OBC1) $(MSU1) $(DSP2) $(SAI) $(SA1) $(SPC7110) $(VCACHE) $(SPRITES) $(C4) $(MODE7) $(ASMDATA)
+OBJS      := $(PBUILD)/zpath.o
+
+.PHONY: all run clean spc64
+
+all: $(BIN) $(NETPLAY) $(ST10) $(ST11) $(OBC1) $(MSU1) $(DSP2) $(SAI) $(SA1) $(SPC7110) $(VCACHE) $(SPRITES) $(HQX) $(FILTER) $(C4) $(MODE7) $(ASMDATA) $(SAVELOAD)
 
 $(BIN): $(SRC) zstest.h $(OBJS)
-	$(CC) $(CFLAGS) $(SRC) $(OBJS) -no-pie -Wl,--gc-sections -o $(BIN)
+	$(CC) $(CFLAGS) $(SRC) $(OBJS) $(NOPIE) $(GCSECT) -o $(BIN)
 
-$(NETPLAY): $(NETPLAY_SRC) zstest.h
-	$(CC) $(CFLAGS) $(NETPLAY_SRC) -no-pie -lpthread -o $(NETPLAY)
+$(NETPLAY): $(NETPLAY_SRC) zstest.h ../net/packet.h
+	$(CC) $(CFLAGS) $(NETPLAY_SRC) $(NOPIE) -lpthread -o $(NETPLAY)
 
 $(ST10): $(ST10_SRC) zstest.h ../chips/st10proc.c
-	$(CC) $(CFLAGS) $(ST10_SRC) ../chips/st10proc.c -no-pie -o $(ST10)
+	$(CC) $(CFLAGS) $(ST10_SRC) ../chips/st10proc.c $(NOPIE) -o $(ST10)
 
 $(ST11): $(ST11_SRC) zstest.h ../chips/st11proc.c
-	$(CC) $(CFLAGS) $(ST11_SRC) ../chips/st11proc.c -no-pie -o $(ST11)
+	$(CC) $(CFLAGS) $(ST11_SRC) ../chips/st11proc.c $(NOPIE) -o $(ST11)
 
 $(OBC1): $(OBC1_SRC) zstest.h ../chips/obc1proc.c
-	$(CC) $(CFLAGS) $(OBC1_SRC) ../chips/obc1proc.c -no-pie -o $(OBC1)
+	$(CC) $(CFLAGS) $(OBC1_SRC) ../chips/obc1proc.c $(NOPIE) -o $(OBC1)
 
 $(MSU1): $(MSU1_SRC) zstest.h ../chips/msu1regs.c
-	$(CC) $(CFLAGS) $(MSU1_SRC) ../chips/msu1regs.c -no-pie -o $(MSU1)
+	$(CC) $(CFLAGS) $(MSU1_SRC) ../chips/msu1regs.c $(NOPIE) -o $(MSU1)
 
 $(DSP2): $(DSP2_SRC) zstest.h ../chips/dsp2proc.c
-	$(CC) $(CFLAGS) $(DSP2_SRC) ../chips/dsp2proc.c -no-pie -o $(DSP2)
+	$(CC) $(CFLAGS) $(DSP2_SRC) ../chips/dsp2proc.c $(NOPIE) -o $(DSP2)
 
 $(SAI): $(SAI_SRC) zstest.h ../video/2xsaiw.c
-	$(CC) $(CFLAGS) $(SAI_SRC) ../video/2xsaiw.c -no-pie -o $(SAI)
+	$(CC) $(CFLAGS) $(SAI_SRC) ../video/2xsaiw.c $(NOPIE) -o $(SAI)
 
 $(SA1): $(SA1_SRC) zstest.h ../chips/sa1regs.c
-	$(CC) $(CFLAGS) $(SA1_SRC) ../chips/sa1regs.c -no-pie -o $(SA1)
+	$(CC) $(CFLAGS) $(SA1_SRC) ../chips/sa1regs.c $(NOPIE) -o $(SA1)
 
 $(SPC7110): $(SPC7110_SRC) zstest.h ../chips/7110proc.c
-	$(CC) $(CFLAGS) $(SPC7110_SRC) ../chips/7110proc.c -no-pie -o $(SPC7110)
+	$(CC) $(CFLAGS) $(SPC7110_SRC) ../chips/7110proc.c $(NOPIE) -o $(SPC7110)
 
 $(C4): $(C4_SRC) zstest.h ../chips/c4proc.c ../chips/c4emu.c
-	$(CC) $(CFLAGS) $(C4_SRC) ../chips/c4proc.c ../chips/c4emu.c -no-pie -lm -o $(C4)
+	$(CC) $(CFLAGS) $(C4_SRC) ../chips/c4proc.c ../chips/c4emu.c $(NOPIE) -lm -o $(C4)
 
 $(MODE7): $(MODE7_SRC) zstest.h ../video/mode716b.c
-	$(CC) $(CFLAGS) $(MODE7_SRC) ../video/mode716b.c -no-pie -o $(MODE7)
+	$(CC) $(CFLAGS) $(MODE7_SRC) ../video/mode716b.c $(NOPIE) -o $(MODE7)
 
-# ../endmem.o supplies winbgdata, which makevid's cwinptr points at.
-$(ASMDATA): $(ASMDATA_SRC) zstest.h ../cpu/dspproc.c ../cpu/c_spcdata.c ../cpu/c_execdata.c ../cpu/c_regsdata.c ../cpu/c_regswdata.c ../video/c_mode716data.c ../chips/c_sa1data.c ../video/c_makev16tdata.c ../video/c_newgfx16data.c ../video/makevid.c ../video/newgfx.c ../endmem.o
-	$(CC) $(CFLAGS) $(ASMDATA_SRC) ../cpu/dspproc.c ../cpu/c_spcdata.c ../cpu/c_execdata.c ../cpu/c_regsdata.c ../cpu/c_regswdata.c ../video/c_mode716data.c ../chips/c_sa1data.c ../video/c_makev16tdata.c ../video/c_newgfx16data.c ../video/makevid.c ../video/newgfx.c ../endmem.o -no-pie -o $(ASMDATA)
+# The V2 save-state envelope is self-contained (its own CRC32, no zlib), so the
+# test links only saveload.c.
+$(SAVELOAD): $(SAVELOAD_SRC) zstest.h ../saveload.h
+	$(CC) $(CFLAGS) $(SAVELOAD_SRC) $(NOPIE) -o $(SAVELOAD)
+
+# endmem.o supplies winbgdata, which makevid's cwinptr points at.
+$(ASMDATA): $(ASMDATA_SRC) zstest.h ../cpu/dspproc.c ../cpu/c_spcdata.c ../cpu/c_execdata.c ../cpu/c_regsdata.c ../cpu/c_regswdata.c ../video/c_mode716data.c ../chips/c_sa1data.c ../video/c_makev16tdata.c ../video/c_newgfx16data.c ../video/makevid.c ../video/newgfx.c $(PBUILD)/endmem.o
+	$(CC) $(CFLAGS) $(ASMDATA_SRC) ../cpu/dspproc.c ../cpu/c_spcdata.c ../cpu/c_execdata.c ../cpu/c_regsdata.c ../cpu/c_regswdata.c ../video/c_mode716data.c ../chips/c_sa1data.c ../video/c_makev16tdata.c ../video/c_newgfx16data.c ../video/makevid.c ../video/newgfx.c $(PBUILD)/endmem.o $(NOPIE) -o $(ASMDATA)
 
 $(VCACHE): $(VCACHE_SRC) zstest.h ../video/tilecache.c
-	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections $(VCACHE_SRC) ../video/tilecache.c -no-pie -Wl,--gc-sections -o $(VCACHE)
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections $(VCACHE_SRC) ../video/tilecache.c $(NOPIE) $(GCSECT) -o $(VCACHE)
+
+# c_hqx.c needs the generated cfg.h, which lives in the parent build dir.
+# hqx_test.c includes video/c_hqx.c rather than linking it, so the tests can
+# reach the interpolation helpers, which are static and carry the filter maths.
+$(HQX): $(HQX_SRC) zstest.h ../video/c_hqx.c $(PBUILD)/zpath.o
+	$(CC) $(CFLAGS) -I$(PBUILD) $(HQX_SRC) $(NOPIE) -o $(HQX)
+
+# The filter front end, linked against the filters it dispatches to. Its own
+# copies of the cfg variables stand in for the generated cfg.o.
+$(FILTER): $(FILTER_SRC) zstest.h ../video/filter.h $(PBUILD)/zpath.o
+	$(CC) $(CFLAGS) -I$(PBUILD) $(FILTER_SRC) $(NOPIE) -lm -o $(FILTER)
 
 $(SPRITES): $(SPRITES_SRC) zstest.h ../video/sprites.c
-	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections $(SPRITES_SRC) ../video/sprites.c -no-pie -Wl,--gc-sections -o $(SPRITES)
-
-# Differential test for the SPC700 DAA/DAS opcodes against the assembly they
-# replaced (cff2b437^). Not part of `all` - it needs that old assembly.
-spcdec: difftest_spcdec.c difftest.h mkdifftest.sh ../cpu/spc_ops.h
-	git -C .. show cff2b437^:cpu/spc700.asm > /tmp/spc_old.asm
-	./mkdifftest.sh _spcdec /tmp/spc_old.asm "OpBE OpDF" \
-	    "spcA spcNZ spcP" 439-459 1733-1781
-	$(CC) $(CFLAGS) difftest_spcdec.c _spcdec.o -no-pie -o difftest_spcdec
-	@./difftest_spcdec
-
-# Differential test for the SuperFX table builder against the assembly it
-# replaced. Not part of `all` - it needs that old assembly out of git history.
-fxtable: difftest_fxtable.c mkfxtable.sh ../chips/c_fxtable.c ../endmem.o
-	./mkfxtable.sh
-	$(CC) $(CFLAGS) -fcommon -fno-pic -c difftest_fxtable.c -o _fxtest.o
-	$(CC) $(CFLAGS) -fcommon -fno-pic -c ../chips/c_fxtable.c -o _fxtable.o
-	$(CC) -m32 -no-pie -fno-pic _fxtest.o _fxtable.o _fxold.o _fxstubs.o ../endmem.o -o difftest_fxtable
-	@./difftest_fxtable
-
-# Differential test for the SuperFX opcode handlers against the assembly they
-# replaced. Not part of `all` - it needs that assembly out of git history.
-fxops: difftest_fxops.c difftest.h mkfxops.sh ../chips/fx_ops.h
-	./mkfxops.sh
-	$(CC) $(CFLAGS) difftest_fxops.c _fxops.o -no-pie -o difftest_fxops
-	@./difftest_fxops
-
-# Differential test for the direct-page memory handlers against the assembly
-# they replaced. Not part of `all` - it needs that assembly out of git history.
-memops: difftest_memops.c difftest.h mkmemops.sh memops.list ../cpu/mem_ops.h
-	./mkmemops.sh
-	$(CC) $(CFLAGS) difftest_memops.c _memops.o -no-pie -o difftest_memops
-	@./difftest_memops
-
-m7calc: difftest_m7calc.c difftest.h mkm7calc.sh ../video/c_mode716calc.c
-	./mkm7calc.sh
-	$(CC) $(CFLAGS) difftest_m7calc.c ../video/c_mode716calc.c _m7calc.o -no-pie -o difftest_m7calc
-	@./difftest_m7calc
-
-regs: difftest_regs.c difftest.h mkregs.sh regs.list ../cpu/c_regsppu.c
-	./mkregs.sh
-	$(CC) $(CFLAGS) difftest_regs.c ../cpu/c_regsppu.c _regs.o -no-pie -o difftest_regs
-	@./difftest_regs
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections $(SPRITES_SRC) ../video/sprites.c $(NOPIE) $(GCSECT) -o $(SPRITES)
 
 run: all
 	@./$(BIN)
@@ -150,19 +194,31 @@ run: all
 	@./$(SPC7110)
 	@./$(VCACHE)
 	@./$(SPRITES)
+	@./$(HQX)
+	@./$(FILTER)
 	@./$(C4)
 	@./$(MODE7)
 	@./$(ASMDATA)
+	@./$(SAVELOAD)
+
+# The SPC700 core run at both word sizes and compared. Every other test here
+# builds -m32 only, where zreg and u4 are the same type, so a 64-bit width bug
+# cannot show up; this one exists to catch exactly that. Hosts without -m32
+# still run the native width so the core is exercised.
+spc64: spc64_test.c ../cpu/spc_ops.h ../cpu/spc_ioregs.h
+ifneq ($(X86_HOST),)
+	@$(CC) -m32 -std=c11 $(FEATURE) -I.. -O2 -Wall -o zsnes_spc32_test spc64_test.c
+	@$(CC) -m64 -std=c11 $(FEATURE) -I.. -O2 -Wall -o zsnes_spc64_test spc64_test.c
+	@a=$$(./zsnes_spc32_test) && b=$$(./zsnes_spc64_test) && \
+	  if [ "$$a" = "$$b" ]; then echo "spc700 32 vs 64: PASS ($$a)"; \
+	  else echo "spc700 32 vs 64: FAIL"; echo "  m32 $$a"; echo "  m64 $$b"; exit 1; fi
+else
+	@$(CC) -std=c11 $(FEATURE) -I.. -O2 -Wall -o zsnes_spc64_test spc64_test.c
+	@./zsnes_spc64_test >/dev/null
+	@echo "spc700 native width: PASS"
+endif
 
 clean:
-	rm -f $(BIN) $(NETPLAY) $(ST10) $(ST11) $(OBC1) $(MSU1) $(DSP2) $(SAI) $(SA1) $(SPC7110) $(VCACHE) $(SPRITES) $(C4) $(MODE7) $(ASMDATA)
-	rm -f difftest_spcdec difftest_fxtable difftest_fxops difftest_memops difftest_m7calc difftest_regs _*.o _*.asm _*.inc _*.raw
-
-# Port-time differential testing (difftest.h + mkdifftest.sh) proves a C port
-# bit-identical to the original assembly. It is transient by design: the oracle
-# is the original asm, so a routine's difftest is removed once its asm is
-# deleted. The DSP mixers were verified this way, then their asm and difftest
-# were retired; the reusable difftest.h and mkdifftest.sh remain for future
-# ports (see git history for difftest_mixers.c and difftest_spcio.c as worked
-# examples).
-
+	rm -f $(BIN) $(NETPLAY) $(ST10) $(ST11) $(OBC1) $(MSU1) $(DSP2) $(SAI) $(SA1) $(SPC7110) $(VCACHE) $(SPRITES) $(HQX) $(FILTER) $(C4) $(MODE7) $(ASMDATA) $(SAVELOAD)
+	rm -f zsnes_spc32_test zsnes_spc64_test
+	rm -fr $(PBUILD)

@@ -1,23 +1,19 @@
 /*
- * Capcom C4 coprocessor interface, ported from chips/c4proc.asm.
+ * Capcom C4 coprocessor interface, from chips/c4proc.asm. The C4 maps into
+ * $6000-$7FFF and routes addresses the three ways the OBC1/DSP4 ports do: bit
+ * 15 set to memaccessbank, below $6000 to regaccessbank, otherwise C4 RAM. A
+ * write to $7F47 starts the ROM-to-RAM copy, one to $7F4F runs the command
+ * dispatcher; the math helpers live in c4emu.c.
  *
- * The C4 maps into $6000-$7FFF: the four C4*8b/16b entry points route
- * addresses the same three ways as the OBC1/DSP4 ports (bit 15 set to
- * memaccessbank, below $6000 to regaccessbank, otherwise C4 RAM).  A
- * write to $7F47 triggers the ROM-to-RAM copy and a write to $7F4F runs
- * the command dispatcher.  The math helpers (C4Op*, C4TransfWireFrame*,
- * C4CalcWireFrame, Sin/CosTable) live in c4emu.c.
- *
- * The asm's per-address function-pointer tables (C4RamR/C4RamW) only
- * ever held C4ReadReg/C4WriteReg plus one C4RegFunction entry, so they
- * are replaced by direct dispatch here.  The debug-only C4Edit and
- * C4ProcessVectors routines and the unreachable DoScaleRotate2 were
- * dead code and are not ported.
+ * The asm's C4RamR/C4RamW pointer tables held only two handlers plus one
+ * C4RegFunction entry, so this dispatches directly. C4Edit, C4ProcessVectors
+ * and DoScaleRotate2 were dead and are not ported.
  */
 
 #include <stdint.h>
 #include <string.h>
 
+#include "../cpu/memseam.h"
 #include "c4proc.h"
 
 extern uint8_t* romdata;
@@ -37,19 +33,14 @@ void C4Op15(void);
 void C4Op1F(void);
 void C4Op22(void);
 
-/* routed bank handlers (cdecl in tests, asm register-ABI in the build) */
-extern uint8_t regaccessbankr8(uint32_t addr);
-extern void regaccessbankw8(uint32_t addr, uint8_t val);
-extern uint16_t regaccessbankr16(uint32_t addr);
-extern void regaccessbankw16(uint32_t addr, uint16_t val);
-extern uint8_t memaccessbankr8(uint32_t addr);
-extern void memaccessbankw8(uint32_t addr, uint8_t val);
-extern uint16_t memaccessbankr16(uint32_t addr);
-extern void memaccessbankw16(uint32_t addr, uint16_t val);
+/* Routed bank handlers: the access is handed to another memtable handler,
+   which reads the bank straight out of MemSeamB as the asm tail-jump did. */
+extern memfn regaccessbankr8, regaccessbankw8, regaccessbankr16, regaccessbankw16;
+extern memfn memaccessbankr8, memaccessbankw8, memaccessbankr16, memaccessbankw16;
 
 u1* C4Ram;
 uint8_t C4ObjSelec, C4SObjSelec, C4Pause;
-uint32_t C4values[3];
+uint16_t C4values[6]; /* addressed only as 16-bit halves */
 
 static uint8_t* C4Data;
 
@@ -717,19 +708,18 @@ static void c4_activate(uint8_t cmd)
         break;
     case 0x05: /* propulsion */
     {
-        uint16_t* vals = (uint16_t*)C4values;
-        vals[1] = RAMW(0x1F83);
-        vals[0] = RAMW(0x1F81);
+        C4values[1] = RAMW(0x1F83);
+        C4values[0] = RAMW(0x1F81);
         int16_t div = (int16_t)RAMW(0x1F83);
         uint16_t result = 1;
         if (div) { /* the asm faulted on zero */
             int32_t q = 65536 / div;
-            vals[3] = (uint16_t)q;
+            C4values[3] = (uint16_t)q;
             int32_t prod = (int32_t)(int16_t)(uint16_t)q * (int16_t)RAMW(0x1F81);
             result = (uint16_t)(prod >> 8);
         }
         RAMW(0x1F80) = result;
-        vals[2] = result;
+        C4values[2] = result;
         break;
     }
     case 0x0D: /* set vector length */
@@ -836,11 +826,14 @@ static void c4_memcpy(void)
     uint8_t* ram = C4Ram;
     uint32_t len = RAMW(0x1F43);
     uint8_t* src = snesmmap[ram[0x1F42]] + RAMW(0x1F40);
-    uint8_t* dst = ram + (RAMW(0x1F45) & 0x1FFF);
+    uint32_t dst = RAMW(0x1F45) & 0x1FFF;
 
-    /* the asm looped 4G times on len 0; copy nothing instead */
+    /* the asm looped 4G times on len 0; copy nothing instead. The length is
+       a guest word, so the destination wraps inside the 8K rather than
+       running on into what follows it. */
     while (len--) {
-        *dst++ = *src++;
+        ram[dst] = *src++;
+        dst = (dst + 1) & 0x1FFF;
     }
 }
 
@@ -859,10 +852,10 @@ static void c4ram_write(uint32_t off, uint8_t val)
 uint8_t c_C4Read8b(uint32_t addr)
 {
     if (addr & 0x8000) {
-        return memaccessbankr8(addr);
+        return mem_bank_read8(memaccessbankr8, addr);
     }
     if (addr < 0x6000) {
-        return regaccessbankr8(addr);
+        return mem_bank_read8(regaccessbankr8, addr);
     }
     return C4Ram[(addr - 0x6000) & 0x1FFF];
 }
@@ -870,10 +863,10 @@ uint8_t c_C4Read8b(uint32_t addr)
 uint16_t c_C4Read16b(uint32_t addr)
 {
     if (addr & 0x8000) {
-        return memaccessbankr16(addr);
+        return mem_bank_read16(memaccessbankr16, addr);
     }
     if (addr < 0x6000) {
-        return regaccessbankr16(addr);
+        return mem_bank_read16(regaccessbankr16, addr);
     }
     uint32_t off = (addr - 0x6000) & 0x1FFF;
     return (uint16_t)(C4Ram[off] | C4Ram[off + 1] << 8);
@@ -882,11 +875,11 @@ uint16_t c_C4Read16b(uint32_t addr)
 void c_C4Write8b(uint32_t addr, uint8_t val)
 {
     if (addr & 0x8000) {
-        memaccessbankw8(addr, val);
+        mem_bank_write8(memaccessbankw8, addr, val);
         return;
     }
     if (addr < 0x6000) {
-        regaccessbankw8(addr, val);
+        mem_bank_write8(regaccessbankw8, addr, val);
         return;
     }
     c4ram_write((addr - 0x6000) & 0x1FFF, val);
@@ -895,11 +888,11 @@ void c_C4Write8b(uint32_t addr, uint8_t val)
 void c_C4Write16b(uint32_t addr, uint16_t val)
 {
     if (addr & 0x8000) {
-        memaccessbankw16(addr, val);
+        mem_bank_write16(memaccessbankw16, addr, val);
         return;
     }
     if (addr < 0x6000) {
-        regaccessbankw16(addr, val);
+        mem_bank_write16(regaccessbankw16, addr, val);
         return;
     }
     uint32_t off = (addr - 0x6000) & 0x1FFF;
@@ -907,84 +900,23 @@ void c_C4Write16b(uint32_t addr, uint16_t val)
     c4ram_write(off + 1, (uint8_t)(val >> 8));
 }
 
-#if defined(__GNUC__) && defined(__i386__)
+/* The memtable entry points. */
+void C4Read8b(void)
+{
+    mem_set_al(c_C4Read8b(MemSeamC));
+}
 
-#if defined(__APPLE__) || defined(__MINGW32__)
-#define CSYM(x) "_" #x
-#else
-#define CSYM(x) #x
-#endif
+void C4Write8b(void)
+{
+    c_C4Write8b(MemSeamC, (uint8_t)MemSeamA);
+}
 
-__asm__(
-    ".globl " CSYM(C4Read8b) "\n" CSYM(C4Read8b) ":\n"
-                                                 "testw $0x8000, %cx\n"
-                                                 "jnz " CSYM(memaccessbankr8) "\n"
-                                                                              "cmpl $0x6000, %ecx\n"
-                                                                              "jb " CSYM(regaccessbankr8) "\n"
-                                                                                                          "pushl %ecx\n"
-                                                                                                          "pushl %edx\n"
-                                                                                                          "pushl %eax\n"
-                                                                                                          "pushl %ecx\n"
-                                                                                                          "call " CSYM(c_C4Read8b) "\n"
-                                                                                                                                   "addl $4, %esp\n"
-                                                                                                                                   "movb %al, (%esp)\n"
-                                                                                                                                   "popl %eax\n"
-                                                                                                                                   "popl %edx\n"
-                                                                                                                                   "popl %ecx\n"
-                                                                                                                                   "ret\n");
+void C4Read16b(void)
+{
+    mem_set_ax(c_C4Read16b(MemSeamC));
+}
 
-__asm__(
-    ".globl " CSYM(C4Write8b) "\n" CSYM(C4Write8b) ":\n"
-                                                   "testw $0x8000, %cx\n"
-                                                   "jnz " CSYM(memaccessbankw8) "\n"
-                                                                                "cmpl $0x6000, %ecx\n"
-                                                                                "jb " CSYM(regaccessbankw8) "\n"
-                                                                                                            "pushl %eax\n"
-                                                                                                            "pushl %ecx\n"
-                                                                                                            "pushl %edx\n"
-                                                                                                            "pushl %eax\n"
-                                                                                                            "pushl %ecx\n"
-                                                                                                            "call " CSYM(c_C4Write8b) "\n"
-                                                                                                                                      "addl $8, %esp\n"
-                                                                                                                                      "popl %edx\n"
-                                                                                                                                      "popl %ecx\n"
-                                                                                                                                      "popl %eax\n"
-                                                                                                                                      "ret\n");
-
-__asm__(
-    ".globl " CSYM(C4Read16b) "\n" CSYM(C4Read16b) ":\n"
-                                                   "testw $0x8000, %cx\n"
-                                                   "jnz " CSYM(memaccessbankr16) "\n"
-                                                                                 "cmpl $0x6000, %ecx\n"
-                                                                                 "jb " CSYM(regaccessbankr16) "\n"
-                                                                                                              "pushl %ecx\n"
-                                                                                                              "pushl %edx\n"
-                                                                                                              "pushl %eax\n"
-                                                                                                              "pushl %ecx\n"
-                                                                                                              "call " CSYM(c_C4Read16b) "\n"
-                                                                                                                                        "addl $4, %esp\n"
-                                                                                                                                        "movw %ax, (%esp)\n"
-                                                                                                                                        "popl %eax\n"
-                                                                                                                                        "popl %edx\n"
-                                                                                                                                        "popl %ecx\n"
-                                                                                                                                        "ret\n");
-
-__asm__(
-    ".globl " CSYM(C4Write16b) "\n" CSYM(C4Write16b) ":\n"
-                                                     "testw $0x8000, %cx\n"
-                                                     "jnz " CSYM(memaccessbankw16) "\n"
-                                                                                   "cmpl $0x6000, %ecx\n"
-                                                                                   "jb " CSYM(regaccessbankw16) "\n"
-                                                                                                                "pushl %eax\n"
-                                                                                                                "pushl %ecx\n"
-                                                                                                                "pushl %edx\n"
-                                                                                                                "pushl %eax\n"
-                                                                                                                "pushl %ecx\n"
-                                                                                                                "call " CSYM(c_C4Write16b) "\n"
-                                                                                                                                           "addl $8, %esp\n"
-                                                                                                                                           "popl %edx\n"
-                                                                                                                                           "popl %ecx\n"
-                                                                                                                                           "popl %eax\n"
-                                                                                                                                           "ret\n");
-
-#endif
+void C4Write16b(void)
+{
+    c_C4Write16b(MemSeamC, (uint16_t)MemSeamA);
+}

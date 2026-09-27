@@ -1,28 +1,7 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #include "gl_draw.h"
-#include "../cfg.h"
 #include "../link.h"
 #include "../video/copyvwin.h"
+#include "cfg.h"
 #include "winlink.h"
 #include <GL/gl.h>
 #include <GL/glext.h>
@@ -65,6 +44,9 @@ int gl_start(int width, int height, int req_depth, int FullScreen)
     SurfaceX = width;
     SurfaceY = height;
     glvidbuffer = (unsigned short*)malloc(512 * 512 * sizeof(short));
+    if (!glvidbuffer) {
+        return FALSE;
+    }
     gl_clearwin();
     if (BilinearFilter) {
         glfilters = GL_LINEAR;
@@ -116,7 +98,7 @@ void gl_end()
     free(glvidbuffer);
 }
 
-extern uint8_t NGNoTransp;
+extern uint32_t NGNoTransp; /* a dword where it is defined (video/c_newgfx16data.c) */
 extern uint8_t SpecialLine[256]; /* 0 if lo-res, > 0 if hi-res; real size (see endmem) */
 
 void gl_clearwin()
@@ -150,8 +132,8 @@ static void gl_drawspan(int hires, int start, int end)
 
     if (hires) {
         if (hires != gltexture512) {
-            unsigned short* vbuf1 = &((unsigned short*)vidbuffer)[16];
-            unsigned short* vbuf2 = &((unsigned short*)vidbuffer)[75036 * 2 + 16];
+            unsigned short* vbuf1 = &((unsigned short*)vidbuffer)[VID_FIRST];
+            unsigned short* vbuf2 = &((unsigned short*)vidbuffer)[VID_FIRST + 75036 * 2];
             unsigned short* vbuf = &glvidbuffer[0];
 
             if (hires > 1) // mode 7
@@ -204,10 +186,10 @@ static void gl_drawspan(int hires, int start, int end)
         glBindTexture(GL_TEXTURE_2D, gltextures[0]);
         if (!gltexture256) {
             glPixelStorei(GL_UNPACK_SKIP_PIXELS, 16);
-            glPixelStorei(GL_UNPACK_ROW_LENGTH, 288);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, VID_STRIDE);
 
             glTexImage2D(GL_TEXTURE_2D, 0, 3, 256, 256, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5,
-                ((unsigned short*)vidbuffer) + 288);
+                ((unsigned short*)vidbuffer) + VID_STRIDE);
 
             glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
             glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);

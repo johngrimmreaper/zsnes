@@ -1,25 +1,5 @@
+#include <stddef.h>
 #include <stdint.h>
-
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
 
 #ifndef restrict
 #if defined(__GNUC__)
@@ -32,8 +12,11 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #endif
 #endif
 
-#include "../cfg.h"
+#include "cfg.h"
+#include "copyvwin.h"
 #include "ntsc.h"
+
+extern uint8_t SpecialLine[256], hirestiledat[256] ASM_ALIGNED(1), GUIOn, newengen;
 
 /* Source image */
 /* width = 288 pixels, height = 223 pixels or more */
@@ -71,7 +54,7 @@ void set_ntsc_preset(int i)
     }
 }
 
-void NTSCFilterInit()
+void NTSCFilterInit(void)
 {
     /* Set GUI options */
     snes_ntsc_setup_t ntsc_setup = snes_ntsc_composite; /* start with preset */
@@ -123,10 +106,86 @@ void NTSCFilterInit()
     }
 }
 
+/* A hi-res line is 512 pixels kept as two 256-wide fields, the second a fixed
+   distance further into vidbuffer. Weave them back together so the filter sees
+   the line the SNES actually drew; reading only the first field, which is what
+   happened before, threw away every other column. */
+#define NTSC_HIRES_FIELD2 (75036 * 2)
+
+static void ntsc_weave(uint16_t* const out, uint16_t const* const line)
+{
+    uint16_t const* const second = line + NTSC_HIRES_FIELD2;
+    int i;
+
+    for (i = 0; i < 256; i++) {
+        out[i * 2] = line[i];
+        out[i * 2 + 1] = second[i];
+    }
+}
+
+/* Second scanline of a doubled row, darkened by 25%, matching PIXEL_OUT in the
+   blitter above. */
+static void ntsc_double_row(unsigned char* const at, int const out_pitch,
+    int const width)
+{
+    uint16_t const* const src = (uint16_t const*)at;
+    uint16_t* const dst = (uint16_t*)(at + out_pitch);
+    int x;
+
+    for (x = 0; x < width; x++) {
+        unsigned const p = src[x];
+
+        dst[x] = (uint16_t)(p - ((p >> 2) & 0x39E7u));
+    }
+}
+
 void NTSCFilterDraw(int out_width, int out_height, int out_pitch, unsigned char* rgb16_out)
 {
-    ntsc_blit(&ntsc_snes, (uint16_t*)vidbuffer + 16 + 576, 576, ntsc_phase,
-        out_width, out_height, rgb16_out, out_pitch);
+    /* Start on the first visible scanline, like every other display path.
+       This used to read from one line further down: the offset mixed units,
+       counting the 16-pixel border in pixels and the line in bytes, which as
+       pixel arithmetic lands a line low. That dropped the top scanline and
+       pulled a never-written line in at the bottom. */
+    uint16_t const* const base = (uint16_t*)vidbuffer + VID_FIRST;
+    uint8_t const* const linetype
+        = (GUIOn != 1 && newengen != 0) ? SpecialLine + 1 : hirestiledat + 1;
+    int const lines = out_height / 2;
+    int y = 0;
+
+    /* Lines are filtered in runs of the same kind: a run of ordinary lines
+       goes through in one call, and a hi-res one is woven and handed to the
+       library's own hi-res blitter, which takes two input pixels where the
+       plain one takes a single pixel twice. */
+    while (y < lines) {
+        int const hires = linetype[y] == 1;
+        int run = 1;
+
+        while (y + run < lines && (linetype[y + run] == 1) == hires) {
+            run++;
+        }
+        if (hires) {
+            static uint16_t woven[512];
+            int i;
+
+            for (i = 0; i < run; i++) {
+                unsigned char* const at
+                    = rgb16_out + (size_t)(y + i) * 2 * out_pitch;
+
+                ntsc_weave(woven, base + (size_t)(y + i) * VID_STRIDE);
+                snes_ntsc_blit_hires(&ntsc_snes, woven, 512, ntsc_phase, 512, 1,
+                    at, out_pitch);
+                /* The library's blitter writes one row; copy it down and dim
+                   the copy the same 25% the ordinary blitter uses, so a hi-res
+                   line does not stand out against the lines around it. */
+                ntsc_double_row(at, out_pitch, out_width);
+            }
+        } else {
+            ntsc_blit(&ntsc_snes, base + (size_t)y * VID_STRIDE, VID_STRIDE * 2,
+                ntsc_phase, out_width, run * 2,
+                rgb16_out + (size_t)y * 2 * out_pitch, out_pitch);
+        }
+        y += run;
+    }
 
     /* Change phase on alternating frames unless blending is enabled */
     if (!NTSCBlend)
@@ -134,6 +193,8 @@ void NTSCFilterDraw(int out_width, int out_height, int out_pitch, unsigned char*
 }
 
 /* custom blitter that doubles image height and darkens every other row */
+/* Unlike upstream snes_ntsc_blit, whose in_row_width counts pixels, in_pitch
+   here is bytes: the row advance below is done on a char pointer. */
 static void ntsc_blit(snes_ntsc_t const* ntsc, unsigned short const* input, long in_pitch,
     int burst_phase, int out_width, int out_height, void* rgb_out, long out_pitch)
 {

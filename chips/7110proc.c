@@ -5,20 +5,31 @@
 #include <stdint.h>
 
 #include "../asmdata.h"
+#include "../types.h"
 
 extern void SPC7110initC(void); /* 7110emu.c */
 void SPC7110RTCReset(void); /* Stage 4: seed the Epson RTC from the host clock */
 
-/* Save-state block (101 bytes). SPCROMtoI initialises to &SPCROMPtr, so the
-   whole run is laid out via inline asm to keep it contiguous and self-exact
-   under -fdata-sections. */
+/* Save-state block (101 bytes), laid out in inline asm to stay contiguous
+   under -fdata-sections. SPCROMtoI holds an address, so it has to be
+   pointer-wide and cannot live inside the block without moving the save-state
+   layout; it sits just after, and the block keeps the dword the file format
+   expects. */
 __asm__(
-    ASM_SEC_DATA(".data.spc7110state")
-        ASM_GSYM(SPCMultA) ".long 0\n" ASM_GSYM(SPCMultB) ".long 0\n" ASM_GSYM(SPCDivEnd) ".long 0\n" ASM_GSYM(SPCMulRes) ".long 0\n" ASM_GSYM(SPCDivRes) ".long 0\n" ASM_GSYM(SPC7110BankA) ".long 0x020100\n" ASM_GSYM(SPC7110RTCStat) ".long 0\n" ASM_GSYM(SPC7110RTC) ".byte 0,0,0,0,0,0,1,0,1,0,0,0,0,0,0x0F,0\n" ASM_GSYM(SPC7110RTCB) ".byte 0,0,0,0,0,0,1,0,1,0,0,0,0,1,0x0F,6\n" ASM_GSYM(SPCROMPtr) ".long 0\n" ASM_GSYM(SPCROMtoI) ".long SPCROMPtr\n" ASM_GSYM(SPCROMAdj) ".long 0\n" ASM_GSYM(SPCROMInc) ".long 0\n" ASM_GSYM(SPCROMCom) ".long 0\n" ASM_GSYM(SPCCheckFix) ".long 0\n" ASM_GSYM(SPCSignedVal) ".long 0\n" ASM_GSYM(SPCCompressionRegs) ".zero 13\n" ASM_GSYM(PHnum2writespc7110reg) ".long . - SPCMultA\n" ASM_SEC_END);
+    ASM_SEC_DATA_ALIGNED(".data.spc7110state")
+    /* The section holds dwords at fixed offsets, so it has to start on a
+       dword boundary: aarch64 scales the 12-bit immediate of a 32-bit
+       load by four, and the linker cannot encode an odd address at all.
+       Aligning the start leaves every offset inside the run unchanged. */
+    ".balign 4\n" ASM_GSYM(SPCMultA) ".long 0\n" ASM_GSYM(SPCMultB) ".long 0\n" ASM_GSYM(SPCDivEnd) ".long 0\n" ASM_GSYM(SPCMulRes) ".long 0\n" ASM_GSYM(SPCDivRes) ".long 0\n" ASM_GSYM(SPC7110BankA) ".long 0x020100\n" ASM_GSYM(SPC7110RTCStat) ".long 0\n" ASM_GSYM(SPC7110RTC) ".byte 0,0,0,0,0,0,1,0,1,0,0,0,0,0,0x0F,0\n" ASM_GSYM(SPC7110RTCB) ".byte 0,0,0,0,0,0,1,0,1,0,0,0,0,1,0x0F,6\n" ASM_GSYM(SPCROMPtr) ".long 0\n" ASM_GSYM(SPCROMtoISt) ".long 0\n" ASM_GSYM(SPCROMAdj) ".long 0\n" ASM_GSYM(SPCROMInc) ".long 0\n" ASM_GSYM(SPCROMCom) ".long 0\n" ASM_GSYM(SPCCheckFix) ".long 0\n" ASM_GSYM(SPCSignedVal) ".long 0\n" ASM_GSYM(SPCCompressionRegs) ".zero 13\n" ASM_GSYM(PHnum2writespc7110reg) ".long . - " ASM_SYMREF(SPCMultA) "\n" ASM_SEC_END);
+
+__asm__(
+    ASM_SEC_DATA(".data.spc7110ptr") ".balign " ASM_STR(__SIZEOF_POINTER__) "\n" ASM_GSYM(SPCROMtoI) "." ASM_STR(__SIZEOF_POINTER__) "byte " ASM_SYMREF(SPCROMPtr) "\n" ASM_SEC_END);
 
 extern uint32_t SPCMultA, SPCMultB, SPCDivEnd, SPCMulRes, SPCDivRes;
 extern uint32_t SPC7110BankA, SPC7110RTCStat;
-extern uint32_t SPCROMPtr, SPCROMtoI, SPCROMAdj, SPCROMInc, SPCROMCom, SPCCheckFix;
+extern uint32_t SPCROMPtr, SPCROMtoISt, SPCROMAdj, SPCROMInc, SPCROMCom, SPCCheckFix;
+extern uintptr_t SPCROMtoI; /* points at SPCROMPtr or SPCROMAdj */
 
 void SPC7110init(void)
 {
@@ -31,7 +42,7 @@ void SPC7110init(void)
     SPC7110BankA = 0x020100;
     SPC7110RTCStat = 0;
     SPCROMPtr = 0;
-    SPCROMtoI = (uint32_t)(uintptr_t)&SPCROMPtr;
+    SPCROMtoI = (uintptr_t)&SPCROMPtr;
     SPCROMAdj = 0;
     SPCROMInc = 0;
     SPCROMCom = 0;
@@ -40,6 +51,7 @@ void SPC7110init(void)
 }
 
 /* ===== Stage 2: compression status registers (0x4800-0x480C) ===== */
+#include "../cpu/memseam.h"
 #include "regabi.h"
 
 extern uint8_t SPCCompressionRegs[13];
@@ -202,14 +214,11 @@ void c_SPC482Ew(uint8_t al)
 }
 
 /* ===== Stage 4: Epson RTC-4513 (0x4840-0x4842, 0x4850-0x485F) =====
-   Independent implementation of the Epson RTC-4513 hardware: a real ticking
-   clock with bit-accurate BCD and calendar rollover, a 4-bit register file, and
-   the chip-select, mode, seek, read and write serial protocol.  The clock is
-   seeded from the host time (GetTime/GetDate) and advances by the real seconds
-   elapsed between accesses.  Behaviour cross-checked against the bsnes and
-   snes9x emulators (used only as references).  SPC7110RTC[0..15] mirrors the 16
-   registers for save-states and the direct 0x4850-0x485F reads. */
-extern uint8_t SPC7110RTC[16];
+   A ticking clock with BCD and calendar rollover, a 4-bit register file, and
+   the chip-select/mode/seek/read/write serial protocol. Seeded from the host
+   clock and advanced by the real seconds between accesses. SPC7110RTC[0..15]
+   mirrors the 16 registers for save states and the direct reads. */
+extern uint8_t SPC7110RTC[16] ASM_ALIGNED(4);
 extern uint32_t GetTime(void), GetDate(void); /* ztimec.c */
 
 /* RTC register fields (bsnes EpsonRTC layout) */
@@ -854,12 +863,10 @@ SPC_RTC_R(SPC485D, 0x0D)
 SPC_RTC_R(SPC485E, 0x0E)
 SPC_RTC_R(SPC485F, 0x0F)
 
-/* ===== Stage 5: data ROM port (0x4810-0x481A) and bank mapping (0x4831-0x4834) =====
-   The data port walks ROM at romdata+0x100000+SPCROMPtr, optionally offset by
-   SPCROMAdj, auto-incrementing the pointer SPCROMtoI selects (either SPCROMPtr
-   or SPCROMAdj) by 1, by SPCROMInc, or by SPCROMAdj depending on the command
-   byte SPCROMCom.  SPCROMtoI holds the address of the live pointer.  See the
-   asm command-mode bit table for the encoding. */
+/* ===== Stage 5: data ROM port (0x4810-0x481A), bank mapping (0x4831-0x4834) ==
+   The port walks ROM at romdata+0x100000+SPCROMPtr, optionally offset by
+   SPCROMAdj, auto-incrementing whichever pointer SPCROMtoI names by 1, by
+   SPCROMInc or by SPCROMAdj, as the SPCROMCom command byte says. */
 extern uint8_t* romdata; /* gblvars.h */
 extern uint8_t curromsize; /* initc.c */
 extern uint8_t *snesmmap[256], *snesmap2[256]; /* SNES memory map */
@@ -877,7 +884,8 @@ uint8_t c_SPC4810(void)
     p = romdata + 0x100000 + SPCROMPtr;
     if (com[0] & 2) {
         p = (uint8_t*)((uintptr_t)p + SPCROMAdj);
-        *(uint16_t*)&SPCROMAdj += 1;
+        /* a 16-bit increment of a 32-bit slot: the high half must not carry */
+        SPCROMAdj = (SPCROMAdj & 0xFFFF0000u) | (uint16_t)(SPCROMAdj + 1);
         return *p;
     }
     al = *p;
@@ -895,7 +903,7 @@ uint8_t c_SPC481A(void)
     uint8_t al;
     if (SPCCheckFix == 0)
         return 0;
-    al = romdata[0x100000 + SPCROMPtr + *(uint16_t*)&SPCROMAdj];
+    al = romdata[0x100000 + SPCROMPtr + (uint16_t)SPCROMAdj];
     if (com[1] == 4)
         ROM_INDIRECT += SPCROMAdj; /* 16-bit 4814 add after 481A */
     return al;
@@ -968,7 +976,7 @@ void c_SPC4818w(uint8_t al)
     com[0] = al;
     *(uint16_t*)&adj[2] = ((com[0] & 0x08) && (adj[1] & 0x80)) ? 0xFFFF : 0;
     *(uint16_t*)&inc[2] = ((com[0] & 0x04) && (inc[1] & 0x40)) ? 0xFFFF : 0;
-    SPCROMtoI = (uint32_t)(uintptr_t)((com[0] & 0x10) ? &SPCROMAdj : &SPCROMPtr);
+    SPCROMtoI = (uintptr_t)((com[0] & 0x10) ? &SPCROMAdj : &SPCROMPtr);
     if (al & 0x02) {
         if (al & 0x40)
             com[1] = (al & 0x20) ? 4 : 3; /* 16-bit 4814 (after 481A / direct) */
@@ -1015,36 +1023,33 @@ REGABI_REG_READ8(SPC4834);
 uint8_t c_SPC4834(void) { return 0; }
 /* ===== Stage 6: register dispatch + memory/SRAM glue =====
    Replaces the asm initSPC7110regs / SPC7110Reset handler registration and the
-   memaccess / SRAM bank handlers so 7110proc.asm can be dropped.  The SRAM
-   handlers still bridge into the asm memory core (memaccessbank*, regaccessbank*,
-   sramaccessbank*b in memory.asm) via register-ABI trampolines; they collapse to
-   plain C once that core is ported. */
+   memaccess / SRAM bank handlers so 7110proc.asm can be dropped. */
 
 /* register dispatch tables in the cpu memory core (see ui.h) */
-typedef void eop();
+typedef void eop(void);
 extern eop* regptra[0x3000];
 extern eop* regptwa[0x3000];
 #define SPC_REGR(x) (regptra[(x) - 0x2000])
 #define SPC_REGW(x) (regptwa[(x) - 0x2000])
 
 /* register-ABI trampolines emitted by the REGABI_REG_* macros above */
-extern void SPC4800(), SPC4801(), SPC4802(), SPC4803(), SPC4804(), SPC4805();
-extern void SPC4806(), SPC4807(), SPC4808(), SPC4809(), SPC480A(), SPC480B();
-extern void SPC480C(), SPC4810(), SPC4811(), SPC4812(), SPC4813(), SPC4814();
-extern void SPC4815(), SPC4816(), SPC4817(), SPC4818(), SPC481A(), SPC4820();
-extern void SPC4821(), SPC4822(), SPC4823(), SPC4824(), SPC4825(), SPC4826();
-extern void SPC4827(), SPC4828(), SPC4829(), SPC482A(), SPC482B(), SPC482C();
-extern void SPC482D(), SPC482E(), SPC482F(), SPC4831(), SPC4832(), SPC4833();
-extern void SPC4834(), SPC4840(), SPC4841(), SPC4842(), SPC4850(), SPC4851();
-extern void SPC4852(), SPC4853(), SPC4854(), SPC4855(), SPC4856(), SPC4857();
-extern void SPC4858(), SPC4859(), SPC485A(), SPC485B(), SPC485C(), SPC485D();
-extern void SPC485E(), SPC485F();
-extern void SPC4801w(), SPC4802w(), SPC4803w(), SPC4804w(), SPC4805w(), SPC4806w();
-extern void SPC4807w(), SPC4808w(), SPC4809w(), SPC480Aw(), SPC480Bw(), SPC4811w();
-extern void SPC4812w(), SPC4813w(), SPC4814w(), SPC4815w(), SPC4816w(), SPC4817w();
-extern void SPC4818w(), SPC4820w(), SPC4821w(), SPC4822w(), SPC4823w(), SPC4824w();
-extern void SPC4825w(), SPC4826w(), SPC4827w(), SPC482Ew(), SPC4831w(), SPC4832w();
-extern void SPC4833w(), SPC4840w(), SPC4841w(), SPC4842w();
+extern void SPC4800(void), SPC4801(void), SPC4802(void), SPC4803(void), SPC4804(void), SPC4805(void);
+extern void SPC4806(void), SPC4807(void), SPC4808(void), SPC4809(void), SPC480A(void), SPC480B(void);
+extern void SPC480C(void), SPC4810(void), SPC4811(void), SPC4812(void), SPC4813(void), SPC4814(void);
+extern void SPC4815(void), SPC4816(void), SPC4817(void), SPC4818(void), SPC481A(void), SPC4820(void);
+extern void SPC4821(void), SPC4822(void), SPC4823(void), SPC4824(void), SPC4825(void), SPC4826(void);
+extern void SPC4827(void), SPC4828(void), SPC4829(void), SPC482A(void), SPC482B(void), SPC482C(void);
+extern void SPC482D(void), SPC482E(void), SPC482F(void), SPC4831(void), SPC4832(void), SPC4833(void);
+extern void SPC4834(void), SPC4840(void), SPC4841(void), SPC4842(void), SPC4850(void), SPC4851(void);
+extern void SPC4852(void), SPC4853(void), SPC4854(void), SPC4855(void), SPC4856(void), SPC4857(void);
+extern void SPC4858(void), SPC4859(void), SPC485A(void), SPC485B(void), SPC485C(void), SPC485D(void);
+extern void SPC485E(void), SPC485F(void);
+extern void SPC4801w(void), SPC4802w(void), SPC4803w(void), SPC4804w(void), SPC4805w(void), SPC4806w(void);
+extern void SPC4807w(void), SPC4808w(void), SPC4809w(void), SPC480Aw(void), SPC480Bw(void), SPC4811w(void);
+extern void SPC4812w(void), SPC4813w(void), SPC4814w(void), SPC4815w(void), SPC4816w(void), SPC4817w(void);
+extern void SPC4818w(void), SPC4820w(void), SPC4821w(void), SPC4822w(void), SPC4823w(void), SPC4824w(void);
+extern void SPC4825w(void), SPC4826w(void), SPC4827w(void), SPC482Ew(void), SPC4831w(void), SPC4832w(void);
+extern void SPC4833w(void), SPC4840w(void), SPC4841w(void), SPC4842w(void);
 
 void initSPC7110regs(void) /* register the read handlers */
 {
@@ -1151,14 +1156,14 @@ void SPC7110Reset(void) /* register the write handlers */
 }
 
 /* data ROM mapped to $50:0000-$50:FFFF: reads pull from data port 0x4800 */
-REGABI_BANK_READ8(memaccessspc7110r8);
+MEMBANK_READ8(memaccessspc7110r8);
 uint8_t c_memaccessspc7110r8(uint32_t addr)
 {
     (void)addr;
     return c_SPC4800();
 }
 
-REGABI_BANK_READ16(memaccessspc7110r16);
+MEMBANK_READ16(memaccessspc7110r16);
 uint16_t c_memaccessspc7110r16(uint32_t addr)
 {
     uint8_t lo, hi;
@@ -1170,14 +1175,14 @@ uint16_t c_memaccessspc7110r16(uint32_t addr)
     return lo | (uint16_t)hi << 8;
 }
 
-REGABI_BANK_WRITE8(memaccessspc7110w8);
+MEMBANK_WRITE8(memaccessspc7110w8);
 void c_memaccessspc7110w8(uint32_t addr, uint8_t val)
 {
     (void)addr;
     (void)val;
 }
 
-REGABI_BANK_WRITE16(memaccessspc7110w16);
+MEMBANK_WRITE16(memaccessspc7110w16);
 void c_memaccessspc7110w16(uint32_t addr, uint16_t val)
 {
     (void)addr;
@@ -1185,68 +1190,48 @@ void c_memaccessspc7110w16(uint32_t addr, uint16_t val)
 }
 
 /* SPC7110 SRAM window $x0:6000-$x0:7FFF: bit15 -> ROM/WRAM, <0x6000 -> regs,
-   else 8KB-per-bank SRAM.  Register ABI: address in ECX, bank in EBX, value
-   in AL/AX.  Faithful to the asm until the memory core is C. */
-#if defined(__GNUC__) && defined(__i386__)
+   else 8KB-per-bank SRAM.  The bank shift is left in MemSeamB, and the address
+   is put back after the call, as the assembly did. */
+extern memfn memaccessbankr8, memaccessbankr16, memaccessbankw8, memaccessbankw16;
+extern memfn regaccessbankr8, regaccessbankr16, regaccessbankw8, regaccessbankw16;
+extern memfn sramaccessbankr8b, sramaccessbankr16b, sramaccessbankw8b, sramaccessbankw16b;
 
-__asm__(
-    ".globl " REGABI_SYM(SPC7110ReadSRAM8b) "\n" REGABI_SYM(SPC7110ReadSRAM8b) ":\n"
-                                                                               "testw $0x8000, %cx\n"
-                                                                               "jnz " REGABI_SYM(memaccessbankr8) "\n"
-                                                                                                                  "cmpl $0x6000, %ecx\n"
-                                                                                                                  "jb " REGABI_SYM(regaccessbankr8) "\n"
-                                                                                                                                                    "pushl %ecx\n"
-                                                                                                                                                    "subl $0x6000, %ecx\n"
-                                                                                                                                                    "shll $13, %ebx\n"
-                                                                                                                                                    "addl %ebx, %ecx\n"
-                                                                                                                                                    "andl $0xFFFF, %ecx\n"
-                                                                                                                                                    "call " REGABI_SYM(sramaccessbankr8b) "\n"
-                                                                                                                                                                                          "popl %ecx\n"
-                                                                                                                                                                                          "ret\n");
+static void spc7110_sram(memfn* const rom, memfn* const reg, memfn* const sram)
+{
+    uint32_t addr;
 
-__asm__(
-    ".globl " REGABI_SYM(SPC7110ReadSRAM16b) "\n" REGABI_SYM(SPC7110ReadSRAM16b) ":\n"
-                                                                                 "testw $0x8000, %cx\n"
-                                                                                 "jnz " REGABI_SYM(memaccessbankr16) "\n"
-                                                                                                                     "cmpl $0x6000, %ecx\n"
-                                                                                                                     "jb " REGABI_SYM(regaccessbankr16) "\n"
-                                                                                                                                                        "pushl %ecx\n"
-                                                                                                                                                        "subl $0x6000, %ecx\n"
-                                                                                                                                                        "shll $13, %ebx\n"
-                                                                                                                                                        "addl %ebx, %ecx\n"
-                                                                                                                                                        "andl $0xFFFF, %ecx\n"
-                                                                                                                                                        "call " REGABI_SYM(sramaccessbankr16b) "\n"
-                                                                                                                                                                                               "popl %ecx\n"
-                                                                                                                                                                                               "ret\n");
+    if (MemSeamC & 0x8000) {
+        rom();
+        return;
+    }
+    if (MemSeamC < 0x6000) {
+        reg();
+        return;
+    }
+    addr = MemSeamC;
+    MemSeamC -= 0x6000;
+    MemSeamB <<= 13;
+    MemSeamC = (MemSeamC + MemSeamB) & 0xFFFF;
+    sram();
+    MemSeamC = addr;
+}
 
-__asm__(
-    ".globl " REGABI_SYM(SPC7110WriteSRAM8b) "\n" REGABI_SYM(SPC7110WriteSRAM8b) ":\n"
-                                                                                 "testw $0x8000, %cx\n"
-                                                                                 "jnz " REGABI_SYM(memaccessbankw8) "\n"
-                                                                                                                    "cmpl $0x6000, %ecx\n"
-                                                                                                                    "jb " REGABI_SYM(regaccessbankw8) "\n"
-                                                                                                                                                      "pushl %ecx\n"
-                                                                                                                                                      "subl $0x6000, %ecx\n"
-                                                                                                                                                      "shll $13, %ebx\n"
-                                                                                                                                                      "addl %ebx, %ecx\n"
-                                                                                                                                                      "andl $0xFFFF, %ecx\n"
-                                                                                                                                                      "call " REGABI_SYM(sramaccessbankw8b) "\n"
-                                                                                                                                                                                            "popl %ecx\n"
-                                                                                                                                                                                            "ret\n");
+void SPC7110ReadSRAM8b(void)
+{
+    spc7110_sram(memaccessbankr8, regaccessbankr8, sramaccessbankr8b);
+}
 
-__asm__(
-    ".globl " REGABI_SYM(SPC7110WriteSRAM16b) "\n" REGABI_SYM(SPC7110WriteSRAM16b) ":\n"
-                                                                                   "testw $0x8000, %cx\n"
-                                                                                   "jnz " REGABI_SYM(memaccessbankw16) "\n"
-                                                                                                                       "cmpl $0x6000, %ecx\n"
-                                                                                                                       "jb " REGABI_SYM(regaccessbankw16) "\n"
-                                                                                                                                                          "pushl %ecx\n"
-                                                                                                                                                          "subl $0x6000, %ecx\n"
-                                                                                                                                                          "shll $13, %ebx\n"
-                                                                                                                                                          "addl %ebx, %ecx\n"
-                                                                                                                                                          "andl $0xFFFF, %ecx\n"
-                                                                                                                                                          "call " REGABI_SYM(sramaccessbankw16b) "\n"
-                                                                                                                                                                                                 "popl %ecx\n"
-                                                                                                                                                                                                 "ret\n");
+void SPC7110ReadSRAM16b(void)
+{
+    spc7110_sram(memaccessbankr16, regaccessbankr16, sramaccessbankr16b);
+}
 
-#endif
+void SPC7110WriteSRAM8b(void)
+{
+    spc7110_sram(memaccessbankw8, regaccessbankw8, sramaccessbankw8b);
+}
+
+void SPC7110WriteSRAM16b(void)
+{
+    spc7110_sram(memaccessbankw16, regaccessbankw16, sramaccessbankw16b);
+}

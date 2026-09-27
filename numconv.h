@@ -1,26 +1,7 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #ifndef NUMCONV_H
 #define NUMCONV_H
+
+#include "gblhdr.h"
 
 #include <stdio.h>
 
@@ -125,7 +106,7 @@ static unsigned short bytes_to_uint16(const unsigned char buffer[2])
 static unsigned short fread2(FILE* fp)
 {
     unsigned char uint16buf[2];
-    fread(uint16buf, 2, 1, fp);
+    IGNORE_RESULT(fread(uint16buf, 2, 1, fp));
     return (bytes_to_uint16(uint16buf));
 }
 #endif
@@ -134,7 +115,7 @@ static unsigned short fread2(FILE* fp)
 static unsigned int fread3(FILE* fp)
 {
     unsigned char uint24buf[3];
-    fread(uint24buf, 3, 1, fp);
+    IGNORE_RESULT(fread(uint24buf, 3, 1, fp));
     return (bytes_to_uint24(uint24buf));
 }
 #endif
@@ -143,7 +124,7 @@ static unsigned int fread3(FILE* fp)
 static unsigned int fread4(FILE* fp)
 {
     unsigned char uint32buf[4];
-    fread(uint32buf, 4, 1, fp);
+    IGNORE_RESULT(fread(uint32buf, 4, 1, fp));
     return (bytes_to_uint32(uint32buf));
 }
 #endif

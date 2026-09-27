@@ -3,7 +3,6 @@
 #include "../c_init.h"
 #include "../c_intrf.h"
 #include "../c_vcache.h"
-#include "../cfg.h"
 #include "../cpu/c_dspproc.h"
 #include "../cpu/c_execute.h"
 #include "../cpu/execute.h"
@@ -12,6 +11,7 @@
 #include "../effects/smoke.h"
 #include "../effects/water.h"
 #include "../endmem.h"
+#include "cfg.h"
 #ifndef lengthof
 #define lengthof(x) (sizeof(x) / sizeof *(x))
 #endif
@@ -40,7 +40,7 @@
 #include "guiwindp.h"
 
 #ifdef __OPENGL__
-#include "../linux/c_sdlintrf.h"
+#include "../unix/c_sdlintrf.h"
 #endif
 
 #ifdef __WIN32__
@@ -196,7 +196,17 @@ u1 const GUIFontData[][5] = {
     { 0xF8, 0x88, 0x08, 0x10, 0x60 }, // shw wa 0x89
     { 0x80, 0x48, 0x08, 0x10, 0xE0 }, // shw n 0x8A
     { 0xA0, 0xA0, 0x00, 0x00, 0x00 }, // shw voiced 0x8B
-    { 0x40, 0xA0, 0x40, 0x00, 0x00 } // shw halfvoiced 0x8C
+    { 0x40, 0xA0, 0x40, 0x00, 0x00 }, // shw halfvoiced 0x8C
+    /* Nordic letters, so a filename or name with them shows and edits. The font
+       is caps-only, so the lower-case forms share these. Indices past the 141
+       the loadable font (GUIFontData1) holds, so GUIoutputchar falls back to
+       this built-in font for them (see gui/guitools.c). */
+    { 0x70, 0x98, 0xA8, 0xC8, 0x70 }, // O-slash (0xD8/0xF8) 0x8D
+    { 0x78, 0xA0, 0xF0, 0xA0, 0xB8 }, // AE     (0xC6/0xE6) 0x8E
+    { 0x20, 0x70, 0x88, 0xF8, 0x88 }, // A-ring  (0xC5/0xE5) 0x8F
+    /* Fallback box for a UTF-8 codepoint the font has no glyph for; see
+       glyph_for_codepoint in video/procvid.c. */
+    { 0xF8, 0x88, 0x88, 0x88, 0xF8 } // unsupported 0x90
 };
 
 u1 GUIFontData1[][5];
@@ -205,8 +215,10 @@ u1 GUIFontData1[][5];
  *                       LOAD STAT INPT  OPT  VID  SND  CHT  NET GMKEY GUIOP  ABT RSET  SRC STCN MOVE CMBO ADDO CHIP PATH SAVE SPED */
 static u4 GUIwinposxo[] = { 0, 6, 65, 33, 42, 5, 34, 6, 64, 8, 5, 33, 56, 64, 56, 5, 3, 28, 48, 6, 28, 53 };
 static u4 GUIwinposyo[] = { 0, 20, 70, 20, 20, 20, 20, 20, 30, 30, 20, 20, 60, 30, 60, 20, 20, 60, 60, 20, 30, 20 };
-u4 GUIwinsizex[] = { 0, 244, 126, 205, 180, 245, 188, 244, 128, 240, 245, 190, 144, 128, 144, 246, 250, 200, 160, 244, 200, 150 };
-u4 GUIwinsizey[] = { 0, 190, 68, 192, 190, 190, 188, 191, 40, 170, 150, 190, 42, 40, 42, 190, 190, 120, 100, 190, 168, 180 };
+u4 GUIwinsizex[] = { 0, 244, 126, 205, 180, 245, 188, 244, 128, 240, 245, 220, 144, 128, 144, 246, 250, 200, 160, 244, 200, 150 };
+/* Window 3 (input) is a row taller than stock (192 -> 204) to fit the extra
+   "PHYSICAL KEYS" checkbox at y=190; see gui/c_guiwindp.c. */
+u4 GUIwinsizey[] = { 0, 190, 68, 204, 190, 190, 188, 191, 40, 170, 150, 190, 42, 40, 42, 190, 190, 120, 100, 190, 168, 180 };
 u1 GUIwinptr;
 
 static u4 SantaNextT = 36 * 15;
@@ -224,7 +236,7 @@ static u1 MenuDat5[] = { 0, 2, 0, 0 };
 static u1 MenuDat6[] = { 6, 3, 1, 1, 1, 1, 0, 2, 0 };
 
 static bool GUIPalConv;
-static char* GUICMessage;
+static char const* GUICMessage;
 static u1 OkaySC;
 static u2 PrevResoln;
 static u2 TBVal;
@@ -1019,15 +1031,13 @@ void GUISetPal(void)
 
 void convertnum(char* dst, u4 val)
 {
-    char buf[10];
-    char* b = buf;
+    u4 n = 1;
+    for (u4 v = val; v >= 10; v /= 10)
+        n++;
+    dst[n] = '\0';
     do
-        *b++ = '0' + val % 10;
+        dst[--n] = (char)('0' + val % 10);
     while ((val /= 10) != 0);
-    do
-        *dst++ = *--b;
-    while (b != buf);
-    *dst = '\0';
 }
 
 void converthex(char* dst, u4 val, u4 n)
@@ -1086,7 +1096,6 @@ static char const guiftimemsg8[] = "PRESS SPACEBAR TO PROCEED.";
 static void horizonfixmsg(void)
 {
     memset(pressed, 0, 256); // XXX maybe should be sizeof(pressed)
-    pressed[0x2C] = 0; // XXX redundant
 
     char const* const* const msg = horizon_get(GetTime());
     do {
@@ -1110,24 +1119,11 @@ void StartGUI(void)
     static u1 MouseInitOkay = 0;
 
 #ifdef __OPENGL__
-    if (FilteredGUI == 0 && BilinearFilter == 1)
+    if (FilteredGUI == 0 && BilinearFilter == 1 && !VideoSettingsLive())
         blinit = 1;
 #endif
     GUILoadPos = 0;
-    if (newgfx16b == 0) {
-        En2xSaI = 0;
-        hqFilter = 0;
-    }
-    if (En2xSaI != 0) {
-        hqFilter = 0;
-        scanlines = 0;
-        antienab = 0;
-    }
-    if (hqFilter != 0) {
-        En2xSaI = 0;
-        scanlines = 0;
-        antienab = 0;
-    }
+    GUIFilterForMode();
 
     memset(SpecialLine, 0, sizeof(SpecialLine));
 
@@ -1307,7 +1303,6 @@ void StartGUI(void)
 void guimencodermsg(void)
 {
     memset(pressed, 0, 256); // XXX maybe should be sizeof(pressed)
-    pressed[0x2C] = 0; // XXX redundant
 
     do {
         GUIBox3D(43, 75, 213, 163);
@@ -1324,7 +1319,6 @@ void guimencodermsg(void)
 void guilamemsg(void)
 {
     memset(pressed, 0, 256); // XXX maybe should be sizeof(pressed)
-    pressed[0x2C] = 0; // XXX redundant
 
     do {
         GUIBox3D(43, 75, 213, 163);

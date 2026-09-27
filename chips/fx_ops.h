@@ -1,36 +1,18 @@
 /*
- * chips/fx_ops.h - the SuperFX (GSU) core, ported from chips/fxemu2*.asm.
- *
- * Textual include (chips/c_fxops.c): the includer provides the u1/u2/u4/s1
- * typedefs and the seam block declared below.
- *
- * The assembly kept the hot state in registers:
- *
- *     ebp  program counter, a host pointer into the current code bank
- *     esi  source register pointer      (&SfxR0 + n*4)
- *     edi  destination register pointer (&SfxR0 + n*4)
- *     ecx  cl = the next opcode byte, ch = the ALT1/ALT2/ALT3 mode
- *
- * Those four are now the FxSeam* variables, loaded by MainLoop and written back
- * by its epilogue; everything in between reads and writes them directly.
- *
- * ch is not just a flag: the dispatch is table[(ALT << 8) | opcode], and
- * FxTable/FxTableA1/FxTableA2/FxTableA3 are laid out adjacently (endmem.c), so
- * ch selects the ALT table and cl the opcode within it. The same holds for the
- * b, c and d table groups.
- *
- * The base tables are entered with a call and return; the d table is the one
- * MainLoop threads through, so its handlers also spend an opcode from the
- * budget and can end the loop. Only STOP behaves differently between the two,
- * so the d table shares the base table's bodies everywhere else.
+ * The SuperFX (GSU) core, from chips/fxemu2*.asm. Textual include: the includer
+ * supplies the typedefs and the seam block below. ebp is the PC, esi/edi the
+ * source/destination register pointers, cl the opcode and ch the ALT mode;
+ * dispatch is table[(ALT << 8) | opcode] over adjacent tables (endmem.c).
  */
+
+#include "../unaligned.h"
 #ifndef FX_OPS_H
 #define FX_OPS_H
 
 /* Run one opcode through a dispatch table. The four ALT sub-tables of a group
    are adjacent, so FxSeamCX indexes all of them; this is what the assembly did
    with `call [table + ecx*4]`. */
-static inline void FxDispatch(u4 const* const table)
+static inline void FxDispatch(zreg const* const table)
 {
     ((void (*)(void))(uintptr_t)table[FxSeamCX])();
 }
@@ -44,8 +26,10 @@ static inline void fx_fetchpipe(void)
 /* R15 mirrors the program counter as a bank-relative address. */
 static inline u4 fx_pc_rel(void)
 {
-    return (u4)(uintptr_t)FxSeamPC - SfxCPB;
+    return (u4)((uintptr_t)FxSeamPC - SfxCPB);
 }
+
+extern u4 SfxR0[16]; /* SfxR0..SfxR15 are contiguous (chips/c_fxdata.c) */
 
 /* UpdateR14: recompute the ROM pointer R14 reads through. */
 static inline void fx_update_r14(void)
@@ -85,7 +69,7 @@ static inline int fx_cond_overflow(void)
 /* Shared body of the eleven conditional branches. The displacement is the
  * signed byte at the program counter; the opcode byte that follows it is the
  * delay slot, which runs either way. */
-static inline void fx_branch(u4 const* const table, int const taken)
+static inline void fx_branch(zreg const* const table, int const taken)
 {
     s1 const disp = (s1)*FxSeamPC;
 
@@ -97,7 +81,7 @@ static inline void fx_branch(u4 const* const table, int const taken)
 
 /* BRA reads the delay slot at ebp+1 before advancing, which lands on the same
  * byte the conditional branches read after their `inc ebp`. */
-static inline void fx_branch_always(u4 const* const table)
+static inline void fx_branch_always(zreg const* const table)
 {
     s1 const disp = (s1)*FxSeamPC;
 
@@ -125,15 +109,9 @@ FX_BRANCHES(c, FxTablec)
 
 /* --- The 16-bit ALU group (chips/fxemu2.asm, base table) ------------------
  *
- * ADD/ADC/SUB/SBC/CMP/AND/BIC, register and immediate forms. Two things about
- * these are easy to get wrong:
- *
- *  - the arithmetic is `add ax,bx`, i.e. 16-bit, but the *whole* 32-bit
- *    register is then written to the destination and to SfxSignZero, so the
- *    upper half of the source value survives untouched;
- *  - `seto`/`setc` store a single byte into SfxOverflow/SfxCarry, leaving the
- *    upper three bytes of each alone.
- */
+ * ADD/ADC/SUB/SBC/CMP/AND/BIC. The arithmetic is 16-bit but the whole 32-bit
+ * register is stored, so the source's upper half survives; and seto/setc write
+ * one byte of SfxOverflow/SfxCarry, leaving the other three. */
 
 /* Flag writes are byte-wide, exactly as seto/setc are. */
 static inline void fx_set_overflow(int const v) { *(u1*)&SfxOverflow = (u1) !!v; }
@@ -431,12 +409,9 @@ void c_FxOp7FA3(void) { fx_bicirn(15); }
 
 /* --- OR / XOR / INC / DEC (chips/fxemu2.asm, base table) ------------------
  *
- * OR and XOR are plain 32-bit logic, like AND. INC and DEC are the odd ones:
- * they are `inc word[SfxR0+n*4]`, so they work 16-bit and *in place* on the
- * register, never through the esi/edi source/destination pointers, and the
- * upper half of the register survives the wrap. Neither touches carry or
- * overflow; x86 `inc`/`dec` leave CF alone and the asm has no seto/setc.
- */
+ * OR and XOR are plain 32-bit logic. INC and DEC are 16-bit and *in place* on
+ * the register, never through the source/destination pointers, so the upper
+ * half survives the wrap; neither writes carry or overflow. */
 
 static inline void fx_or(u4 const rhs)
 {
@@ -573,12 +548,9 @@ void c_FxOpED(void) { fx_decrn(13); }
 
 /* --- MULT / UMULT (chips/fxemu2.asm, base table) --------------------------
  *
- * 8x8 multiplies: only the low byte of each operand takes part (`mov al,[esi]`
- * / `mov bl,...`), MULT is signed (imul) and UMULT unsigned (mul). The 16-bit
- * product is masked with `and eax,0FFFFh` before it is stored, so unlike the
- * add/subtract ops these zero the upper half of the destination rather than
- * preserving it. No carry or overflow is written.
- */
+ * 8x8, low byte of each operand only; MULT signed, UMULT not. The product is
+ * masked to 16 bits before the store, so these *zero* the destination's upper
+ * half where add/subtract preserve it. No carry or overflow. */
 
 static inline void fx_mult(u4 const rhs, int const sign)
 {
@@ -668,12 +640,10 @@ void c_FxOp8FA3(void) { fx_umultirn(15); }
 
 /* --- TO rN / FROM rN / WITH rN (chips/fxemu2.asm, base table) -------------
  *
- * The plain forms: retarget the destination (TO), the source (FROM), or both
- * plus the B flag (WITH), run the next opcode with that in place, then put the
- * pointers back. WITH chains through the c table, the others through the base
- * table. Compare the b-group versions above, which additionally have a
- * version-B immediate-move path and maintain R15.
- */
+ * Retarget the destination (TO), the source (FROM) or both plus the B flag
+ * (WITH), run the next opcode, put the pointers back. WITH chains through the
+ * c table, the others through the base table. The b-group versions above also
+ * have a version-B immediate move and maintain R15. */
 
 static inline void fx_torn(u4 const n)
 {
@@ -757,13 +727,9 @@ void c_FxOpBE(void) { fx_fromrn(14); }
 
 /* --- Load / store (chips/fxemu2.asm, base table) --------------------------
  *
- * The address is the raw register value added to SfxRAMMem; SfxLastRamAdr
- * records the absolute address for the caching logic elsewhere. None of these
- * touch SfxSignZero or any flag.
- *
- * The word forms address the second byte as addr^1, not addr+1: SuperFX RAM is
- * word-interleaved, so the high byte lives at the sibling even/odd offset.
- */
+ * Address is the raw register plus SfxRAMMem; SfxLastRamAdr keeps the absolute
+ * one for the caching logic. No flags. The word forms take the second byte at
+ * addr^1: SuperFX RAM is word-interleaved. */
 
 static inline u1* fx_ram(u4 const addr)
 {
@@ -879,16 +845,11 @@ void c_FxOp4BA1(void) { fx_ldbrn(11); }
 
 /* --- Immediate loads and short/long memory moves --------------------------
  *
- * These take their operand from the instruction stream rather than a register,
- * so they advance the program counter by more than one and prefetch the next
- * opcode from past the immediate.
- *
- * Watch the store widths, which differ across the group: IBT and the LM forms
- * write `ax`/`dx`/`bx`, i.e. 16-bit, leaving the register's upper half intact,
- * while IWT writes the full `eax` and so zeroes it. LM/SM address RAM
- * word-interleaved (addr^1) like LDW/STW; LMS/SMS instead do one plain 16-bit
- * access at 2*imm8.
- */
+ * Operand comes from the instruction stream, so the program counter advances
+ * past it before the prefetch. Store widths differ: IBT and the LM forms are
+ * 16-bit and keep the register's upper half, IWT writes all 32 and zeroes it.
+ * LM/SM are word-interleaved (addr^1); LMS/SMS are one 16-bit access at
+ * 2*imm8. */
 
 /* Write only the low half of a register, as `mov [SfxR0+n*4],ax` does. */
 static inline void fx_set_lo16(u4 const n, u4 const v)
@@ -1069,13 +1030,10 @@ void c_FxOpFEA2(void) { fx_smrn(14); }
 
 /* --- CACHE, LINK and the jumps (chips/fxemu2.asm, base table) -------------
  *
- * LJMP switches code bank: it indexes SfxMemTable with the low 7 bits of the
- * register to get the new bank base, then re-runs the CACHE opcode for its
- * cache-invalidate side effect. The assembly did that with a literal
- * `push ecx / call FxOp02 / pop ecx / dec ebp`, so the opcode byte and the
- * program counter CACHE leaves behind are both discarded and only SfxCBR /
- * SfxCacheActive survive.
- */
+ * LJMP switches code bank through SfxMemTable[reg & 0x7F], then re-runs CACHE
+ * for its invalidate side effect. The asm saved and restored the opcode byte
+ * and program counter around that call, so only SfxCBR and SfxCacheActive
+ * survive it. */
 
 /* FlushCache was a bare `ret` in chips/fxemu2.asm - the cache is only ever
    tracked, never copied - so this is a no-op too. */
@@ -1160,12 +1118,9 @@ void c_FxOp9DA1(void) { fx_ljmprn(13); }
 
 /* --- Single-register bit and shift ops (chips/fxemu2.asm, base table) -----
  *
- * All of these read the source register and write the destination, with no
- * operand. Note how much the write widths vary: the shifts work on `ax` and so
- * keep the register's upper half, while SEX, LOB and HIB write the full `eax`
- * and clear it. The flag stores are byte-wide (`mov [SfxCarry],al`), leaving
- * the upper three bytes of SfxCarry alone.
- */
+ * Source in, destination out, no operand. Write widths vary: the shifts are
+ * 16-bit and keep the upper half, SEX/LOB/HIB write all 32 and clear it. Flag
+ * stores are byte-wide. */
 
 void c_FxOp01(void) /* NOP */
 {
@@ -1378,14 +1333,10 @@ void c_FxOpEE(void) /* DEC R14 */
 
 /* --- TO rN / FROM rN, and the register-select opcodes ---------------------
  *
- * These come in two flavours. Outside a WITH block (SfxB clear, "version A")
- * TO/FROM only *retarget* the destination or source register and then run the
- * next opcode with that retargeting in place, restoring it afterwards. Inside a
- * WITH block (SfxB set, "version B") the same opcode instead performs an
- * immediate register-to-register move.
- *
- * Note which table each one chains through: TO uses the b table, FROM uses the
- * base table, and the c-group opcodes have no version A at all. */
+ * Outside a WITH block (SfxB clear) TO/FROM retarget the destination or source
+ * for the next opcode and restore it after; inside one they are an immediate
+ * register-to-register move. TO chains through the b table, FROM through the
+ * base table, and the c-group opcodes have no outside-WITH form. */
 
 /* The destination write shared by every FROM rN: the value sets sign/zero, and
  * `shr al,7` followed by a *byte* store means only the low byte of SfxOverflow
@@ -1448,7 +1399,7 @@ static inline void fx_fromrn_c(u4 const n)
 
 /* ALT1/ALT2/ALT3 set the mode bits in ch for exactly one instruction, which
  * steers the dispatch into the matching ALT sub-table, then clear them. */
-static inline void fx_alt_b(u4 const mode, u4 const* const table)
+static inline void fx_alt_b(u4 const mode, zreg const* const table)
 {
     fx_fetchpipe();
     SfxB = 0;
@@ -1460,7 +1411,7 @@ static inline void fx_alt_b(u4 const mode, u4 const* const table)
 }
 
 /* The plain form. Only the b group additionally stamps R15 (fx_alt_b). */
-static inline void fx_alt(u4 const mode, u4 const* const table)
+static inline void fx_alt(u4 const mode, zreg const* const table)
 {
     fx_fetchpipe();
     SfxB = 0;
@@ -1534,6 +1485,8 @@ void c_FxOpb1E(void)
    not write R15 back. */
 void c_FxOpb1F(void)
 {
+    u4 pc;
+
     fx_fetchpipe();
     if (SfxB & 1) {
         u4 const v = *FxSeamSrc;
@@ -1543,10 +1496,13 @@ void c_FxOpb1F(void)
     }
     FxSeamDst = SfxR0 + 15;
     FxSeamPC++;
-    SfxR0[15] = fx_pc_rel();
+    pc = fx_pc_rel();
+    SfxR0[15] = pc;
     FxDispatch(FxTableb);
     withr15sk = 1;
-    FxSeamPC = (u1*)(uintptr_t)(SfxCPB + SfxR0[15]);
+    if (SfxR0[15] != pc) {
+        FxSeamPC = (u1*)(uintptr_t)(SfxCPB + SfxR0[15]);
+    }
     FxSeamDst = SfxR0;
 }
 
@@ -1603,11 +1559,9 @@ void c_FxOpc3F(void) { fx_alt(3, FxTablec); }
 
 /* --- Base-table branches and register-select edge cases -------------------
  *
- * The same shapes as the b and c groups above, but chaining through the base
- * table. The R14 and R15 forms are spelled out because each has a tail the
- * plain TO/FROM/WITH do not: R14 refreshes the ROM pointer, R15 rebuilds the
- * program counter from the register the nested opcode may have moved.
- */
+ * The b and c shapes again, chaining through the base table. R14 and R15 are
+ * spelled out for their tails: R14 refreshes the ROM pointer, R15 rebuilds the
+ * program counter from a register the nested opcode may have moved. */
 
 FX_BRANCHES(, FxTable)
 
@@ -1621,13 +1575,23 @@ void c_FxOp1E(void) /* TO R14 */
     fx_update_r14();
 }
 
-void c_FxOp1F(void) /* TO R15: the nested opcode's write to R15 is the jump */
+/* TO R15: the nested opcode's write to R15 is the jump. Opcodes that are jumps
+   in their own right (IWT/IBT/LM/LMS R15, JMP, LOOP) set the program counter
+   and never touch R15, so seed R15 with the current one and only rebuild from
+   it when the nested opcode wrote something else. */
+void c_FxOp1F(void)
 {
+    u4 pc;
+
     fx_fetchpipe();
     FxSeamDst = SfxR0 + 15;
     FxSeamPC++;
+    pc = fx_pc_rel();
+    SfxR0[15] = pc;
     FxDispatch(FxTable);
-    FxSeamPC = (u1*)(uintptr_t)(SfxCPB + SfxR0[15]);
+    if (SfxR0[15] != pc) {
+        FxSeamPC = (u1*)(uintptr_t)(SfxCPB + SfxR0[15]);
+    }
     FxSeamDst = SfxR0;
 }
 
@@ -1682,10 +1646,8 @@ void c_FxOpBF(void) /* FROM R15 */
 
 /* --- The R15 operand forms and SBK ---------------------------------------
  *
- * $x F with the register field at 15: the second operand is the *live*
- * program counter (`mov ebx,ebp / sub ebx,[SfxCPB]`), taken before the counter
- * advances, rather than the stored R15.
- */
+ * $x F: the second operand is the *live* program counter, taken before it
+ * advances, not the stored R15. */
 
 void c_FxOp5F(void) /* ADD R15 */
 {
@@ -1802,7 +1764,7 @@ void c_FxOpDFA2(void) /* RAMB: select the RAM bank */
 
     fx_fetchpipe();
     SfxRAMBR = bank;
-    SfxRAMMem = (bank << 16) + (u4)(uintptr_t)sfxramdata;
+    SfxRAMMem = (bank << 16) + (uintptr_t)sfxramdata;
     FxSeamPC++;
 }
 
@@ -1927,7 +1889,7 @@ void c_FxOpDF(void) /* GETC: colour from the ROM buffer */
 
 /* Which line-location table the current screen mode uses. POR bit 4 forces
    object mode; otherwise SCMR bits 2 and 5 give the screen height. */
-static inline u4 fx_lineloc(void)
+static inline zreg fx_lineloc(void)
 {
     if (SfxPOR & 0x10u) {
         return sfxobjlineloc;
@@ -2042,34 +2004,23 @@ void c_FxOp00(void) /* STOP: halt the GSU, optionally raising an IRQ */
 
 /* --- PLOT and RPIX -------------------------------------------------------
  *
- * PLOT writes the colour register to the pixel at (R1, R2) and advances R1.
- * CMODE chooses one of sixteen specialisations up front (see c_FxOp4EA1) and
- * patches it into the dispatch tables, so the depth, the zero check and the
- * dither are all decided before a pixel is ever drawn.
- *
- * The line-location table maps a packed (x, y) to a tile number, or to
- * 0xFFFFFFFF for coordinates off the right-hand edge of the screen. The tile
- * number scales by the depth's bits-per-tile-row shift, plus two bytes for
- * each of the eight rows in a tile.
- *
- * The bitplane pairs are 16 bytes apart, and each write is 32-bit: one access
- * covers both bytes of a pair. fxxand[x] clears the destination bit in both,
- * and the fxbitNNpcal values (refreshed by COLOR) carry the colour already
- * expanded to that layout.
- */
+ * PLOT writes the colour register to (R1, R2) and advances R1. CMODE picks one
+ * of sixteen specialisations up front (c_FxOp4EA1) and patches the dispatch
+ * tables. Bitplane pairs are 16 bytes apart and every write is 32-bit, so one
+ * access covers both; fxxand[x] clears the destination bit in both. */
 
 enum { FX_PLOT_2BPP,
     FX_PLOT_4BPP,
     FX_PLOT_8BPP };
 
-static inline u4* fx_plane(u4 const addr, u4 const n)
+static inline void* fx_plane(zreg const addr, u4 const n)
 {
-    return (u4*)(uintptr_t)(addr + n * 16u);
+    return (void*)(uintptr_t)(addr + n * 16u);
 }
 
 /* Write one pixel. The dithered form just uses the other pair of colour
    lookups, which COLOR loaded with the high nibble. */
-static inline void fx_drawpix(u4 const addr, u4 mask, int const depth, int const dither)
+static inline void fx_drawpix(zreg const addr, u4 mask, int const depth, int const dither)
 {
     u4 const b01 = dither ? fxbit45pcal : fxbit01pcal;
     u4 const b23 = dither ? fxbit67pcal : fxbit23pcal;
@@ -2080,11 +2031,11 @@ static inline void fx_drawpix(u4 const addr, u4 mask, int const depth, int const
     u4 const col[4] = { b01, b23, b45, b67 };
 
     for (u4 i = 0; i < planes; i++) {
-        *fx_plane(addr, i) &= mask;
+        st32u(fx_plane(addr, i), ld32u(fx_plane(addr, i)) & mask);
     }
     mask ^= 0xFFFFFFFFu;
     for (u4 i = 0; i < planes; i++) {
-        *fx_plane(addr, i) |= col[i] & mask;
+        st32u(fx_plane(addr, i), ld32u(fx_plane(addr, i)) | (col[i] & mask));
     }
 }
 
@@ -2099,7 +2050,7 @@ static inline void fx_plot(int const depth, u4 const zmask, int const zcheck, in
     FxSeamPC++;
     tile = ((u4 const*)(uintptr_t)sfxclineloc)[index];
     if (tile != 0xFFFFFFFFu && (!zcheck || ((u1)SfxCOLR & zmask))) {
-        u4 const addr = (tile << shift) + ((index & 7u) * 2u) + SCBRrel;
+        zreg const addr = (tile << shift) + ((index & 7u) * 2u) + (uintptr_t)SCBRrel;
         u4 const mask = fxxand[SfxR0[1] & 0xFFu];
 
         fx_drawpix(addr, mask, depth,
@@ -2133,7 +2084,7 @@ void c_FxOp4C(void) { c_FxOp4C1284b(); }
 void c_FxOp4CA1(void)
 {
     u4 const index = (SfxR0[2] & 0xFFFF00FFu) | ((SfxR0[1] & 0xFFu) << 8);
-    u4 const lineloc = fx_lineloc();
+    zreg const lineloc = fx_lineloc();
     u4 const tile = ((u4 const*)(uintptr_t)lineloc)[index];
     u4 res = 0xFFu;
 
@@ -2144,8 +2095,8 @@ void c_FxOp4CA1(void)
                                                      : 5;
         u4 const planes = depth == 0 ? 2 : depth == 3 ? 8
                                                       : 4;
-        u4 const addr = (SfxSCBR << 10) + (tile << shift)
-            + ((index & 7u) * 2u) + (u4)(uintptr_t)sfxramdata;
+        zreg const addr = (SfxSCBR << 10) + (tile << shift)
+            + ((index & 7u) * 2u) + (uintptr_t)sfxramdata;
         u1 const bit = (u1)(1u << ((SfxR0[1] & 7u) ^ 7u));
 
         res = 0;
@@ -2163,13 +2114,11 @@ void c_FxOp4CA1(void)
 
 /* --- The d table's one divergent handler ---------------------------------
  *
- * Every other d-table opcode shares its body with the base-table one and
- * differs only in the tail (FXReturn instead of ret), which lives in the asm
- * thunk. STOP is the exception, in two ways: it leaves the loop directly, so it
- * skips the SFXProc and opcode-byte clears the base-table version does, and its
- * IRQ-flag store is commented out in chips/fxemu2c.asm, so this copy never
- * raises the interrupt. Kept as-is; c_FxOp00 has the line the other one runs.
- */
+ * Every other d-table opcode shares the base-table body and differs only in
+ * the tail. STOP does not: it leaves the loop directly, skipping the SFXProc
+ * and opcode-byte clears, and its IRQ-flag store was commented out in
+ * chips/fxemu2c.asm, so this copy raises no interrupt. c_FxOp00 has that
+ * line. */
 void c_FxOpd00(void)
 {
     fx_fetchpipe();
@@ -2183,12 +2132,9 @@ void c_FxOpd00(void)
 
 /* --- The main loop -------------------------------------------------------
  *
- * The FXReturn tail every d-table handler used to end with: spend one opcode
- * from the budget and say whether the loop goes on. The count is decremented
- * before the test and the test is signed, so a budget of zero still runs one
- * opcode. STOP skips this entirely (it jumped straight to the epilogue), which
- * is what FxLoopDone stands for.
- */
+ * FXReturn: spend one opcode and say whether the loop goes on. The count is
+ * decremented before a signed test, so a budget of zero still runs one opcode.
+ * STOP jumps straight to the epilogue instead, which FxLoopDone stands for. */
 static inline int fx_loop_next(void)
 {
     if (FxLoopDone) {
@@ -2198,17 +2144,16 @@ static inline int fx_loop_next(void)
     return (s4)NumberOfOpcodes >= 0;
 }
 
-/* Run the GSU until it runs out of opcodes or hits STOP. The prologue and
-   epilogue are the old PackEsiEdi/UnPackEsiEdi pair plus the program counter,
-   opcode byte and ALT mode, which live in SfxR15, SfxPIPE and SfxSFR between
-   calls. */
+/* Run the GSU until the opcode budget runs out or STOP. Between calls the
+   program counter, opcode byte and ALT mode live in SfxR15, SfxPIPE and
+   SfxSFR. */
 void MainLoop(void)
 {
     FxSeamPC = (u1*)(uintptr_t)(SfxCPB + SfxR0[15]);
     FxSeamCX = (SfxPIPE & 0xFFu) | (((SfxSFR >> 8) & 3u) << 8);
     FxSeamSrc = SfxR0 + SfxSREG;
     FxSeamDst = SfxR0 + SfxDREG;
-    SfxRAMMem = (SfxRAMBR << 16) + (u4)(uintptr_t)sfxramdata;
+    SfxRAMMem = (SfxRAMBR << 16) + (uintptr_t)sfxramdata;
 
     do {
         FxLoopDone = 0;

@@ -1,12 +1,11 @@
 #include <string.h>
 
-#include "../asm_call.h"
 #include "../c_vcache.h"
-#include "../cfg.h"
 #include "../cpu/regs.h"
 #include "../cpu/regsw.h"
 #include "../endmem.h"
 #include "../initc.h"
+#include "cfg.h"
 #ifndef ROL
 #define ROL(x, n) ((x) << (n) | (x) >> (sizeof(x) * 8 - (n)))
 #endif
@@ -14,6 +13,7 @@
 #include "../vcache.h"
 #include "c_makev16b.h"
 #include "c_makevid.h"
+#include "c_mv16toffs.h"
 #include "makev16b.h"
 #include "makev16t.h"
 #include "makevid.h"
@@ -37,15 +37,13 @@ void preparesprpr(void)
     sprsingle = (eax == 0x00000001 || eax == 0x00000100 || eax == 0x00010000 || eax == 0x01000000) ? 1 : 0;
 }
 
-// --- New-gfx window builder (ported from video/newgfx.asm) ------------------
+// --- New-gfx window builder (video/newgfx.asm) ------------------------------
 //
-// Builds the per-scanline window displacement table ngwintable[] (two parallel
-// 16-dword rows: bytes 0-63 and 64-127) for the new graphics engine. For a
-// single window it fills both rows directly; for two windows it builds two
-// boundary lists, merges them with the layer's logic operator, and converts
-// back to displacement form. eax indexes winboundary[], ebx indexes
-// winbg1enval[]. Sentinels: 0xEE00 ends a list. The table walking uses raw
-// byte offsets exactly as the assembly did.
+// Builds ngwintable[], the per-scanline window displacement table: two
+// parallel 16-dword rows at bytes 0-63 and 64-127. One window fills both rows
+// directly; two build boundary lists, merge them with the layer's logic
+// operator and convert back. eax indexes winboundary[], ebx winbg1enval[], and
+// 0xEE00 ends a list. Walked by raw byte offset, as the assembly did.
 
 extern u4 nglogicval;
 extern u4 WindowRedraw;
@@ -302,16 +300,16 @@ static void ng_bw_notsimilar(u4 const eax, u4 const ebx, u4 const sig)
     ng_bw_notsimilarb(eax, ebx);
 }
 
-void BuildWindow2(u4 eax, u4 ebx)
+void c_BuildWindow2(u4 eax, u4 ebx)
 {
     WindowRedraw = 0;
     ng_bw_notsimilar(eax, ebx, nglogicval << 16 | winbg1enval[ebx]);
 }
 
-void BuildWindow(u4 eax, u4 ebx)
+void c_BuildWindow(u4 eax, u4 ebx)
 {
     if (WindowRedraw == 1) {
-        BuildWindow2(eax, ebx);
+        c_BuildWindow2(eax, ebx);
         return;
     }
 
@@ -338,6 +336,18 @@ void BuildWindow(u4 eax, u4 ebx)
     }
     ngwinen = ng_pngwinen;
 }
+
+/* The assembly BuildWindow/BuildWindow2 pushed ecx and edx on every return
+   path, and its callers relied on it: Mode7NonMainSub kept the Mode 7 x
+   coordinate in edx across ProcessBuildWindow. That contract used to need an
+   inline-asm shim in front of the C. Every caller is C now and keeps its own
+   values in locals, so the shim is gone and these are the entry points. */
+void BuildWindow(u4 eax, u4 ebx);
+void BuildWindow2(u4 eax, u4 ebx);
+
+void BuildWindow(u4 const eax, u4 const ebx) { c_BuildWindow(eax, ebx); }
+
+void BuildWindow2(u4 const eax, u4 const ebx) { c_BuildWindow2(eax, ebx); }
 
 static void blanker16b(void)
 {
@@ -370,9 +380,9 @@ static void setpalallgamma(void)
         u2 c = r + g + b;
         if (c == 0 && vidbright != 0)
             c |= 0x0020;
-        pal16b[i] = pal16b[i] & 0xFFFF0000 | c;
-        pal16bcl[i] = pal16bcl[i] & 0xFFFF0000 | c & vesa2_clbit;
-        pal16bxcl[i] = pal16bxcl[i] & 0xFFFF0000 | (c ^ 0xFFFF) & vesa2_clbit;
+        pal16b[i] = (pal16b[i] & 0xFFFF0000) | c;
+        pal16bcl[i] = (pal16bcl[i] & 0xFFFF0000) | (c & vesa2_clbit);
+        pal16bxcl[i] = (pal16bxcl[i] & 0xFFFF0000) | ((c ^ 0xFFFF) & vesa2_clbit);
     } while (++i != 256);
     prevbright = vidbright;
 }
@@ -413,9 +423,9 @@ static void setpalette16bgamma(void)
         u2 c = r + g + b;
         if (c == 0 && vidbright != 0)
             c |= 0x0020;
-        pal16b[i] = pal16b[i] & 0xFFFF0000 | c;
-        pal16bcl[i] = pal16bcl[i] & 0xFFFF0000 | c & vesa2_clbit;
-        pal16bxcl[i] = pal16bxcl[i] & 0xFFFF0000 | (c ^ 0xFFFF) & vesa2_clbit;
+        pal16b[i] = (pal16b[i] & 0xFFFF0000) | c;
+        pal16bcl[i] = (pal16bcl[i] & 0xFFFF0000) | (c & vesa2_clbit);
+        pal16bxcl[i] = (pal16bxcl[i] & 0xFFFF0000) | ((c ^ 0xFFFF) & vesa2_clbit);
     } while (++i != 256);
 }
 
@@ -434,9 +444,9 @@ static void setpalall(void)
         u2 c = r + g + b;
         if (c == 0 && vidbright != 0)
             c |= 0x0020;
-        pal16b[i] = pal16b[i] & 0xFFFF0000 | c;
-        pal16bcl[i] = pal16bcl[i] & 0xFFFF0000 | c & vesa2_clbit;
-        pal16bxcl[i] = pal16bxcl[i] & 0xFFFF0000 | (c ^ 0xFFFF) & vesa2_clbit;
+        pal16b[i] = (pal16b[i] & 0xFFFF0000) | c;
+        pal16bcl[i] = (pal16bcl[i] & 0xFFFF0000) | (c & vesa2_clbit);
+        pal16bxcl[i] = (pal16bxcl[i] & 0xFFFF0000) | ((c ^ 0xFFFF) & vesa2_clbit);
     } while (++i != 256);
     prevbright = vidbright;
     if (V8Mode == 1)
@@ -470,9 +480,9 @@ void setpalette16b(void)
             u2 c = r + g + b;
             if (c == 0 && vidbright != 0)
                 c |= 0x0020;
-            pal16b[i] = pal16b[i] & 0xFFFF0000 | c;
-            pal16bcl[i] = pal16bcl[i] & 0xFFFF0000 | c & vesa2_clbit;
-            pal16bxcl[i] = pal16bxcl[i] & 0xFFFF0000 | (c ^ 0xFFFF) & vesa2_clbit;
+            pal16b[i] = (pal16b[i] & 0xFFFF0000) | c;
+            pal16bcl[i] = (pal16bcl[i] & 0xFFFF0000) | (c & vesa2_clbit);
+            pal16bxcl[i] = (pal16bxcl[i] & 0xFFFF0000) | ((c ^ 0xFFFF) & vesa2_clbit);
         } while (++i != 256);
     }
     if (V8Mode == 1)
@@ -512,7 +522,7 @@ void clearback16b(void)
     while (buf += 4, --n != 0);
 }
 
-static void sprdrawpra16b(u4 const eax, u1 const cl, u1 const ch, u4 const ebx, u2* const edi, u4 const p1)
+static void sprdrawpra16b(u4 const eax, u1 const cl, u1 const ch, s4 const ebx, u2* const edi, s4 const p1)
 {
     if (eax == 0)
         return;
@@ -522,14 +532,14 @@ static void sprdrawpra16b(u4 const eax, u1 const cl, u1 const ch, u4 const ebx, 
     sprpriodata[ebx - p1 + 16] |= cl;
 }
 
-static void sprdrawprb16b(u4 const eax, u1 const cl, u1 const ch, u4 const ebx, u2* const edi, u4 const p1)
+static void sprdrawprb16b(u4 const eax, u1 const cl, u1 const ch, s4 const ebx, u2* const edi, s4 const p1)
 {
     if (eax == 0)
         return;
     edi[ebx - p1] = pal16b[(eax + ch) & 0xFF];
 }
 
-static void sprdrawa16b(u1 const cl, u1 const ch, u4 const ebx, u1* const esi, u2* const edi, void (*const f)(u4 eax, u1 cl, u1 ch, u4 ebx, u2* edi, u4 p1))
+static void sprdrawa16b(u1 const cl, u1 const ch, s4 const ebx, u1* const esi, u2* const edi, void (*const f)(u4 eax, u1 cl, u1 ch, s4 ebx, u2* edi, s4 p1))
 {
     f(esi[0], cl, ch, ebx, edi, 8);
     f(esi[1], cl, ch, ebx, edi, 7);
@@ -541,7 +551,7 @@ static void sprdrawa16b(u1 const cl, u1 const ch, u4 const ebx, u1* const esi, u
     f(esi[7], cl, ch, ebx, edi, 1);
 }
 
-static void sprdrawaf16b(u1 const cl, u1 const ch, u4 const ebx, u1* const esi, u2* const edi, void (*const f)(u4 eax, u1 cl, u1 ch, u4 ebx, u2* edi, u4 p1))
+static void sprdrawaf16b(u1 const cl, u1 const ch, s4 const ebx, u1* const esi, u2* const edi, void (*const f)(u4 eax, u1 cl, u1 ch, s4 ebx, u2* edi, s4 p1))
 {
     f(esi[0], cl, ch, ebx, edi, 1);
     f(esi[1], cl, ch, ebx, edi, 2);
@@ -553,14 +563,14 @@ static void sprdrawaf16b(u1 const cl, u1 const ch, u4 const ebx, u1* const esi, 
     f(esi[7], cl, ch, ebx, edi, 8);
 }
 
-static void sprdrawpra2(u1 const dl, u4 const ebx, u4 const p1, u1 const p2)
+static void sprdrawpra2(u1 const dl, s4 const ebx, s4 const p1, u1 const p2)
 {
     if (p2 == 0)
         return;
     sprpriodata[ebx - p1 + 16] |= dl;
 }
 
-static void sprdrawaf(u1 const dl, u4 const ebx, u1* const esi, void (*const f)(u1 dl, u4 ebx, u4 p1, u1 p2))
+static void sprdrawaf(u1 const dl, s4 const ebx, u1* const esi, void (*const f)(u1 dl, s4 ebx, s4 p1, u1 p2))
 {
     f(dl, ebx, 1, esi[0]);
     f(dl, ebx, 2, esi[1]);
@@ -572,7 +582,7 @@ static void sprdrawaf(u1 const dl, u4 const ebx, u1* const esi, void (*const f)(
     f(dl, ebx, 8, esi[7]);
 }
 
-static void sprdrawa(u1 const dl, u4 const ebx, u1* const esi, void (*const f)(u1 dl, u4 ebx, u4 p1, u1 p2))
+static void sprdrawa(u1 const dl, s4 const ebx, u1* const esi, void (*const f)(u1 dl, s4 ebx, s4 p1, u1 p2))
 {
     f(dl, ebx, 8, esi[0]);
     f(dl, ebx, 7, esi[1]);
@@ -584,7 +594,7 @@ static void sprdrawa(u1 const dl, u4 const ebx, u1* const esi, void (*const f)(u
     f(dl, ebx, 1, esi[7]);
 }
 
-static void sprdrawpraw16b(u4 const eax, u1 const cl, u1 const ch, u4 const ebx, u2* const edi, u4 const p1)
+static void sprdrawpraw16b(u4 const eax, u1 const cl, u1 const ch, s4 const ebx, u2* const edi, s4 const p1)
 {
     if (eax == 0)
         return;
@@ -596,7 +606,7 @@ static void sprdrawpraw16b(u4 const eax, u1 const cl, u1 const ch, u4 const ebx,
     sprpriodata[ebx - p1 + 16] |= cl;
 }
 
-static void sprdrawprbw16b(u4 const eax, u1 const cl, u1 const ch, u4 const ebx, u2* const edi, u4 const p1)
+static void sprdrawprbw16b(u4 const eax, u1 const cl, u1 const ch, s4 const ebx, u2* const edi, s4 const p1)
 {
     if (eax == 0)
         return;
@@ -1014,101 +1024,16 @@ static void Draw8x816bflipmacro(u1 const dh, u1 const* const ebx, u2* const esi,
 }
 
 // Processes & Draws 8x8 offset mode in Mode 2/4
+/* initoffsetmode, offsetmcachechk and procoffsetmode live in
+   video/c_mv16toffs.h, checked against the assembly by `make -C test t8to`. */
 static void initoffsetmode(u4 const ebp, u2 const* const edi)
 {
-    u4 ebx = 0x2000 << ebp;
-    OMBGTestVal = ebx;
-    u4 ecx = bg1scroly[ebp] + ebx;
-    u4 edx = bg1scroly[2];
-    if (edx != 0xFFFF)
-        edx &= 0x01FF;
-    u4 eax = (bg1ptr[2] + (edx >> 3 << 6)) & 0x0000FFFF;
-    ebx = 0;
-    ebx = *(u4*)&curypos; // XXX cast makes no sense, variable defined in .c
-    ofsmcyps = ebx;
-    eax = (eax + ((bg1scrolx[2] & 0x00F8) >> 3 << 1)) & 0x0000FFFF;
-    if (bg1scroly[2] > 0xFFF7)
-        eax = (eax + 0x0780) & 0x0000FFFF;
-    eax += 0x40;
-    ofsmcptr = vram + (eax & 0xFFFFFFC0);
-    ofsmcptr2 = eax & 0x3F;
-    ofsmady = bg1ptry[ebp];
-    ofsmadx = bg1ptrx[ebp];
-    eax = *(u4*)&bg1ptr[ebp]; // XXX strange cast
-    ofsmtptr = eax;
-    ofsmtptrs = eax;
-    if (ecx & 0x0100)
-        eax += bg1ptry[ebp];
-    eax += (ecx * 8) & 0x07C0; // 0x1F * 0x40
-    yposngom = yadder;
-    flipyposngom = yrevadder;
-    ecx = *(u4*)&bg1scrolx[ebp]; // XXX strange cast
-    edx = bg1ptrx[ebp];
-    if (ecx & 0x0100) {
-        eax += edx;
-        ofsmtptr += edx;
-        edx = edx & 0xFFFF0000 | -edx & 0x0000FFFF;
-    }
-    edx = edx & 0xFFFF0000 | (edx - 64) & 0x0000FFFF;
-    ecx = (ecx & 0x00F8) >> 2;
-    bgtxadd = edx;
-    ofsmtptr += ecx;
-    ofsmmptr = ecx + (eax & 0xFFFF);
-    bgsubby = bg1objptr[ebp] >> 5;
-    ofsmmptr = (u1 const*)edi - vram;
-    ofshvaladd = 0;
+    offs_init(ebp, (u1 const*)edi);
 }
 
-static void offsetmcachechk(u4 const eax)
-{ // Cache check
-    u4 const ecx = (eax + ngptrdat2) & 0x07FF;
-    if (vidmemch4[ecx] == 0)
-        return;
-    c_cachesingle4bng(ecx);
-}
+static void offsetmcachechk(u4 const eax) { offs_cachechk(eax); }
 
-static u2* procoffsetmode(void)
-{
-    // TODO most/all of the upper halfword preservation probably is pointless
-    ofsmmptr = ofsmmptr & 0xFFFF0000 | (ofsmmptr + 2) & 0x0000FFFF;
-    ofsmtptr = ofsmtptr & 0xFFFF0000 | (ofsmtptr + 2) & 0x0000FFFF;
-    u4 eax = flipyposngom;
-    yadder = yposngom;
-    yrevadder = eax;
-    eax = eax & 0xFFFF0000 | ofsmmptr & 0x0000FFFF;
-    if ((eax & 0x3F) == 0) {
-        u4 const ebx = bgtxadd;
-        eax = eax & 0xFFFF0000 | (eax + ebx) & 0x0000FFFF;
-        ofsmmptr = ofsmmptr & 0xFFFF0000 | (ofsmmptr + ebx) & 0x0000FFFF;
-        ofsmtptr = ofsmtptr & 0xFFFF0000 | (ofsmtptr + ebx) & 0x0000FFFF;
-    }
-    u1* edi = vram + eax;
-    u4* const ebx_ = (u4*)(ofsmcptr + ofsmcptr2);
-    eax = OMBGTestVal;
-    if (*ebx_ & eax) {
-        u4 const ebx = *ebx_ & 0x003FF + ofsmcyps;
-        eax = eax & 0xFFFF0000 | ofsmtptr & 0x0000FFFF;
-        if (ebx & 0x100)
-            eax = eax & 0xFFFF0000 | (eax + ofsmady) & 0x0000FFFF;
-        u4 const edx = (ebx & 0x07) << 3;
-        eax = eax & 0xFFFF0000 | (eax + ((ebx & 0xF8) << 3)) & 0x0000FFFF;
-        yadder = edx;
-        yrevadder = edx ^ 0x38;
-        edi = vram + eax;
-    }
-    ofshvaladd += 8;
-    ofsmcptr2 = (ofsmcptr2 + 2) & 0x3F;
-    if (ebx_[-16] & OMBGTestVal) {
-        u4 eax = edi - vram;
-        u4 const ebx = ebx_[-16] + ofshvaladd;
-        eax = eax & 0xFFFF0000 | (eax + ofsmtptr - ofsmtptrs) & 0x0000FFFF;
-        if (ebx & 0x100)
-            eax = eax & 0xFFFF0000 | (eax + ofsmadx) & 0x0000FFFF;
-        eax = eax & 0xFFFF0000 | (eax + ((ebx & 0xF8) >> 2)) & 0x0000FFFF;
-        edi = vram + eax;
-    }
-    return (u2*)edi;
-}
+static u2* procoffsetmode(void) { return (u2*)offs_proc(); }
 
 static void Draw8x816bwinmacro(u1 const dh, u1 const* const ebx, u1 const* const ebp, u2* const esi, u4 const p1)
 {
@@ -1749,13 +1674,13 @@ static void procmode716bextbg(u2 const* const p1, u2 const* const p2, u1 const p
         }
     }
     m7starty = ax;
-    u4 eax;
-    u4 edx;
-    __asm__ volatile("push %%ebp;  call %P2;  pop %%ebp"
-        : "=a"(eax), "=d"(edx)
-        : "X"(drawmode716extbg), "a"(*p1), "d"(*p2)
-        : "cc", "memory", "ecx", "ebx", "esi", "edi");
+    /* drawmode716extbg was a trampoline that pushed edx then eax; those were
+       its two arguments, so the body takes them directly. */
+    c_drawmode716extbg(*p1, *p2);
 }
+
+void c_drawmode716extbg(u4 ypos, u4 xpos); /* video/mode716b.c */
+void c_drawmode716extbg2(u4 craw);
 
 static void procmode716bextbg2(u1 const p3)
 {
@@ -1765,8 +1690,11 @@ static void procmode716bextbg2(u1 const p3)
         if (bl != 0)
             curmosaicsz = bl + 1;
     }
-    __asm__ volatile("push %%ebp;  call %P0;  pop %%ebp" ::"X"(drawmode716extbg2)
-        : "cc", "memory", "eax", "ecx", "edx", "ebx", "esi", "edi");
+    /* Its trampoline passed ecx, which this call site never set - the value
+       was whatever happened to be left there, and it reaches the drawer only
+       as a stray one-byte write off the left edge of the line. Nothing to
+       reproduce, so it goes in as zero. */
+    c_drawmode716extbg2(0);
 }
 
 static void procmode716b(u2 const* const p1, u2 const* const p2, u1 const p3)
@@ -1810,7 +1738,8 @@ static void processmode716b(void)
     // mode 7 extbg
     if (interlval & 0x40 && !(scrndis & 0x02) && scrnon & 0x0202) { // do background 1
         winon = 0;
-        if (!(winenabm & 0x01) || winenabs & 0x01 || (makewindow(winen[LAYER_BG1], LAYER_BG1 /* XXX not in original, but seems consistent, because winen[LAYER_BG1] is used */), winon != 0xFF)) {
+        if (!(winenabm & 0x01) || winenabs & 0x01
+            || (makewindow(winen[LAYER_BG1], LAYER_BG1), winon != 0xFF)) {
             extbgdone = 1;
             procmode716bextbg(&bg1scroly_m7, &bg1scrolx_m7, 1);
         }
@@ -1827,7 +1756,8 @@ static void processmode716b(void)
     // display mode7
     if (!(interlval & 0x40) && !(scrndis & 0x01) && scrnon & 0x0101) { // do background 1
         winon = 0;
-        if (!(winenabm & 0x01) || winenabs & 0x01 || (makewindow(winen[LAYER_BG1], LAYER_BG1 /* XXX not in original, but seems consistent, because winen[LAYER_BG1] is used */), winon != 0xFF)) {
+        if (!(winenabm & 0x01) || winenabs & 0x01
+            || (makewindow(winen[LAYER_BG1], LAYER_BG1), winon != 0xFF)) {
             procmode716b(&bg1scroly_m7, &bg1scrolx_m7, 1);
         }
     }
@@ -1842,7 +1772,8 @@ static void processmode716b(void)
 
     if (interlval & 0x40 && !(scrndis & 0x01) && extbgdone == 0 && scrnon & 0x0101) { // do background 1
         winon = 0;
-        if (!(winenabm & 0x02) || winenabs & 0x02 || (makewindow(winen[LAYER_BG1], LAYER_BG1 /* XXX not in original, but seems consistent, because winen[LAYER_BG1] is used */), winon != 0xFF)) {
+        if (!(winenabm & 0x01) || winenabs & 0x01
+            || (makewindow(winen[LAYER_BG1], LAYER_BG1), winon != 0xFF)) {
             extbgdone = 1;
             procmode716bextbg(&bg1scroly_m7, &bg1scrolx_m7, 1);
         }
@@ -1851,7 +1782,8 @@ static void processmode716b(void)
     // mode 7 extbg
     if (interlval & 0x40 && extbgdone != 0 && !(scrndis & 0x01)) { // do background 1
         winon = 0;
-        if (!(winenabm & 0x01) || winenabs & 0x01 || (makewindow(winen[LAYER_BG1], LAYER_BG1 /* XXX not in original, but seems consistent, because winen[LAYER_BG1] is used */), winon != 0xFF)) {
+        if (!(winenabm & 0x01) || winenabs & 0x01
+            || (makewindow(winen[LAYER_BG1], LAYER_BG1), winon != 0xFF)) {
             procmode716bextbg2(1);
         }
     }
@@ -1893,7 +1825,7 @@ void drawline16b(void)
         scrnon = 0x0116;
 
     if (scaddset & 0x02 || (scaddtype & 0x3F && (coladdr != 0 || coladdg != 0 || coladdb != 0 || colnull != 0))) {
-        asm_call(drawline16t);
+        drawline16t();
         return;
     }
     if (bgmode == 7) {
@@ -1978,18 +1910,23 @@ void drawline16b(void)
 }
 
 // Entry point for a new-graphics-engine frame. Sets up the interlace field and
-// the last-line bound, then hands over to the 16-bit renderer, which is still
-// assembly (video/newgfx16.asm) and clobbers ebx, so it needs asm_call.
+// the last-line bound, then hands over to the 16-bit renderer.
 void StartDrawNewGfx(void)
 {
-    extern void StartDrawNewGfx16b(void);
+    extern void c_startdrawnewgfx16b(zreg * r);
+    zreg r[8] = { 0 };
 
     WindowRedraw = 1;
     cfieldad = 0;
     if (res480 == 1 && scanlines == 0)
         cfieldad = cfield;
     // The assembly stored only the low word here.
-    reslbyl = reslbyl & 0xFFFF0000 | (u2)(resolutn - 8);
+    reslbyl = (reslbyl & 0xFFFF0000) | (u2)(resolutn - 8);
 
-    asm_call(StartDrawNewGfx16b);
+    // The frame driver runs on a register block because the colour-maths pass
+    // it ends with reads two of them. It used to be reached by a call that
+    // declared every register clobbered, so what it inherited there was
+    // whatever the compiler had left; zero is the same amount of meaning and
+    // does not move with the codegen.
+    c_startdrawnewgfx16b(r);
 }

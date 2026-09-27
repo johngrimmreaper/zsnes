@@ -1,20 +1,28 @@
-/* C port of the SuperFX register and state block from chips/fxemu2.asm.
-   The opcode handlers moved to chips/c_fxops.c; this is the state they share.
-
-   PHnum2writesfxreg is the byte distance from SfxR0 to the end of the cache
-   RAM, which zstate.c uses as a save-state block length, so the order and size
-   of everything in between is load-bearing. Emitted through one inline-asm
-   block (see asmdata.h) to pin that layout. */
+/* The SuperFX register and state block from chips/fxemu2.asm; the opcode
+   handlers are in chips/c_fxops.c. PHnum2writesfxreg is the byte distance from
+   SfxR0 to the end of the cache RAM, which zstate.c uses as a save-state block
+   length, so everything between is load-bearing - hence the one inline-asm
+   block. */
 #include "../asmdata.h"
+
+/* Slots holding a host address: pointer-sized rather than the dword the
+   assembly reserved. All of them sit after PHnum2writesfxreg, so the
+   save-state block above keeps its layout. On i386 this is the same four
+   bytes. */
+/* A pointer-sized slot. The .balign belongs before the label: emitted after
+   it, the symbol names the padding rather than its own storage - four bytes
+   low on a 64-bit build, which aarch64 then cannot even address. */
+#define PTRSYM(sym) \
+    ".balign " ASM_STR(__SIZEOF_POINTER__) "\n" ASM_GSYM(sym) ".skip " ASM_STR(__SIZEOF_POINTER__) "\n"
 
 /* clang-format off */
 
 __asm__(
-    ASM_SEC_BSS(".bss")
+    ASM_SEC_BSS_ALIGNED(".bss")
     ASM_GSYM(tempsfx)
     ".skip 3\n"
     ASM_SEC_END
-    ASM_SEC_DATA(".data")
+    ASM_SEC_DATA_ALIGNED(".data")
     ASM_GSYM(SfxR0)
     ".long 0\n"
     ASM_GSYM(SfxR1)
@@ -75,13 +83,13 @@ __asm__(
     ".long 0\n"
     ASM_GSYM(SfxCacheFlags)
     ".long 0\n"
-    ASM_GSYM(SfxLastRamAdr)
+    ASM_GSYM(SfxLastRamAdrSt)
     ".long 0\n"
     ASM_GSYM(SfxDREG)
     ".long 0\n"
     ASM_GSYM(SfxSREG)
     ".long 0\n"
-    ASM_GSYM(SfxRomBuffer)
+    ASM_GSYM(SfxRomBufferSt)
     ".long 0\n"
     ASM_GSYM(SfxPIPE)
     ".long 0\n"
@@ -109,18 +117,15 @@ __asm__(
     ".fill 512,1,0\n"
     ASM_GSYM(PHnum2writesfxreg)
     ".long . - " ASM_SYMREF(SfxR0) "\n"
-    ASM_GSYM(SfxCPB)
-    ".long 0\n"
-    ASM_GSYM(SfxCROM)
-    ".long 0\n"
-    ASM_GSYM(SfxRAMMem)
-    ".long 0\n"
+    PTRSYM(SfxCPB)
+    PTRSYM(SfxCROM)
+    PTRSYM(SfxRAMMem)
     ASM_GSYM(withr15sk)
     ".long 0\n"
-    ASM_GSYM(sfxclineloc)
-    ".long 0\n"
-    ASM_GSYM(SCBRrel)
-    ".long 0\n"
+    PTRSYM(sfxclineloc)
+    PTRSYM(SCBRrel)
+    PTRSYM(SfxLastRamAdr)
+    PTRSYM(SfxRomBuffer)
     ASM_GSYM(fxbit01pcal)
     ".long 0\n"
     ASM_GSYM(fxbit23pcal)

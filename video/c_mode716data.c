@@ -1,24 +1,22 @@
-/* C port of the Mode 7 renderer's scratch block from video/mode716.asm.
-
-   The layout is load-bearing, not incidental: the renderer keeps the current
-   position, the relative position and the per-pixel adders as pairs read 8
-   bytes at a time, so every one of them is followed by a spacer the assembly
-   labelled "keep this blank!". Those spacers are never named anywhere; they
-   exist only to space their neighbour. The mode7*pos/adder pairs at the end
-   are the same thing with the spacer folded into a two-dword reservation.
-
-   Emitted through one inline-asm block (see asmdata.h) to pin that layout.
-   video/mode716.mac and the routines left in video/mode716.asm reach these by
-   name, so they are all global here even though most were file-local before. */
+/* The Mode 7 renderer's scratch block from video/mode716.asm. The layout is
+   load-bearing: the renderer reads the current position, the relative position
+   and the per-pixel adders 8 bytes at a time, so each is followed by an unnamed
+   spacer the assembly labelled "keep this blank!". The mode7*pos/adder pairs at
+   the end fold the spacer into a two-dword reservation. One inline-asm block
+   pins it all. */
 #include "../asmdata.h"
 
 /* clang-format off */
 
 __asm__(
-    ASM_SEC_BSS(".bss")
+    ASM_SEC_BSS_ALIGNED(".bss")
     ".balign 4\n"
     ASM_GSYM(mtemp)
     ".skip 4\n"
+    /* The same eight bytes under a second name: the map coordinate is
+       read as a dword one byte in, which needs the spacer to be part of
+       the object. */
+    ASM_GSYM(mmode7xpos8)
     ASM_GSYM(mmode7xpos)        /* x position */
     ".skip 4\n"
     ASM_GSYM(mtempa2)           /* spacer */
@@ -27,6 +25,10 @@ __asm__(
     ".skip 4\n"
     ASM_GSYM(mtempa)            /* spacer */
     ".skip 4\n"
+    /* The same eight bytes under a second name: the map coordinate is
+       read as a dword one byte in, which needs the spacer to be part of
+       the object. */
+    ASM_GSYM(mmode7ypos8)
     ASM_GSYM(mmode7ypos)        /* y position */
     ".skip 4\n"
     ASM_GSYM(mtempb2)           /* spacer */
@@ -97,8 +99,16 @@ __asm__(
     ".skip 4\n"
     ASM_GSYM(ngwleftb)
     ".skip 4\n"
+    /* The same eight bytes under a second name: the map coordinate is
+       read as a dword one byte in, which needs the spacer to be part of
+       the object. */
+    ASM_GSYM(mode7xpos8)
     ASM_GSYM(mode7xpos)         /* dword plus its spacer, as above */
     ".skip 8\n"
+    /* The same eight bytes under a second name: the map coordinate is
+       read as a dword one byte in, which needs the spacer to be part of
+       the object. */
+    ASM_GSYM(mode7ypos8)
     ASM_GSYM(mode7ypos)
     ".skip 8\n"
     ASM_GSYM(mode7xrpos)
@@ -115,9 +125,9 @@ __asm__(
    .data rather than .bss because the assembly declared it `dw 0`. */
 
 __asm__(
-    ASM_SEC_DATA(".data")
+    ASM_SEC_DATA_ALIGNED(".data")
     ASM_GSYM(m7starty)
-    ".word 0\n"
+    ".short 0\n"
     ASM_SEC_END);
 
 /* clang-format on */

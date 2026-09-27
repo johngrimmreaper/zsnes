@@ -1,24 +1,3 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #ifndef NO_PNG
 #include <png.h>
 #endif
@@ -34,6 +13,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include <unistd.h>
 #endif
 #endif
+#include "../video/copyvwin.h"
 #include "../zpath.h"
 
 #define NUMCONV_FW2
@@ -74,7 +54,7 @@ extern uint16_t resolutn;
 
 #define SNAP_HEIGHT resolutn
 #define SNAP_WIDTH 256
-#define PIXEL (((uint16_t*)vidbuffer)[((y + 1) * 288) + x + 16])
+#define PIXEL (((uint16_t*)vidbuffer)[VID_FIRST + y * VID_STRIDE + x])
 
 #ifndef NO_PNG
 
@@ -119,6 +99,11 @@ static int Png_Dump_FP(FILE* fp, unsigned short width, unsigned short height, un
 
                 // Allocate an array of scanline pointers
                 row_pointers = (png_bytep*)malloc(height * sizeof(png_bytep));
+                if (!row_pointers) {
+                    png_destroy_write_struct(&png_ptr, &info_ptr);
+                    fclose(fp);
+                    return false;
+                }
                 for (i = 0; i < height; i++) {
 #ifdef __UPSIDE_DOWN__
                     // invert to normal image format.
@@ -162,10 +147,15 @@ void Grab_PNG_Data(void)
 {
     char* filename = generate_image_filename("png");
     if (filename) {
-        unsigned char* DBits = (unsigned char*)malloc(SNAP_HEIGHT * SNAP_WIDTH * PIXEL_SIZE);
+        /* SNAP_HEIGHT is `resolutn`, so hold it: a zero would make the
+           `while (y--)` below wrap and run four billion times. */
+        unsigned int const lines = SNAP_HEIGHT;
+        unsigned char* DBits = lines
+            ? (unsigned char*)malloc(lines * SNAP_WIDTH * PIXEL_SIZE)
+            : NULL;
         if (DBits) {
             // These are the variables used to perform the 24-bit conversion
-            unsigned int y = SNAP_HEIGHT, x;
+            unsigned int y = lines, x;
             // We can fill the array in any order, so might as well optimize loops
             while (y--) {
                 for (x = SNAP_WIDTH; x--;) {
@@ -175,7 +165,7 @@ void Grab_PNG_Data(void)
                 }
             }
             // compress and write the PNG
-            Png_Dump(filename, SNAP_WIDTH, SNAP_HEIGHT, DBits, false);
+            Png_Dump(filename, SNAP_WIDTH, lines, DBits, false);
             free(DBits);
         }
         free(filename);
@@ -185,9 +175,11 @@ void Grab_PNG_Data(void)
 // Debug: write current vidbuffer as a full-resolution PNG to an absolute path.
 void Grab_PNG_Data_Path(const char* path)
 {
-    unsigned char* DBits = (unsigned char*)malloc(SNAP_HEIGHT * SNAP_WIDTH * PIXEL_SIZE);
+    unsigned int const lines = SNAP_HEIGHT;
+    unsigned char* DBits
+        = lines ? (unsigned char*)malloc(lines * SNAP_WIDTH * PIXEL_SIZE) : NULL;
     if (DBits) {
-        unsigned int y = SNAP_HEIGHT, x;
+        unsigned int y = lines, x;
         while (y--) {
             for (x = SNAP_WIDTH; x--;) {
                 DBits[PIXEL_SIZE * (y * SNAP_WIDTH + x)] = (PIXEL & 0xF800) >> 8;
@@ -195,7 +187,7 @@ void Grab_PNG_Data_Path(const char* path)
                 DBits[PIXEL_SIZE * (y * SNAP_WIDTH + x) + 2] = (PIXEL & 0x001F) << 3;
             }
         }
-        Png_Dump_FP(fopen(path, "wb"), SNAP_WIDTH, SNAP_HEIGHT, DBits, false);
+        Png_Dump_FP(fopen(path, "wb"), SNAP_WIDTH, lines, DBits, false);
         free(DBits);
     }
 }
@@ -339,7 +331,8 @@ void Grab_BMP_Data_8(void)
             for (y = height; y--;) // Have to write image upside down
             {
                 for (x = 0; x < width; x++) {
-                    fwrite((unsigned char*)vidbuffer + (y + 1) * 288 + x + 16, 1, 1, fp);
+                    /* One byte per pixel on this path, so the pixel offset is the byte one. */
+                    fwrite((unsigned char*)vidbuffer + VID_FIRST + y * VID_STRIDE + x, 1, 1, fp);
                 }
             }
             fclose(fp);

@@ -4,26 +4,24 @@
 #include <stdint.h>
 
 #include "../asmdata.h"
+#include "../types.h"
 
 /* RTC (not part of the save block) */
 uint8_t RTCData[16] = { [0] = 0x0F, [14] = 0x0F };
 uint32_t RTCPtr, RTCPtr2, RTCRest;
 
 __asm__(
-    ASM_SEC_DATA(".data.sa1state")
-        ASM_GSYM(SA1Mode) ".long 0\n" ASM_GSYM(SA1Control) ".long 0\n" ASM_GSYM(SA1BankPtr) ".long 0\n" ASM_GSYM(SA1ResetV) ".long 0\n" ASM_GSYM(SA1NMIV) ".long 0\n" ASM_GSYM(SA1IRQV) ".long 0\n" ASM_GSYM(SA1RV) ".long 0\n" ASM_GSYM(CurBWPtr) ".long 0\n" ASM_GSYM(SA1TempVar) ".long 0\n" ASM_GSYM(SA1IRQEn) ".long 0\n" ASM_GSYM(SA1Message) ".long 0\n" ASM_GSYM(SA1IRQExec) ".long 0\n" ASM_GSYM(SA1IRQEnable) ".long 0\n" ASM_GSYM(SA1DoIRQ) ".long 0\n" ASM_GSYM(SA1ARC) ".long 0\n" ASM_GSYM(SA1AR1) ".long 0\n" ASM_GSYM(SA1AR2) ".long 0\n" ASM_GSYM(SA1ARR1) ".long 0\n" ASM_GSYM(SA1ARR2) ".long 0\n" ASM_GSYM(SA1Stat) ".long 0\n" ASM_GSYM(SNSNMIV) ".long 0\n" ASM_GSYM(SNSIRQV) ".long 0\n" ASM_GSYM(SA1DMACount) ".long 0\n" ASM_GSYM(SA1DMAInfo) ".long 0\n" ASM_GSYM(SA1DMAChar) ".long 0\n" ASM_GSYM(SA1DMASource) ".long 0\n" ASM_GSYM(SA1DMADest) ".long 0\n" ASM_GSYM(SA1IRQTemp) ".long 0\n" ASM_GSYM(SA1BankSw) ".long 1\n" ASM_GSYM(SA1BankVal) ".byte 0,1,2,3\n" ASM_GSYM(BWShift) ".long 0\n" ASM_GSYM(BWAndAddr) ".long 0\n" ASM_GSYM(BWAnd) ".long 0\n" ASM_GSYM(BWRAnd) ".long 0\n" ASM_GSYM(SA1_in_cc1_dma) ".long 0\n" ASM_GSYM(SA1_CC2_line) ".long 0\n" ASM_GSYM(SA1_BRF) ".zero 16\n"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 ".zero 432\n" /* SA1Reserved (unnamed padding) */
-    ASM_GSYM(SA1xa) ".long 0\n" ASM_GSYM(SA1xx) ".long 0\n" ASM_GSYM(SA1xy) ".long 0\n" ASM_GSYM(SA1xd) ".long 0\n" ASM_GSYM(SA1xdb) ".long 0\n" ASM_GSYM(SA1xpb) ".long 0\n" ASM_GSYM(SA1xs) ".long 0\n" ASM_GSYM(SA1RegP) ".long 0\n" ASM_GSYM(SA1RegE) ".long 0\n" ASM_GSYM(SA1RegPCS) ".long 0\n" ASM_GSYM(SA1BWPtr) ".long 0\n" ASM_GSYM(SA1Ptr) ".long 0\n" ASM_GSYM(SA1Overflow) ".long 0\n" ASM_GSYM(VarLenAddr) ".long 0\n" ASM_GSYM(VarLenAddrB) ".long 0\n" ASM_GSYM(VarLenBarrel) ".long 0\n" ASM_GSYM(SA1TimerVal) ".long 0\n" ASM_GSYM(SA1TimerSet) ".long 0\n" ASM_GSYM(SA1TimerCount) ".long 0\n" ASM_GSYM(SA1IRQData) ".long 0\n" ASM_GSYM(SNSRegP) ".long 0\n" ASM_GSYM(SNSRegE) ".long 0\n" ASM_GSYM(SNSRegPCS) ".long 0\n" ASM_GSYM(SNSBWPtr) ".long 0\n" ASM_GSYM(SNSPtr) ".long 0\n" ASM_GSYM(IRAM) ".zero 2049\n" ASM_GSYM(PHnum2writesa1reg) ".long . - SA1Mode\n" /* save-state block size */
+    ASM_SEC_DATA_ALIGNED(".data.sa1state") ASM_GSYM(SA1Mode) ".long 0\n" ASM_GSYM(SA1Control) ".long 0\n" ASM_GSYM(SA1BankPtr) ".long 0\n" ASM_GSYM(SA1ResetV) ".long 0\n" ASM_GSYM(SA1NMIV) ".long 0\n" ASM_GSYM(SA1IRQV) ".long 0\n" ASM_GSYM(SA1RV) ".long 0\n" ASM_GSYM(CurBWPtrSt) ".long 0\n" ASM_GSYM(SA1TempVar) ".long 0\n" ASM_GSYM(SA1IRQEn) ".long 0\n" ASM_GSYM(SA1Message) ".long 0\n" ASM_GSYM(SA1IRQExec) ".long 0\n" ASM_GSYM(SA1IRQEnable) ".long 0\n" ASM_GSYM(SA1DoIRQ) ".long 0\n" ASM_GSYM(SA1ARC) ".long 0\n" ASM_GSYM(SA1AR1) ".long 0\n" ASM_GSYM(SA1AR2) ".long 0\n" ASM_GSYM(SA1ARR1) ".long 0\n" ASM_GSYM(SA1ARR2) ".long 0\n" ASM_GSYM(SA1Stat) ".long 0\n" ASM_GSYM(SNSNMIV) ".long 0\n" ASM_GSYM(SNSIRQV) ".long 0\n" ASM_GSYM(SA1DMACount) ".long 0\n" ASM_GSYM(SA1DMAInfo) ".long 0\n" ASM_GSYM(SA1DMAChar) ".long 0\n" ASM_GSYM(SA1DMASource) ".long 0\n" ASM_GSYM(SA1DMADest) ".long 0\n" ASM_GSYM(SA1IRQTemp) ".long 0\n" ASM_GSYM(SA1BankSw) ".long 1\n" ASM_GSYM(SA1BankVal) ".byte 0,1,2,3\n" ASM_GSYM(BWShift) ".long 0\n" ASM_GSYM(BWAndAddr) ".long 0\n" ASM_GSYM(BWAnd) ".long 0\n" ASM_GSYM(BWRAnd) ".long 0\n" ASM_GSYM(SA1_in_cc1_dma) ".long 0\n" ASM_GSYM(SA1_CC2_line) ".long 0\n" ASM_GSYM(SA1_BRF) ".zero 16\n"
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      ".zero 432\n" /* SA1Reserved (unnamed padding) */
+    ASM_GSYM(SA1xa) ".long 0\n" ASM_GSYM(SA1xx) ".long 0\n" ASM_GSYM(SA1xy) ".long 0\n" ASM_GSYM(SA1xd) ".long 0\n" ASM_GSYM(SA1xdb) ".long 0\n" ASM_GSYM(SA1xpb) ".long 0\n" ASM_GSYM(SA1xs) ".long 0\n" ASM_GSYM(SA1RegP) ".long 0\n" ASM_GSYM(SA1RegE) ".long 0\n" ASM_GSYM(SA1RegPCSSt) ".long 0\n" ASM_GSYM(SA1BWPtrSt) ".long 0\n" ASM_GSYM(SA1PtrSt) ".long 0\n" ASM_GSYM(SA1Overflow) ".long 0\n" ASM_GSYM(VarLenAddr) ".long 0\n" ASM_GSYM(VarLenAddrB) ".long 0\n" ASM_GSYM(VarLenBarrel) ".long 0\n" ASM_GSYM(SA1TimerVal) ".long 0\n" ASM_GSYM(SA1TimerSet) ".long 0\n" ASM_GSYM(SA1TimerCount) ".long 0\n" ASM_GSYM(SA1IRQData) ".long 0\n" ASM_GSYM(SNSRegP) ".long 0\n" ASM_GSYM(SNSRegE) ".long 0\n" ASM_GSYM(SNSRegPCSSt) ".long 0\n" ASM_GSYM(SNSBWPtrSt) ".long 0\n" ASM_GSYM(SNSPtrSt) ".long 0\n" ASM_GSYM(IRAM) ".zero 2049\n" ASM_GSYM(PHnum2writesa1reg) ".long . - " ASM_SYMREF(SA1Mode) "\n" /* save-state block size */
     ASM_SEC_END);
 
 /* trailing state (after the save block) */
 uint8_t* SA1RAMArea;
 uint32_t SA1Temp, Sdd1Mode, Sdd1Bank, Sdd1Addr, Sdd1NewAddr;
 
-/* DMA pointers; zstate.c saves them as one adjacent 8-byte block, so force
-   their layout rather than letting -fdata-sections scatter them. */
-__asm__(ASM_SEC_DATA(".data.sa1dmaptr")
-        ASM_GSYM(sa1dmaptr) ".long 0\n" ASM_GSYM(sa1dmaptrs) ".long 0\n" ASM_SEC_END);
+u1* sa1dmaptr; /* both set before every transfer */
+u1* sa1dmaptrs;
 
 /* ===== Stage 2: status reads (0x2300-0x230B) + IRAM access ===== */
 #include "regabi.h"
@@ -31,7 +29,7 @@ __asm__(ASM_SEC_DATA(".data.sa1dmaptr")
 extern uint32_t SA1Message, SA1IRQExec, SA1IRQData, SA1ARR1, SA1ARR2;
 extern uint16_t SA1Overflow;
 extern uint32_t SA1TimerSet, SA1TimerCount, SA1TimerVal;
-extern uint8_t IRAM[2049]; /* defined in the asm state block above */
+extern uint8_t IRAM[2049] ASM_ALIGNED(4); /* defined in the asm state block above */
 extern uint8_t CurrentExecSA1; /* sa1proc.asm */
 extern uint16_t curypos; /* current scanline */
 
@@ -58,14 +56,14 @@ uint8_t c_sa12301r(void)
     return al;
 }
 
-/* H/V free-running counters; the asm adds `dh` (a dispatch dot hint) the reg ABI
-   can't carry, so the free-running path is approximate (dh treated as 0). */
-REGABI_REG_READ8(sa12302r);
-uint8_t c_sa12302r(void)
+/* H/V free-running counters. The H one is the dispatch position scaled by four
+   plus the cycle count the core keeps in DH, which is what the _DX form is for. */
+REGABI_REG_READ8_DX(sa12302r);
+uint8_t c_sa12302r(uint32_t const edx)
 {
     if (BYTE(SA1TimerSet, 0) & 0x80)
         return BYTE(SA1TimerCount, 0);
-    return (uint8_t)(CurrentExecSA1 << 2);
+    return (uint8_t)((CurrentExecSA1 << 2) + (uint8_t)(edx >> 8));
 }
 REGABI_REG_READ8(sa12303r);
 uint8_t c_sa12303r(void)
@@ -107,8 +105,14 @@ REGABI_BANK_READ8(IRamRead);
 uint8_t c_IRamRead(uint32_t a) { return IRAM[(uint16_t)a - 0x3000]; }
 REGABI_BANK_WRITE8(IRamWrite);
 void c_IRamWrite(uint32_t a, uint8_t v) { IRAM[(uint16_t)a - 0x3000] = v; }
-REGABI_BANK_WRITE8(IRamWrite2);
-void c_IRamWrite2(uint32_t a, uint8_t v) { IRAM[(uint16_t)a - 0x3000] = v; }
+/* Installed at $3000 only. The asm cleared DH here, restarting the scanline
+   cycle count so the SA-1 gets a full slice as soon as the 65816 kicks it. */
+REGABI_BANK_WRITE8_DX(IRamWrite2);
+uint32_t c_IRamWrite2(uint32_t a, uint8_t v, uint32_t edx)
+{
+    IRAM[(uint16_t)a - 0x3000] = v;
+    return edx & 0xFFFF00FFu;
+}
 
 /* ===== Stage 3: control / IRQ / vector writes (0x2200-0x220F) ===== */
 extern uint32_t SA1DoIRQ, SA1BankPtr, SA1ResetV, SA1xpb, SA1xs;
@@ -129,10 +133,10 @@ void c_sa12200w(uint8_t al) /* SA-1 CPU control */
         BYTE(SA1DoIRQ, 0) |= 2;
     SA1Control = al;
     if ((oldctrl & 0x20) && !(al & 0x20)) { /* SA-1 leaving reset */
-        SA1BankPtr = (uint32_t)(uintptr_t)romdata;
+        SA1BankPtr = 0; /* never read; in the save state, so no host address */
         SA1Ptr = romdata + (uint16_t)SA1ResetV - 0x8000;
         BYTE(SA1xpb, 0) = 0;
-        *(uint16_t*)&SA1xs = 0x1FF;
+        SA1xs = (SA1xs & 0xFFFF0000u) | 0x1FFu;
         SA1RegPCS = romdata - 0x8000;
     }
 }
@@ -620,3 +624,12 @@ SA1_QUICKW(sa12215w, SA1TimerCount, 3)
 
 REGABI_REG_WRITE8(dbstop);
 void c_dbstop(uint8_t al) { (void)al; }
+
+/* Live host pointers; the save state carries offsets in the *St dwords above. */
+u1* CurBWPtr;
+u1* SA1RegPCS;
+u1* SA1BWPtr;
+u1* SA1Ptr;
+u1* SNSRegPCS;
+u1* SNSBWPtr;
+u1* SNSPtr;

@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "memseam_stub.h"
 #include "zstest.h"
 
 /* --- SA-1 state block (chips/sa1regs.c) ----------------------------------- */
@@ -29,7 +30,8 @@ extern uint8_t IRAM[2049];
 uint8_t CurrentExecSA1;
 uint16_t curypos;
 
-uint8_t c_sa12300r(void), c_sa12301r(void), c_sa12302r(void), c_sa12303r(void);
+uint8_t c_sa12300r(void), c_sa12301r(void), c_sa12303r(void);
+uint8_t c_sa12302r(uint32_t); /* takes the core's EDX; the H count is in DH */
 uint8_t c_sa12304r(void), c_sa12305r(void), c_sa12306r(void), c_sa12309r(void);
 uint8_t c_sa1230Ar(void), c_sa1230Br(void);
 uint8_t c_IRamRead(uint32_t);
@@ -131,14 +133,21 @@ int main(void)
     SA1IRQData = 0x5000; /* byte1 & 0x50 -> ORed into 2300r */
     ZT_CHECK_INT(c_sa12300r(), 0x12 | 0x50);
 
-    /* 2302/2303: free-running H counter (timer off) from CurrentExecSA1 */
+    /* 2302/2303: free-running H counter (timer off) from CurrentExecSA1,
+       plus the cycle count DH carries, and wrapping in eight bits */
     SA1TimerSet = 0;
     CurrentExecSA1 = 1;
-    ZT_CHECK_INT(c_sa12302r(), 1 << 2);
-    /* timer on -> reads SA1TimerCount */
+    ZT_CHECK_INT(c_sa12302r(0), 1 << 2);
+    ZT_CHECK_INT(c_sa12302r(0x2500u), (1 << 2) + 0x25);
+    CurrentExecSA1 = 0x40; /* 0x40 << 2 wraps to 0 */
+    ZT_CHECK_INT(c_sa12302r(0x0700u), 0x07);
+    CurrentExecSA1 = 0x3F;
+    ZT_CHECK_INT(c_sa12302r(0xFF04u), (uint8_t)((0x3F << 2) + 0xFF));
+    CurrentExecSA1 = 1;
+    /* timer on -> reads SA1TimerCount, DH ignored */
     SA1TimerSet = 0x80;
     SA1TimerCount = 0xAB;
-    ZT_CHECK_INT(c_sa12302r(), 0xAB);
+    ZT_CHECK_INT(c_sa12302r(0x3300u), 0xAB);
 
     /* 2304/2305: V counter (timer off) from curypos */
     SA1TimerSet = 0;
@@ -170,9 +179,9 @@ int main(void)
     SA1ResetV = 0x8123;
     c_sa12200w(0x00);
     ZT_CHECK_INT(BYTE(SA1Control, 0), 0x00);
-    ZT_CHECK_INT(SA1BankPtr, (uint32_t)(uintptr_t)romdata);
-    ZT_CHECK_INT(SA1Ptr - SA1BankPtr, 0x123); /* ResetV - 0x8000 */
-    ZT_CHECK_INT(SA1BankPtr - SA1RegPCS, 0x8000);
+    ZT_CHECK_INT(SA1BankPtr, 0); /* never read; kept host-free for the save state */
+    ZT_CHECK_INT(SA1Ptr - (uint32_t)(uintptr_t)romdata, 0x123); /* ResetV - 0x8000 */
+    ZT_CHECK_INT((uint32_t)(uintptr_t)romdata - SA1RegPCS, 0x8000);
     ZT_CHECK_INT((uint16_t)SA1xs, 0x1FF);
     /* 2200: IRQ/NMI request bits set SA1DoIRQ */
     SA1DoIRQ = 0;

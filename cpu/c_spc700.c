@@ -1,29 +1,25 @@
-/*
- * cpu/c_spc700.c - entry points for the SPC700 I/O register ($00F0-$00FF)
- * dispatch. The handlers themselves live in cpu/spc_ioregs.h; this file only
- * declares the state they touch and exposes the two functions that the SPC
- * core's WriteByte / ReadByte macros in cpu/spc700.asm call.
- */
+/* Entry points for the SPC700 I/O register ($00F0-$00FF) dispatch. The
+   handlers are in cpu/spc_ioregs.h; this only declares the state they touch
+   and exposes what the SPC core's WriteByte/ReadByte call. */
 #include <stdbool.h>
 
-#include "../types.h"
-#include "c_dsp.h" /* DSPWriteReg */
 #include "../endmem.h" /* tableadc */
 #include "../gblvars.h" /* cycpbl, curexecstate, timer2upd */
+#include "../types.h"
+#include "c_dsp.h" /* DSPWriteReg */
 #include "spc700.h" /* spcRamDP */
 
 /* SPCRAM is 0xFFC0 bytes of RAM immediately followed, in cpu/spc700.asm's data
  * section, by the 64-byte IPL ROM window at $FFC0 - hence the unsized array. */
 extern u1 SPCRAM[];
 extern u1 DSPMem[256];
-extern u1 SPCROM[64], spcextraram[64];
+extern u1 SPCROM[64] ASM_ALIGNED(4), spcextraram[64];
 extern u1 disablespcclr, SPCSkipXtraROM;
 extern u1 reg1read, reg2read, reg3read, reg4read;
 extern u4 spc700read;
 extern u1 timeron, timincr0, timincr1, timincr2, timinl0, timinl1, timinl2;
 extern u1 spcnumread;
 extern u1 timrcall;
-
 
 #include "spc_ioregs.h"
 void SPCWriteReg(u4 reg, u1 val)
@@ -41,19 +37,24 @@ u1 SPCReadReg(u4 reg)
 /* Re-arm the SPC core after a timer tick (the `reenablespc` macro): once the
  * budget has run away, zero it and, if the SPC was disabled, switch the 65816
  * back to the table selected by its current flags. */
-static void reenablespc(u4 const edx, eop*** const pedi)
+static void reenablespc(u4 const edx, zreg* const pedi)
 {
-    if (cycpbl < 0x1000000) return;
+    if (cycpbl < 0x1000000)
+        return;
     cycpbl = 0;
-    if (curexecstate & 0x02) return;
+    if (curexecstate & 0x02)
+        return;
     curexecstate |= 0x02;
-    *pedi = tableadc[(u1)edx];
+    *pedi = (zreg)(uintptr_t)tableadc[(u1)edx];
 }
 
 /* One scanline of SPC timer service. Timers 0 and 1 run at 8 kHz (every other
  * call, tracked by timrcall); timer 2 runs at 64 kHz, i.e. four steps per call.
  * Every 60th call the whole body runs twice. */
-void UpdateTimer(u4 const edx, eop*** const pedi)
+/* pedi is the caller's edi slot, not an opfn*** - punning a zreg slot through
+   an incompatible pointer type lets -O3 assume they do not alias, and the
+   caller then keeps a stale opcode table across the call. */
+void UpdateTimer(u4 const edx, zreg* const pedi)
 {
     for (;;) {
         timrcall ^= 0x01;
@@ -77,7 +78,8 @@ void UpdateTimer(u4 const edx, eop*** const pedi)
         }
         if (timeron & 4) {
             for (u4 i = 0; i != 4; ++i) {
-                if (--timinl2 != 0) continue;
+                if (--timinl2 != 0)
+                    continue;
                 SPCRAM[0xFF]++;
                 timinl2 = timincr2;
                 if (SPCRAM[0xFF] == 1) {
@@ -86,7 +88,8 @@ void UpdateTimer(u4 const edx, eop*** const pedi)
                 }
             }
         }
-        if (++timer2upd != 60) break;
+        if (++timer2upd != 60)
+            break;
         timer2upd = 0;
     }
 }

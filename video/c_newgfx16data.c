@@ -1,22 +1,15 @@
-/* The .data blocks that were spread through video/newgfx16.asm.
- *
- * One pinned block, in the assembly's order and at its offsets. Two things to
- * know before touching it:
- *
- *   - the gaps are `nop` (0x90), not zero. NASM's ALIGN pads with nops in a
- *     data section too, so `.balign 32, 0x90` is what reproduces it.
- *   - mosstart, moscountdown and clinemainsub were file-local labels. They are
- *     global here because the block moved out of the file that used them;
- *     nothing else may take those names.
- *
- * Data-only file so the layout test can link it on its own.
- */
+/* The .data blocks spread through video/newgfx16.asm, pinned as one block in
+   the assembly's order. The gaps are nop (0x90), not zero, because NASM's
+   ALIGN pads that way in a data section too; and mosstart, moscountdown and
+   clinemainsub were file-local labels, global here because the block moved out
+   of the file that used them. Data-only so the layout test can link it
+   alone. */
 #include "../asmdata.h"
 
 /* clang-format off */
 
 __asm__(
-    ASM_SEC_DATA(".data")
+    ASM_SEC_DATA_ALIGNED(".data")
     ASM_GSYM(prevbrightdc)
     ".byte 16\n"
     ASM_GSYM(mosstart)          /* was file-local */
@@ -37,16 +30,19 @@ __asm__(
     ".long 0\n"
     ASM_GSYM(ngmsdraw)
     ".long 0\n"
+    /* These hold the address of a window table, so they are pointer-sized,
+       not a dword. */
     ASM_GSYM(CMainWinScr)
-    ".long 0\n"
+    ".zero " ASM_STR(__SIZEOF_POINTER__) "\n"
     ASM_GSYM(CSubWinScr)
-    ".long 0\n"
+    ".zero " ASM_STR(__SIZEOF_POINTER__) "\n"
     ASM_GSYM(Prevcoladdr)
     ".long 0\n"
     ASM_GSYM(ColResult)
     ".long 0\n"
+    /* A palette address, so pointer-sized. */
     ASM_GSYM(CPalPtrng)
-    ".long 0\n"
+    ".zero " ASM_STR(__SIZEOF_POINTER__) "\n"
     ASM_GSYM(WindowRedraw)
     ".long 0\n"
     ASM_GSYM(mostranspval)

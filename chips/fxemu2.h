@@ -3,7 +3,7 @@
 
 #include "../types.h"
 
-extern void MainLoop();
+extern void MainLoop(void);
 
 extern u1* SCBRrel;
 extern u4 NumberOfOpcodes; // Number of opcodes to execute
@@ -17,6 +17,6 @@ extern u4 fxbit01pcal;
 extern u4 fxbit23pcal;
 extern u4 fxbit45pcal;
 extern u4 fxbit67pcal;
-extern u4 sfxclineloc;
+extern zreg sfxclineloc;
 
 #endif

@@ -1,41 +1,23 @@
-/*
- * Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
- *
- * http://www.zsnes.com
- * http://sourceforge.net/projects/zsnes
- * https://zsnes.bountysource.com
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- */
-
 // Tools for the GUI
 
 #include <string.h>
 
-#include "../cfg.h"
 #include "../ui.h"
 #include "../video/procvid.h"
 #include "c_gui.h"
 #include "c_guiwindp.h"
+#include "cfg.h"
 #include "gui.h"
 #include "guitools.h"
+#include "guiwindp.h"
 
 static void GUIoutputchar(u1* dst, u1 const glyph, u1 const colour)
 {
     // XXX better variable names
     // Font Setup (Menus)
-    u1 const* edi = newfont == 0 ? GUIFontData[glyph] : GUIFontData1[glyph];
+    /* The loadable font holds 141 glyphs; the Nordic letters live past that in
+       the built-in font, so fall back to it for them. */
+    u1 const* edi = (newfont == 0 || glyph >= 141) ? GUIFontData[glyph] : GUIFontData1[glyph];
     u4 cl = 5;
     do {
         u4 ah = *edi;
@@ -51,11 +33,11 @@ static void GUIoutputchar(u1* dst, u1 const glyph, u1 const colour)
 
 char const* GUIOutputString(u1* dst, char const* text, u1 const colour)
 {
-    for (;; dst += 6, ++text) {
-        u1 const c = *text;
-        if (c == '\0')
+    for (;; dst += 6) {
+        u4 const cp = utf8_next(&text);
+        if (cp == 0)
             return text;
-        GUIoutputchar(dst, ASCII2Font[c], colour);
+        GUIoutputchar(dst, glyph_for_codepoint(cp), colour);
     }
 }
 
@@ -146,11 +128,12 @@ void GUIDrawShadow2(u1* buf, u4 const w, u4 h)
 static void GUIoutputcharwin(u1* dst, u1 const glyph, u1 const colour)
 {
     // Font Setup (Windows)
-    u1 const* edi = newfont == 0 ? GUIFontData[glyph] : GUIFontData1[glyph];
+    /* The loadable font holds 141 glyphs; the Nordic letters live past that in
+       the built-in font, so fall back to it for them. */
+    u1 const* edi = (newfont == 0 || glyph >= 141) ? GUIFontData[glyph] : GUIFontData1[glyph];
     u4 y = 5;
     do {
-        if (vidbuffer <= dst && dst < vidbuffer + 224 * 288) // XXX possible buffer overflow by 4
-        {
+        if (vidbuffer <= dst && dst <= vidbuffer + 224 * 288 - 5) {
             u4 ah = *edi;
             u4 x = 5;
             do {
@@ -170,50 +153,68 @@ static void GUIoutputcharwin(u1* dst, u1 const glyph, u1 const colour)
 static void GUIOutputStringwin(s4 x, u1* const dst, char const* text, u1 const colour)
 {
     for (;; x += 6) {
-        u1 const c = *text++;
-        if (c == '\0')
+        u4 const cp = utf8_next(&text);
+        if (cp == 0)
             break;
         if (-8 <= x && x <= 255)
-            GUIoutputcharwin(dst + x, ASCII2Font[c], colour);
+            GUIoutputcharwin(dst + x, glyph_for_codepoint(cp), colour);
     }
+}
+
+/* The digit's value, or -1 when it is not a hex digit. */
+static int hexdigit(char const c)
+{
+    if ('0' <= c && c <= '9')
+        return c - '0';
+    if ('A' <= c && c <= 'F')
+        return c - 'A' + 10;
+    if ('a' <= c && c <= 'f')
+        return c - 'a' + 10;
+    return -1;
 }
 
 static void GUIOutputStringwinl(s4 x, u1* const dst, char const* text, u1 const colour)
 {
-    u4 n = cloadmaxlen;
-    do {
-        u1 c = *text++;
+    /* First undo any %HH escapes into a byte buffer, then render up to
+       cloadmaxlen codepoints of it. A multi-byte UTF-8 codepoint may span
+       several escapes, so the un-escaping and the decoding cannot share a pass.
+       cloadmaxlen is at most 39, so the first row of glyphs is well inside buf. */
+    char buf[256];
+    u4 bi = 0;
+
+    while (bi < sizeof buf - 1) {
+        u1 c = (u1)*text++;
+
         if (c == '%') {
-            u1 v;
-            u1 const c0 = text[0];
-            if ('0' <= c0 && c0 <= '9')
-                v = c0 - '0';
-            else if ('A' <= c0 && c0 <= 'F')
-                v = c0 - 'A' + 10;
-            else if ('a' <= c0 && c0 <= 'f')
-                v = c0 - 'a' + 10;
-            else
-                goto no_number;
-            v <<= 4;
-            u1 const c1 = text[1];
-            if ('0' <= c1 && c1 <= '9')
-                v |= c1 - '0';
-            else if ('A' <= c1 && c1 <= 'F')
-                v |= c1 - 'A' + 10;
-            else if ('a' <= c1 && c1 <= 'f')
-                v |= c1 - 'a' + 10;
-            else
-                goto no_number;
-            c = v;
-            text += 2;
-        no_number:;
+            /* The low digit is only read once the high one checks out, so a '%'
+               ending the string cannot read past it. */
+            int const hi = hexdigit(text[0]);
+            int const lo = hi < 0 ? -1 : hexdigit(text[1]);
+
+            if (lo >= 0) {
+                c = (u1)((hi << 4) | lo);
+                text += 2;
+            }
         }
         if (c == '\0')
             break;
-        if (-8 <= x && x <= 255)
-            GUIoutputcharwin(dst + x, ASCII2Font[c], colour);
-        x += 6;
-    } while (--n != 0);
+        buf[bi++] = (char)c;
+    }
+    buf[bi] = '\0';
+
+    {
+        char const* p = buf;
+        u4 n = cloadmaxlen;
+
+        for (; n != 0; n--, x += 6) {
+            u4 const cp = utf8_next(&p);
+
+            if (cp == 0)
+                break;
+            if (-8 <= x && x <= 255)
+                GUIoutputcharwin(dst + x, glyph_for_codepoint(cp), colour);
+        }
+    }
 }
 
 void GUIOuttextwin2(u4 const win_id, u4 x, u4 y, char const* const text, u1 const colour)
@@ -364,4 +365,201 @@ void DrawSlideBarWin(u4 const win_id, u4 const x, u4 const y, u4 list_loc, u4 li
     bar_dims[1] = starty;
     bar_dims[2] = endy;
     GUIDrawSlideBar(GUIwinposx[win_id] + x, GUIwinposy[win_id] + y, bar_size, starty, endy);
+}
+
+void GUIStackLayout(GUIRow const* const rows, u4 const n, s4 const top,
+    s4 const bottom, s4* const out)
+{
+    s4 fixed = 0;
+    s4 share = 0;
+    u4 expanders = 0;
+    s4 y = top;
+    u4 i;
+
+    /* What the fixed rows take, so the rest can be shared out. Measuring
+       first is the whole point: a single pass would have to guess at the rows
+       it has not reached yet. */
+    for (i = 0; i < n; i++) {
+        if (rows[i].kind == GUI_EXPAND) {
+            expanders++;
+        }
+        fixed += rows[i].h;
+    }
+    if (expanders) {
+        s4 const left = bottom - top - fixed;
+
+        share = left > 0 ? left / (s4)expanders : 0;
+    }
+    for (i = 0; i < n; i++) {
+        out[i] = y;
+        y += rows[i].h + (rows[i].kind == GUI_EXPAND ? share : 0);
+    }
+}
+
+/* One description of where the Retro panel's rows sit. Each label sits directly
+   above the control it names, and the four groups are parted by gaps that take
+   up whatever is left, so the panel stays balanced. */
+void GUICrtRows(s4 out[CRT_ROW_COUNT])
+{
+    static GUIRow const rows[CRT_ROW_COUNT] = {
+        { 10, GUI_ITEM }, /* SCANLINES: */
+        { 10, GUI_ITEM }, /* its slider, or the step buttons */
+        { 0, GUI_EXPAND },
+        { 10, GUI_ITEM }, /* VIBRANCY: */
+        { 10, GUI_ITEM },
+        { 0, GUI_EXPAND },
+        { 10, GUI_ITEM }, /* BLOOM: */
+        { 10, GUI_ITEM },
+        { 0, GUI_EXPAND }
+    };
+
+    GUIStackLayout(rows, CRT_ROW_COUNT, 30, 178, out);
+}
+
+void GUIFilterRows(s4 out[FILT_ROW_COUNT])
+{
+    static GUIRow const rows[FILT_ROW_COUNT] = {
+        { 5, GUI_ITEM }, /* VIDEO FILTERS: */
+        { 10, GUI_ITEM }, /* bilinear / interpolation, NTSC */
+        { 10, GUI_ITEM }, /* 2xSaI, Super Eagle */
+        { 13, GUI_ITEM }, /* Super 2xSaI, HQ FILTER */
+        { 17, GUI_ITEM }, /* 2X / 3X / 4X */
+        { 5, GUI_ITEM }, /* MISC FILTERS: */
+        { 15, GUI_ITEM }, /* grayscale, hi-res mode 7 */
+#ifdef __WIN32__
+        { 20, GUI_ITEM }, /* triple buffering */
+#else
+        { 0, GUI_ITEM }, /* nothing here where there is no triple buffering */
+#endif
+        { 5, GUI_ITEM }, /* DISPLAY OPTIONS: */
+        { 10, GUI_ITEM } /* keep 4:3 */
+    };
+
+    GUIStackLayout(rows, FILT_ROW_COUNT, 30, 178, out);
+}
+
+void GUIMonitorRows(s4 out[MON_ROW_COUNT])
+{
+    static GUIRow const rows[MON_ROW_COUNT] = {
+        { 12, GUI_ITEM }, /* OPEN ON MONITOR: */
+        { MON_MAX * MON_PITCH, GUI_ITEM }, /* the list */
+        { 22, GUI_ITEM }, /* two lines of note about the list */
+        { 0, GUI_EXPAND },
+        { 12, GUI_ITEM }, /* MONITOR SYNC: */
+        { 10, GUI_ITEM }, /* vsync */
+        { 0, GUI_EXPAND }
+    };
+
+    GUIStackLayout(rows, MON_ROW_COUNT, 30, 178, out);
+}
+
+void GUIModeRows(s4 out[MODE_ROW_COUNT])
+{
+    static GUIRow const rows[MODE_ROW_COUNT] = {
+        { 20, GUI_ITEM }, /* SET */
+        { 8, GUI_ITEM }, /* LEGEND: */
+        { 8, GUI_ITEM }, /* six lines of it */
+        { 8, GUI_ITEM },
+        { 8, GUI_ITEM },
+        { 8, GUI_ITEM },
+        { 8, GUI_ITEM },
+        { 22, GUI_ITEM },
+        { 10, GUI_ITEM }, /* CUSTOM: */
+        { 10, GUI_ITEM } /* the two resolution boxes */
+    };
+
+    GUIStackLayout(rows, MODE_ROW_COUNT, 30, 178, out);
+}
+
+void GUISoundRows(s4 out[SND_ROW_COUNT])
+{
+    static GUIRow const rows[SND_ROW_COUNT] = {
+        { 5, GUI_ITEM }, /* SOUND: */
+        { SND_OPTS * SND_PITCH + 12, GUI_ITEM }, /* the on/off boxes */
+        { 8, GUI_ITEM }, /* OUTPUT RATE: */
+        { 15, GUI_ITEM }, /* its box */
+        { 15, GUI_ITEM }, /* VOLUME LEVEL: */
+        { 21, GUI_ITEM }, /* its slider */
+        { 5, GUI_ITEM }, /* INTERPOLATION: and LOWPASS: */
+        { SND_LIST * SND_PITCH, GUI_ITEM }
+    };
+
+    GUIStackLayout(rows, SND_ROW_COUNT, 16, 188, out);
+}
+
+/* Nothing to show for these outside Windows, so they are laid out at no
+   height and the expanding gaps take the space back. */
+enum {
+#ifdef __WIN32__
+    OPT_WINLABEL_H = 5,
+    OPT_WINROW_H = 10
+#else
+    OPT_WINLABEL_H = 0,
+    OPT_WINROW_H = 0
+#endif
+};
+
+void GUIOptionBasicRows(s4 out[OPT_BAS_COUNT])
+{
+    static GUIRow const rows[OPT_BAS_COUNT] = {
+        { 15, GUI_ITEM }, /* SYSTEM: */
+        { 10, GUI_ITEM },
+        { 15, GUI_EXPAND },
+        { 5, GUI_ITEM }, /* GFX ENGINES: */
+        { 10, GUI_ITEM },
+        { 10, GUI_ITEM },
+        { 15, GUI_EXPAND },
+        { 5, GUI_ITEM }, /* ROM: */
+        { 10, GUI_ITEM },
+        { 10, GUI_ITEM },
+        { 10, GUI_ITEM },
+        { 15, GUI_EXPAND },
+        { OPT_WINLABEL_H, GUI_ITEM }, /* WINDOWS SPECIFIC: */
+        { OPT_WINROW_H, GUI_ITEM },
+        { OPT_WINROW_H, GUI_ITEM },
+        { 10, GUI_ITEM }
+    };
+
+    GUIStackLayout(rows, OPT_BAS_COUNT, 26, 191, out);
+}
+
+void GUIOptionOverlayRows(s4 out[OPT_OVR_COUNT])
+{
+    static GUIRow const rows[OPT_OVR_COUNT] = {
+        { 5, GUI_ITEM }, /* OVERLAYS: */
+        { 10, GUI_ITEM },
+        { 10, GUI_ITEM },
+        { 10, GUI_ITEM },
+        { 10, GUI_ITEM },
+        { 15, GUI_EXPAND },
+        { 5, GUI_ITEM }, /* MESSAGES: */
+        { 10, GUI_ITEM },
+        { 10, GUI_ITEM },
+        { 15, GUI_EXPAND },
+        { 5, GUI_ITEM }, /* SCREENSHOT FORMAT: */
+        { 10, GUI_ITEM },
+        { 10, GUI_ITEM }
+    };
+
+    GUIStackLayout(rows, OPT_OVR_COUNT, 26, 151, out);
+}
+
+s4 GUIPathRow(u4 const i)
+{
+    return PATH_ROW_FIRST + PATH_ROW_PITCH * (s4)i;
+}
+
+s4 GUISaveRow(u4 const i)
+{
+    return SAVE_ROW_FIRST + SAVE_ROW_PITCH * (s4)i;
+}
+
+s4 GUISaveSlotY(u4 const row)
+{
+    return SAVE_SLOT_FIRST + SAVE_SLOT_PITCH * (s4)row;
+}
+
+s4 GUISaveSlotX(u4 const col)
+{
+    return SAVE_SLOT_COL + SAVE_SLOT_COLPITCH * (s4)col;
 }

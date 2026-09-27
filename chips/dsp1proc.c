@@ -1,7 +1,13 @@
 /* C port of dsp1proc.asm: the DSP1 register/command interface.
    The math lives in dsp1emu.c; this marshals parameters/results. */
-#include "regabi.h"
 #include <stdint.h>
+
+#include "../asmdata.h"
+#include "../cpu/memseam.h"
+#include "../types.h"
+#include "regabi.h"
+
+extern memfn regaccessbankr8, regaccessbankw8, regaccessbankr16, regaccessbankw16;
 
 /* operands + commands, defined in dsp1emu.c */
 extern short Op00Multiplicand;
@@ -164,10 +170,26 @@ void DSPOp2B(void);
 void DSPOp2D(void);
 void DSPOp0A(void);
 
-/* DSP1 register state (was .bss in dsp1proc.asm) */
-uint8_t DSP1COp, DSP1RLeft, DSP1WLeft, DSP1CPtrW, DSP1CPtrR, DSPDet;
-uint8_t DSPFuncUsed[256];
-uint16_t DSP1VARS[16], DSP1RET[16];
+/* DSP1 register state, .bss in dsp1proc.asm. zstate.c saves the whole run, so
+   its order and adjacency *are* the save-state format from V144 on. Plain C
+   definitions cannot express that under -fdata-sections, hence the inline-asm
+   block; the order below is dsp1proc.asm's. */
+__asm__(
+    ASM_SEC_BSS_ALIGNED(".bss")
+    /* Names the whole saved run, so the copy in zstate.c is in bounds of a
+       real object rather than of DSP1COp's single byte - same idiom as
+       opcd_run and SA1Status_run. */
+    /* V144 defines this run, so the two 16-bit arrays below can start on an
+       even offset instead of inheriting the five bytes ahead of them. */
+    ".balign 2\n" ASM_GSYM(DSP1_run)
+        ASM_GSYM(DSP1COp) ".skip 1\n" ASM_GSYM(DSP1RLeft) ".skip 1\n" ASM_GSYM(DSP1WLeft) ".skip 1\n" ASM_GSYM(DSP1CPtrW) ".skip 1\n" ASM_GSYM(DSP1CPtrR) ".skip 1\n"
+                                                                                                                                                          ".balign 2\n" ASM_GSYM(DSP1VARS) ".skip 32\n" ASM_GSYM(DSP1RET) ".skip 32\n" ASM_GSYM(DSPDet) ".skip 1\n" ASM_GSYM(DSPFuncUsed) ".skip 256\n" ASM_SEC_END);
+
+/* 5 command bytes, a pad byte, two 32-byte arrays, DSPDet, DSPFuncUsed. */
+extern uint8_t DSP1_run[6 + 32 + 32 + 1 + 256];
+extern uint8_t DSP1COp, DSP1RLeft, DSP1WLeft, DSP1CPtrW, DSP1CPtrR, DSPDet;
+extern uint8_t DSPFuncUsed[256] ASM_ALIGNED(1);
+extern uint16_t DSP1VARS[16] ASM_ALIGNED(2), DSP1RET[16] ASM_ALIGNED(2);
 uint32_t dsp1ptr;
 uint8_t dsp1array[4096];
 
@@ -558,7 +580,12 @@ static const uint8_t dsp1_pcount[256] = { 2, 4, 7, 3, 2, 0, 3, 0, 3, 0, 1, 3, 3,
 
 static uint16_t dsp1_read_data(void)
 {
-    uint16_t r = DSP1RET[DSP1CPtrR++];
+    /* The buffer holds 16 words and the pointer is a byte, so a host that
+       reads more results than the command produced used to walk off the end
+       of the array - an out-of-bounds write, in the parameter case. No
+       command has more than seven parameters, so masking changes nothing that
+       a working transaction does. */
+    uint16_t r = DSP1RET[DSP1CPtrR++ & 15];
     if (--DSP1RLeft == 0 && DSP1COp == 0x0A) {
         DSPOp0A();
         DSP1RET[0] = (uint16_t)Op0AA;
@@ -571,10 +598,10 @@ static uint16_t dsp1_read_data(void)
     return r;
 }
 
-REGABI_BANK_READ8(DSP1Read8b);
-REGABI_BANK_READ16(DSP1Read16b);
-REGABI_BANK_WRITE8(DSP1Write8b);
-REGABI_BANK_WRITE16(DSP1Write16b);
+MEMBANK_READ8(DSP1Read8b);
+MEMBANK_READ16(DSP1Read16b);
+MEMBANK_WRITE8(DSP1Write8b);
+MEMBANK_WRITE16(DSP1Write16b);
 
 uint8_t c_DSP1Read8b(uint32_t addr)
 {
@@ -605,7 +632,7 @@ void c_DSP1Write16b(uint32_t addr, uint16_t val)
     (void)addr;
     if (DSP1WLeft == 0)
         return;
-    DSP1VARS[DSP1CPtrW++] = val;
+    DSP1VARS[DSP1CPtrW++ & 15] = val;
     if (--DSP1WLeft == 0)
         dsp1_process();
 }
@@ -621,31 +648,46 @@ uint16_t c_DSP1Read16b3Farea(uint32_t off)
     return dsp1_read_data();
 }
 
-#if defined(__GNUC__) && defined(__i386__)
-__asm__(
-    ".globl " REGABI_SYM(DSP1Write8b3F) "\n" REGABI_SYM(DSP1Write8b3F) ":\n"
-                                                                       "  testl $0x8000, %ecx\n  jnz 1f\n"
-                                                                       "  cmpb $0xE0, %bl\n  je 1f\n"
-                                                                       "  jmp " REGABI_SYM(regaccessbankw8) "\n"
-                                                                                                            "1:jmp " REGABI_SYM(DSP1Write8b) "\n"
+/* The $3F/$E0 mapping the memtable holds: the DSP1 answers in the top half of
+   the bank, and in the whole of bank $E0. Everything else is I/O registers,
+   which the assembly reached by tail-jumping. */
+static int dsp1_3f_window(void)
+{
+    return MemSeamC & 0x8000 || (MemSeamB & 0xFF) == 0xE0;
+}
 
-                                                                                                                                             ".globl " REGABI_SYM(DSP1Write16b3F) "\n" REGABI_SYM(DSP1Write16b3F) ":\n"
-                                                                                                                                                                                                                  "  testl $0x8000, %ecx\n  jnz 2f\n"
-                                                                                                                                                                                                                  "  cmpb $0xE0, %bl\n  je 2f\n"
-                                                                                                                                                                                                                  "  jmp " REGABI_SYM(regaccessbankw16) "\n"
-                                                                                                                                                                                                                                                        "2:jmp " REGABI_SYM(DSP1Write16b) "\n"
+void DSP1Read8b3F(void)
+{
+    if (!dsp1_3f_window()) {
+        regaccessbankr8();
+        return;
+    }
+    mem_set_al(0x80);
+}
 
-                                                                                                                                                                                                                                                                                          ".globl " REGABI_SYM(DSP1Read8b3F) "\n" REGABI_SYM(DSP1Read8b3F) ":\n"
-                                                                                                                                                                                                                                                                                                                                                           "  testl $0x8000, %ecx\n  jnz 3f\n"
-                                                                                                                                                                                                                                                                                                                                                           "  cmpb $0xE0, %bl\n  je 3f\n"
-                                                                                                                                                                                                                                                                                                                                                           "  jmp " REGABI_SYM(regaccessbankr8) "\n"
-                                                                                                                                                                                                                                                                                                                                                                                                "3:movb $0x80, %al\n  ret\n"
+void DSP1Read16b3F(void)
+{
+    if (!dsp1_3f_window()) {
+        regaccessbankr16();
+        return;
+    }
+    mem_set_ax(c_DSP1Read16b3Farea(MemSeamC));
+}
 
-                                                                                                                                                                                                                                                                                                                                                                                                ".globl " REGABI_SYM(DSP1Read16b3F) "\n" REGABI_SYM(DSP1Read16b3F) ":\n"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                   "  testl $0x8000, %ecx\n  jnz 4f\n"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                   "  cmpb $0xE0, %bl\n  je 4f\n"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                   "  jmp " REGABI_SYM(regaccessbankr16) "\n"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         "4:pushl %ecx\n  pushl %edx\n  pushl %eax\n  pushl %ecx\n"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         "  call " REGABI_SYM(c_DSP1Read16b3Farea) "\n  addl $4, %esp\n"
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   "  movw %ax, (%esp)\n  popl %eax\n  popl %edx\n  popl %ecx\n  ret\n");
-#endif
+void DSP1Write8b3F(void)
+{
+    if (!dsp1_3f_window()) {
+        regaccessbankw8();
+        return;
+    }
+    DSP1Write8b();
+}
+
+void DSP1Write16b3F(void)
+{
+    if (!dsp1_3f_window()) {
+        regaccessbankw16();
+        return;
+    }
+    DSP1Write16b();
+}

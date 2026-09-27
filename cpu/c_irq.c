@@ -5,7 +5,37 @@
 #include "c_irq.h"
 #include "execute.h"
 #include "memory.h"
+#include "memseam.h"
 #include "regs.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+
+/* IRQ_LOG=1 records every interrupt entry, so two builds can be diffed to find
+   the first one taken at a different point in the instruction stream. Off
+   unless the tree is built with WITH_DEBUG_HOOKS=1. */
+#ifndef ZSNES_DEBUG_HOOKS
+#define irq_log(kind, pc) ((void)0)
+#else
+static void irq_log(char const* const kind, u4 const pc)
+{
+    static int checked = 0;
+    static FILE* fp = NULL;
+    static unsigned long n = 0;
+    if (!checked) {
+        char const* e = getenv("IRQ_LOG");
+        if (e && *e == '1')
+            fp = fopen("/tmp/zsnes_irq.txt", "wb");
+        checked = 1;
+    }
+    if (fp) {
+        fprintf(fp, "%lu %s pc=%04x ypos=%u cyc=%u\n", n, kind, pc,
+            (unsigned)curypos, (unsigned)curcyc);
+        fflush(fp);
+    }
+    n++;
+}
+#endif
 
 
 static u4 makedl(u4 edx)
@@ -21,28 +51,33 @@ static u4 makedl(u4 edx)
 
 static void call_membank0w8(u2 const cx, u1 const al)
 {
-	u4 eax;
-	u4 ecx;
-	u4 ebx;
-	__asm__ volatile("call %P3" : "=a" (eax), "=c" (ecx), "=b" (ebx) : "X" (membank0w8), "a" (al), "c" (cx) : "cc", "memory");
+    uintptr_t const b = MemSeamB, c = MemSeamC, a = MemSeamA, d = MemSeamD;
+
+    MemSeamC = cx;
+    MemSeamA = al;
+    membank0w8();
+    MemSeamB = b;
+    MemSeamC = c;
+    MemSeamA = a;
+    MemSeamD = d;
 }
 
 
-void IRQemulmode(u4* const pedx, u1** const pesi)
+void IRQemulmode(zreg* const pedx, zreg* const pesi)
 {
-	xpc = *pesi - initaddrl;
+	xpc = (u2)((u1*)(uintptr_t)*pesi - initaddrl);
 
 	u2 cx = xs;
 
 	call_membank0w8(cx, (u1)(xpc >> 8));
-	cx = (cx - 1) & stackand | stackor;
+	cx = ((cx - 1) & stackand) | stackor;
 
 	call_membank0w8(cx, (u1)xpc);
-	cx = (cx - 1) & stackand | stackor;
+	cx = ((cx - 1) & stackand) | stackor;
 
 	u4 const edx = makedl(*pedx);
 	call_membank0w8(cx, (u1)edx);
-	cx = (cx - 1) & stackand | stackor;
+	cx = ((cx - 1) & stackand) | stackor;
 
 	xs = cx;
 
@@ -52,18 +87,14 @@ void IRQemulmode(u4* const pedx, u1** const pesi)
 	u1* const esi = ax & 0x8000 ? snesmmap[0] : snesmap2[0];
 	initaddrl = esi;
 
-	*pedx = edx & 0xFFFFFFF3 | 0x00000004;
-	*pesi = esi + ax;
+	*pedx = (edx & 0xFFFFFFF3) | 0x00000004;
+	*pesi = (zreg)(uintptr_t)(esi + ax);
 }
 
 
-void switchtovirq(u4* const pedx, u1** const pesi)
+void switchtovirq(zreg* const pedx, zreg* const pesi)
 {
 	irqon = 0x80;
-
-#if 0 // XXX 0x00 seems wrong
-	if (doirqnext & 0x02) edx = edx & 0xFFFF00FF | ((edx - (3 << 8)) & 0x0000FF00); // Cycle adjust.
-#endif
 
 	if (xe & 0x01)
 	{ // IRQ emulation mode.
@@ -71,22 +102,23 @@ void switchtovirq(u4* const pedx, u1** const pesi)
 	}
 	else
 	{
-		xpc = *pesi - initaddrl;
+		xpc = (u2)((u1*)(uintptr_t)*pesi - initaddrl);
+		irq_log("irq", xpc);
 
 		u2 cx = xs;
 
 		call_membank0w8(cx, xpb);
-		cx = (cx - 1) & stackand | stackor;
+		cx = ((cx - 1) & stackand) | stackor;
 
 		call_membank0w8(cx, (u1)(xpc >> 8));
-		cx = (cx - 1) & stackand | stackor;
+		cx = ((cx - 1) & stackand) | stackor;
 
 		call_membank0w8(cx, (u1)xpc);
-		cx = (cx - 1) & stackand | stackor;
+		cx = ((cx - 1) & stackand) | stackor;
 
 		u4 const edx = makedl(*pedx);
 		call_membank0w8(cx, (u1)edx);
-		cx = (cx - 1) & stackand | stackor;
+		cx = ((cx - 1) & stackand) | stackor;
 
 		xs = cx;
 
@@ -97,27 +129,27 @@ void switchtovirq(u4* const pedx, u1** const pesi)
 		u1* const esi = ax & 0x8000 ? snesmmap[bl] : snesmap2[bl];
 		initaddrl = esi;
 
-		*pedx = edx & 0xFFFFFFF3 | 0x00000004;
-		*pesi = esi + ax;
+		*pedx = (edx & 0xFFFFFFF3) | 0x00000004;
+		*pesi = (zreg)(uintptr_t)(esi + ax);
 	}
 }
 
 
-void NMIemulmode(u4* const pedx, u1** const pesi)
+void NMIemulmode(zreg* const pedx, zreg* const pesi)
 {
-	xpc = *pesi - initaddrl;
+	xpc = (u2)((u1*)(uintptr_t)*pesi - initaddrl);
 
 	u2 cx = xs;
 
 	call_membank0w8(cx, (u1)(xpc >> 8));
-	cx = (cx - 1) & stackand | stackor;
+	cx = ((cx - 1) & stackand) | stackor;
 
 	call_membank0w8(cx, (u1)xpc);
-	cx = (cx - 1) & stackand | stackor;
+	cx = ((cx - 1) & stackand) | stackor;
 
 	u4 const edx = makedl(*pedx);
 	call_membank0w8(cx, (u1)edx);
-	cx = (cx - 1) & stackand | stackor;
+	cx = ((cx - 1) & stackand) | stackor;
 
 	xs = cx;
 
@@ -127,19 +159,19 @@ void NMIemulmode(u4* const pedx, u1** const pesi)
 	u1* const esi = ax & 0x8000 ? snesmmap[0] : snesmap2[0];
 	initaddrl = esi;
 
-	*pedx = edx & 0xFFFFFFF3 | 0x00000004;
-	*pesi = esi + ax;
+	*pedx = (edx & 0xFFFFFFF3) | 0x00000004;
+	*pesi = (zreg)(uintptr_t)(esi + ax);
 }
 
 
-void switchtonmi(u4* const pedx, u1** const pesi)
+void switchtonmi(zreg* const pedx, zreg* const pesi)
 {
 	curnmi = 1;
 
 	// Clamp the scanline cycle counter (dh) to a floor of 130.
 	u1 dh = (u1)(*pedx >> 8);
 	dh = dh >= 130 ? (u1)(dh - 130) : 130;
-	*pedx = *pedx & 0xFFFF00FF | (u4)dh << 8;
+	*pedx = (*pedx & 0xFFFF00FF) | (u4)dh << 8;
 
 	if (xe & 0x01)
 	{ // NMI emulation mode.
@@ -147,22 +179,23 @@ void switchtonmi(u4* const pedx, u1** const pesi)
 	}
 	else
 	{
-		xpc = *pesi - initaddrl;
+		xpc = (u2)((u1*)(uintptr_t)*pesi - initaddrl);
+		irq_log("irq", xpc);
 
 		u2 cx = xs;
 
 		call_membank0w8(cx, xpb);
-		cx = (cx - 1) & stackand | stackor;
+		cx = ((cx - 1) & stackand) | stackor;
 
 		call_membank0w8(cx, (u1)(xpc >> 8));
-		cx = (cx - 1) & stackand | stackor;
+		cx = ((cx - 1) & stackand) | stackor;
 
 		call_membank0w8(cx, (u1)xpc);
-		cx = (cx - 1) & stackand | stackor;
+		cx = ((cx - 1) & stackand) | stackor;
 
 		u4 const edx = makedl(*pedx);
 		call_membank0w8(cx, (u1)edx);
-		cx = (cx - 1) & stackand | stackor;
+		cx = ((cx - 1) & stackand) | stackor;
 
 		xs = cx;
 
@@ -173,7 +206,7 @@ void switchtonmi(u4* const pedx, u1** const pesi)
 		u1* const esi = ax & 0x8000 ? snesmmap[bl] : snesmap2[bl];
 		initaddrl = esi;
 
-		*pedx = edx & 0xFFFFFFF3 | 0x00000004;
-		*pesi = esi + ax;
+		*pedx = (edx & 0xFFFFFFF3) | 0x00000004;
+		*pesi = (zreg)(uintptr_t)(esi + ax);
 	}
 }

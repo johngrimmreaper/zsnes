@@ -1,24 +1,3 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #ifndef MEMTABLE_H
 #define MEMTABLE_H
 
@@ -26,18 +5,19 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
 #include "../init.h"
 #include "../types.h"
+#include "memseam.h"
 
-extern void (*memtabler8[256])();
-extern void (*memtablew8[256])();
-extern void (*memtabler16[256])();
-extern void (*memtablew16[256])();
+extern void (*memtabler8[256])(void);
+extern void (*memtablew8[256])(void);
+extern void (*memtabler16[256])(void);
+extern void (*memtablew16[256])(void);
 
 typedef struct
 {
-    void (*memr8)();
-    void (*memw8)();
-    void (*memr16)();
-    void (*memw16)();
+    void (*memr8)(void);
+    void (*memw8)(void);
+    void (*memr16)(void);
+    void (*memw16)(void);
 } mrwp;
 
 extern mrwp regbank, membank, wrambank, srambank, erambank, sramsbank;
@@ -55,7 +35,7 @@ instruction rep stosd, which is able to do that (and much more).
 Since ZSNES is just full of func pointer arrays, it'll probably come in handy.
 */
 
-static inline void rep_stosd(void (**dest)(), void(*func_ptr), size_t num)
+static inline void rep_stosd(void (**dest)(void), void(*func_ptr), size_t num)
 {
     while (num--) {
         dest[num] = func_ptr;
@@ -70,48 +50,40 @@ static inline void map_mem(size_t dest, mrwp* src, size_t num)
     rep_stosd(memtablew16 + dest, src->memw16, num);
 }
 
-static inline u1 memr8(u1 const bank /* bl */, u2 const address /* cx */)
+/* One memtable call.  The seam is saved and restored around it: a register
+   write can start a DMA that reenters the same handlers, and the outer caller
+   still expects to read back what its own handler left there. */
+static inline u4 mem_dispatch(memfn* const fn, u1 const bank /* bl */,
+    u2 const address /* cx */, u4 const val /* eax */)
 {
-    u4 eax;
-    u4 ecx = address;
-    u4 edx;
-    u4 ebx = bank;
-    u4 esi;
-    u4 edi;
-    __asm__ volatile("call *%6"
-                 : "=a"(eax), "+c"(ecx), "+b"(ebx), "=d"(edx), "=S"(esi), "=D"(edi)
-                 : "mr"(memtabler8[ebx])
-                 : "cc", "memory");
-    return (u1)eax;
+    uintptr_t const b = MemSeamB, c = MemSeamC, a = MemSeamA, d = MemSeamD;
+    u4 out;
+
+    MemSeamB = bank;
+    MemSeamC = address;
+    MemSeamA = val;
+    fn();
+    out = MemSeamA;
+    MemSeamB = b;
+    MemSeamC = c;
+    MemSeamA = a;
+    MemSeamD = d;
+    return out;
 }
 
-static inline u2 memr16(u1 const bank /* bl */, u2 const address /* cx */)
+static inline u1 memr8(u1 const bank, u2 const address)
 {
-    u4 eax;
-    u4 ecx = address;
-    u4 edx;
-    u4 ebx = bank;
-    u4 esi;
-    u4 edi;
-    __asm__ volatile("call *%6"
-                 : "=a"(eax), "+c"(ecx), "+b"(ebx), "=d"(edx), "=S"(esi), "=D"(edi)
-                 : "mr"(memtabler16[ebx])
-                 : "cc", "memory");
-    return (u2)eax;
+    return (u1)mem_dispatch((memfn*)memtabler8[bank], bank, address, 0);
 }
 
-static inline void memw8no_rom(u1 const bank /* bl */, u2 const address /* cx */, u1 const val /* al */)
+static inline u2 memr16(u1 const bank, u2 const address)
 {
-    u4 eax = val;
-    u4 ecx = address;
-    u4 edx;
-    u4 ebx = bank;
-    u4 esi;
-    u4 edi;
-    __asm__ volatile("call *%6"
-                 : "+a"(eax), "+c"(ecx), "+b"(ebx), "=d"(edx), "=S"(esi), "=D"(edi)
-                 : "mr"(memtablew8[ebx])
-                 : "cc", "memory");
+    return (u2)mem_dispatch((memfn*)memtabler16[bank], bank, address, 0);
+}
+
+static inline void memw8no_rom(u1 const bank, u2 const address, u1 const val)
+{
+    mem_dispatch((memfn*)memtablew8[bank], bank, address, val);
 }
 
 static inline void memw8(u1 const bank /* bl */, u2 const address /* cx */, u1 const val /* al */)

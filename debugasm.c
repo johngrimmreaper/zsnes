@@ -1,24 +1,3 @@
-/*
- * Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
- *
- * http://www.zsnes.com
- * http://sourceforge.net/projects/zsnes
- * https://zsnes.bountysource.com
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- */
-
 #ifndef NCURSES
 #include <curses.h>
 #else
@@ -52,21 +31,15 @@ void breakops(void)
                                                                                                    : (u1*)dmadata - 0x4300; // XXX ugly cast
     initaddrl = addr;
 
-    u4 ecx = 0;
-    u4 edx = curcyc /* cycles */ << 8 | xp /* flags */;
+    zreg edx = curcyc /* cycles */ << 8 | xp /* flags */;
     u1* ebp = spcPCRam;
     u1* esi = addr + pc; // add program counter to address
-    eop** edi = Curtableaddr;
+    opfn** edi = Curtableaddr;
     UpdateDPage();
     // execute
     do {
         splitflags(edx);
-        u4 ebx;
-        // XXX hack: GCC cannot handle ebp as input/output, so take the detour over eax
-        __asm__ volatile("push %%ebp;  mov %0, %%ebp;  call %P6;  mov %%ebp, %0;  pop %%ebp"
-            : "+a"(ebp), "+c"(ecx), "+d"(edx), "=b"(ebx), "+S"(esi), "+D"(edi)
-            : "X"(execsingle)
-            : "cc", "memory");
+        execsingle(&edx, &ebp, &esi, &edi);
         edx = joinflags(edx);
         edx = edx & 0xFFFF00FF | pdh << 8;
         if ((++numinst & 0xFF) == 0 && getch() == 27)
@@ -88,20 +61,14 @@ void execnextop(void)
                                                                                                    : (u1*)dmadata - 0x4300; // XXX ugly cast
     initaddrl = addr;
 
-    u4 ecx = 0;
-    u4 edx = curcyc /* cycles */ << 8 | xp /* flags */;
+    zreg edx = curcyc /* cycles */ << 8 | xp /* flags */;
     u1* ebp = spcPCRam;
     u1* esi = addr + pc; // add program counter to address
-    eop** edi = Curtableaddr;
+    opfn** edi = Curtableaddr;
 
     // execute
     splitflags(edx);
-    u4 ebx;
-    // XXX hack: GCC cannot handle ebp as input/output, so take the detour over eax
-    __asm__ volatile("push %%ebp;  mov %0, %%ebp;  call %P6;  mov %%ebp, %0;  pop %%ebp"
-        : "+a"(ebp), "+c"(ecx), "+d"(edx), "=b"(ebx), "+S"(esi), "+D"(edi)
-        : "X"(execsingle)
-        : "cc", "memory");
+    execsingle(&edx, &ebp, &esi, &edi);
     edx = joinflags(edx);
     UpdateDPage();
 

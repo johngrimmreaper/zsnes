@@ -1,24 +1,3 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #define DIRECTINPUT_VERSION 0x0800
 #define DIRECTSOUND_VERSION 0x0800
 #define __STDC_CONSTANT_MACROS
@@ -29,15 +8,14 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include <windows.h>
 
 #include "../c_intrf.h"
-#include "../cfg.h"
 #include "../intrf.h"
 #include "../link.h"
+#include "cfg.h"
 #include "winlink.h"
 
 void zexit(void);
 void zexit_error(void);
 
-static LPDIRECTDRAW BasiclpDD = NULL;
 static LPDIRECTDRAW7 lpDD = NULL;
 static LPDIRECTDRAWSURFACE7 DD_Primary = NULL;
 static LPDIRECTDRAWSURFACE7 DD_CFB = NULL;
@@ -169,14 +147,7 @@ void DDDrawScreen()
                 dst.bottom = scr_h;
             }
             if (dst.left < dst.right && dst.top < dst.bottom && src.left < src.right && src.top < src.bottom) {
-                HRESULT br = IDirectDrawSurface7_Blt(DD_Primary, &dst, AltSurface == 0 ? DD_CFB : DD_CFB16, &src, DDBLT_WAIT, NULL);
-                static int zn;
-                if (++zn % 64 == 1)
-                    fprintf(stderr, "ZSDBG blt#%d=%08lx dst=(%ld,%ld,%ld,%ld) src=(%ld,%ld,%ld,%ld)\n", zn, (unsigned long)br, dst.left, dst.top, dst.right, dst.bottom, src.left, src.top, src.right, src.bottom);
-            } else {
-                static int ze;
-                if (++ze % 64 == 1)
-                    fprintf(stderr, "ZSDBG empty rect#%d\n", ze);
+                IDirectDrawSurface7_Blt(DD_Primary, &dst, AltSurface == 0 ? DD_CFB : DD_CFB16, &src, DDBLT_WAIT, NULL);
             }
         }
     }
@@ -247,7 +218,8 @@ int InitDirectDraw()
     DDSURFACEDESC2 ddsd2;
     DDPIXELFORMAT format;
 
-    unsigned int color32, ScreenPtr2;
+    unsigned int color32;
+    unsigned char* ScreenPtr2;
     int i, j, k, r, g, b, Y, u, v;
 
     ScreenPtr2 = BitConv32Ptr;
@@ -399,9 +371,7 @@ int InitDirectDraw()
         }
     }
 
-    fprintf(stderr, "ZSDBG init fs=%d mode=%d win=%dx%d surf=%dx%d res=%d\n", (int)FullScreen, (int)cvidmode, (int)WindowWidth, (int)WindowHeight, (int)SurfaceX, (int)SurfaceY, (int)resolutn);
     if (pDirectDrawCreateEx(NULL, (void**)&lpDD, &IID_IDirectDraw7, NULL) != DD_OK) {
-        fprintf(stderr, "ZSDBG CreateEx failed\n");
         MessageBox(NULL, "DirectDrawCreateEx failed.", "DirectDraw Error", MB_ICONERROR);
         return FALSE;
     }
@@ -424,7 +394,6 @@ int InitDirectDraw()
         }
     } else {
         if (IDirectDraw7_SetCooperativeLevel(lpDD, hMainWindow, DDSCL_NORMAL) != DD_OK) {
-            fprintf(stderr, "ZSDBG SetCoop windowed failed\n");
             MessageBox(NULL, "IDirectDraw7::SetCooperativeLevel failed.", "DirectDraw Error",
                 MB_ICONERROR);
             return FALSE;
@@ -466,21 +435,16 @@ int InitDirectDraw()
         }
     } else {
         if (IDirectDraw7_CreateClipper(lpDD, 0, &lpDDClipper, NULL) != DD_OK) {
-            fprintf(stderr, "ZSDBG CreateClipper failed\n");
             IDirectDraw7_Release(lpDD);
             lpDD = NULL;
             return FALSE;
         }
-
         if (IDirectDrawClipper_SetHWnd(lpDDClipper, 0, hMainWindow) != DD_OK) {
-            fprintf(stderr, "ZSDBG SetHWnd failed\n");
             IDirectDraw7_Release(lpDD);
             lpDD = NULL;
             return FALSE;
         }
-
         if (IDirectDrawSurface7_SetClipper(DD_Primary, lpDDClipper) != DD_OK) {
-            fprintf(stderr, "ZSDBG SetClipper failed\n");
             return FALSE;
         }
     }
@@ -514,7 +478,6 @@ int InitDirectDraw()
 
     // create drawing surface
     if (IDirectDraw7_CreateSurface(lpDD, &ddsd2, &DD_CFB, NULL) != DD_OK) {
-        fprintf(stderr, "ZSDBG CFB CreateSurface failed %ux%u\n", (unsigned)ddsd2.dwWidth, (unsigned)ddsd2.dwHeight);
         MessageBox(NULL, "IDirectDraw7::CreateSurface failed.", "DirectDraw Error", MB_ICONERROR);
         return FALSE;
     }
@@ -547,7 +510,6 @@ int InitDirectDraw()
         }
     }
 
-    fprintf(stderr, "ZSDBG init OK depth=%d alt=%d\n", (int)BitDepth, (int)AltSurface);
     return TRUE;
 }
 

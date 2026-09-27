@@ -1,24 +1,3 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #ifndef ZPATH_H
 #define ZPATH_H
 
@@ -27,7 +6,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include <sys/stat.h>
 #include <zlib.h>
 
-#include "zip/zunzip.h"
+#include "zip/zipread.h"
 
 #ifdef _MSC_VER
 #define F_OK 0
@@ -82,7 +61,7 @@ int access_dir(const char* path, const char* file, int mode);
 int stat_dir(const char* path, const char* file, struct stat* buf);
 FILE* fopen_dir(const char* path, const char* file, const char* mode);
 gzFile gzopen_dir(const char* path, const char* file, const char* mode);
-unzFile unzopen_dir(const char* path, const char* file);
+ZipFile* zipopen_dir(const char* path, const char* file);
 int remove_dir(const char* path, const char* file);
 int mkdir_dir(const char* path, const char* dir);
 char* realpath_dir(const char* path, const char* file, char* buf);

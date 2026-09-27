@@ -1,35 +1,14 @@
-/*
- * Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
- *
- * http://www.zsnes.com
- * http://sourceforge.net/projects/zsnes
- * https://zsnes.bountysource.com
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- */
-
 #include <string.h>
 
 #include "../c_init.h"
 #include "../c_vcache.h"
-#include "../cfg.h"
 #include "../cpu/regs.h"
 #include "../endmem.h"
 #include "../gui/gui.h"
 #include "../ui.h"
 #include "../vcache.h"
 #include "2xsaiw.h"
+#include "cfg.h"
 #include "copyvwin.h"
 #include "makevid.h"
 #include "newgfx16.h"
@@ -38,6 +17,11 @@
 #include "../c_intrf.h"
 #include "../win/winlink.h"
 #endif
+
+/* One doubled line of scratch for the interpolation blitter. The assembly
+   borrowed the tail of the sprite table, which on a 64-bit build is no longer
+   where it thought. */
+static u1 interp_line[256 * 4];
 
 u1* WinVidMemStart;
 u4 AddEndBytes;
@@ -57,7 +41,7 @@ static void HighResProc(u2** psrc, u1** pdst, u1* ebx)
         do {
             if (*ebx & 3) {
                 do {
-                    *(u4*)dst = src[75036 * 2] << 16 | *src;
+                    *(u4*)dst = (u4)src[75036 * 2] << 16 | *src;
                     src += 1;
                     dst += 4;
                 } while (--ecx != 0);
@@ -104,7 +88,7 @@ static void HighResProc(u2** psrc, u1** pdst, u1* ebx)
                         src -= 256;
                         u4 ecx = 256;
                         do {
-                            *(u4*)dst = src[75036 * 2] << 16 | *src;
+                            *(u4*)dst = (u4)src[75036 * 2] << 16 | *src;
                             src += 1;
                             dst += 4;
                         } while (--ecx != 0);
@@ -239,7 +223,7 @@ static void interpolate640x480x16bwin(u2* src, u1* dst, u1 dl)
             } else {
                 {
                     u4 ecx = 255;
-                    u1* edx = spritetablea + 512 * 256;
+                    u1* edx = interp_line;
                     do {
                         u4 eax = src[0];
                         u4 ebx = src[1];
@@ -256,7 +240,7 @@ static void interpolate640x480x16bwin(u2* src, u1* dst, u1 dl)
                 dst += AddEndBytes + 4;
                 {
                     u4 ecx = 255;
-                    u1* edx = spritetablea + 512 * 256;
+                    u1* edx = interp_line;
                     do {
                         u4 eax = (*(u4*)edx & HalfTrans[0]) >> 1;
                         u4 ebx = (eax & HalfTrans[0]) >> 1;
@@ -291,7 +275,7 @@ static void interpolate640x480x16bwin(u2* src, u1* dst, u1 dl)
             } else {
                 {
                     u4 ecx = 255;
-                    u1* edx = spritetablea + 512 * 256;
+                    u1* edx = interp_line;
                     do {
                         u4 eax = src[0];
                         u4 ebx = src[1];
@@ -308,7 +292,7 @@ static void interpolate640x480x16bwin(u2* src, u1* dst, u1 dl)
                 dst += 4 + AddEndBytes;
                 {
                     u4 ecx = 255;
-                    u1* edx = spritetablea + 512 * 256;
+                    u1* edx = interp_line;
                     do {
                         *(u4*)dst = (*(u4*)edx & HalfTrans[0]) >> 1;
                         dst += 4;
@@ -327,7 +311,7 @@ static void interpolate640x480x16bwin(u2* src, u1* dst, u1 dl)
         lineleft = dl;
         // do first line
         u4 ecx = 255;
-        u1* edx = spritetablea + 512 * 256;
+        u1* edx = interp_line;
         do {
             u4 eax = src[0];
             u4 ebx = src[1];
@@ -356,7 +340,7 @@ static void interpolate640x480x16bwin(u2* src, u1* dst, u1 dl)
             } else {
                 {
                     u4 ecx = 255;
-                    u1* edx = spritetablea + 512 * 256;
+                    u1* edx = interp_line;
                     do {
                         u4 eax = src[0];
                         u4 ebx = src[1];
@@ -375,7 +359,7 @@ static void interpolate640x480x16bwin(u2* src, u1* dst, u1 dl)
                     dst += 4 + AddEndBytes;
                 }
                 {
-                    u1* edx = spritetablea + 512 * 256;
+                    u1* edx = interp_line;
                     u4 ecx = 255;
                     do { // XXX memcpy()?
                         *(u4*)dst = *(u4*)edx;
@@ -398,11 +382,11 @@ void copy640x480x16bwin(void)
     if (curblank == 0x40)
         return;
 
-    u2* src = (u2*)vidbuffer + 16 + 288;
+    u2* src = (u2*)vidbuffer + VID_FIRST;
     u1* dst = WinVidMemStart;
 #ifdef __UNIXSDL__
     if (GUIOn != 1 && resolutn == 239)
-        src += 8 * 288;
+        src += 8 * VID_STRIDE;
 #endif
 #ifdef __UNIXSDL__
     u4 dl = 224;

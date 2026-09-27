@@ -1,31 +1,8 @@
-/*
- * Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
- *
- * http://www.zsnes.com
- * http://sourceforge.net/projects/zsnes
- * https://zsnes.bountysource.com
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- */
-
 #include <stdio.h>
 #include <string.h>
 
-#include "../asm_call.h"
 #include "../c_intrf.h"
 #include "../c_vcache.h"
-#include "../cfg.h"
 #include "../cpu/execute.h"
 #include "../cpu/regs.h"
 #include "../endmem.h"
@@ -33,7 +10,8 @@
 #include "../gui/gui.h"
 #include "../init.h"
 #include "../initc.h"
-#include "../input.h"
+#include "cfg.h"
+#include "input.h"
 #ifndef lengthof
 #define lengthof(x) (sizeof(x) / sizeof *(x))
 #endif
@@ -51,7 +29,7 @@
 #include "procvidc.h"
 
 #ifdef __UNIXSDL__
-#include "../linux/sdllink.h"
+#include "../unix/sdllink.h"
 #endif
 
 char const* Msgptr;
@@ -97,11 +75,72 @@ u1 const ASCII2Font[] = {
     0x0F, 0x0B, 0x0B, 0x19, 0x19, 0x19, 0x1F, 0x1F, 0x23, 0x19, 0x1F, 0x0D, 0x10, 0x23, 0x1A, 0x10,
     0x0B, 0x4E, 0x4F, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C,
     0x5D, 0x5E, 0x5F, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6C,
-    0x6D, 0x6E, 0x6F, 0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B, 0x7C,
-    0x7D, 0x7E, 0x7F, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4D, 0x4C, 0x4B, 0x4A, 0x45, 0x46, 0x47, 0x48, 0x49
+    /* 0xC5 Aring, 0xC6 AE and (next row) 0xD8 Oslash sit on half-width katakana
+       (JIS X 0201) glyphs, which only ever rendered for Shift-JIS filenames -
+       not a thing on UTF-8/UTF-16 systems - so the Latin-1 letters take them. */
+    0x6D, 0x6E, 0x6F, 0x70, 0x71, 0x8F, 0x8E, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B, 0x7C,
+    0x7D, 0x7E, 0x7F, 0x80, 0x81, 0x82, 0x83, 0x84, 0x8D, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C,
+    /* 0xE5 aring, 0xE6 ae (were blank), 0xF8 oslash (was a symbol). */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x8F, 0x8E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4D, 0x8D, 0x4B, 0x4A, 0x45, 0x46, 0x47, 0x48, 0x49
 };
+
+/* Decode one UTF-8 codepoint at *p and step *p past it. Returns 0 at the
+   terminating NUL (leaving *p on it) and 0xFFFD for a malformed byte (stepping
+   one byte). Text through the GUI is UTF-8, so filenames and typed input share
+   one encoding. Reads never run past the NUL: a truncated sequence fails its
+   continuation-byte test and is treated as malformed. */
+u4 utf8_next(char const** p)
+{
+    unsigned char const* const s = (unsigned char const*)*p;
+    unsigned char const c = s[0];
+
+    if (c < 0x80) {
+        if (c != 0) {
+            *p += 1;
+        }
+        return c;
+    }
+    if ((c & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) {
+        *p += 2;
+        return ((u4)(c & 0x1F) << 6) | (u4)(s[1] & 0x3F);
+    }
+    if ((c & 0xF0) == 0xE0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
+        *p += 3;
+        return ((u4)(c & 0x0F) << 12) | ((u4)(s[1] & 0x3F) << 6) | (u4)(s[2] & 0x3F);
+    }
+    if ((c & 0xF8) == 0xF0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80
+        && (s[3] & 0xC0) == 0x80) {
+        *p += 4;
+        return ((u4)(c & 0x07) << 18) | ((u4)(s[1] & 0x3F) << 12)
+            | ((u4)(s[2] & 0x3F) << 6) | (u4)(s[3] & 0x3F);
+    }
+    *p += 1;
+    return 0xFFFD;
+}
+
+/* Which font glyph draws a codepoint. ASCII and the handful of Latin-1 letters
+   the pixel font carries (the Nordic ones) have glyphs; everything else - the
+   rest of Latin-1, and anything above it - draws the fallback box. */
+u1 glyph_for_codepoint(u4 cp)
+{
+    if (cp < 0x80) {
+        return ASCII2Font[cp];
+    }
+    switch (cp) {
+    case 0xC5: /* Aring */
+    case 0xE5:
+        return 0x8F;
+    case 0xC6: /* AE */
+    case 0xE6:
+        return 0x8E;
+    case 0xD8: /* Oslash */
+    case 0xF8:
+        return 0x8D;
+    default:
+        return 0x90; /* the fallback box */
+    }
+}
 
 // bitmap 8x8 font ; char, offset for ASCII2Font
 static u1 const FontData[][8] = {
@@ -154,14 +193,15 @@ static u1 const FontData[][8] = {
     { 0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00 }, // :, 2E
     { 0x18, 0x24, 0x18, 0x3A, 0x44, 0x46, 0x3A, 0x00 }, // &, 2F
 
-    // 30-36 not implemented
+    /* 30 is where ASCII2Font sends control code 25, which no GUI string
+       carries; the six below are reachable and used to draw as gaps. */
     { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, // , 30
-    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, // , 31
-    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, // , 32
-    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, // , 33
-    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, // , 34
-    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, // , 35
-    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }, // , 36
+    { 0x6C, 0x6C, 0xFE, 0x6C, 0xFE, 0x6C, 0x6C, 0x00 }, // #, 31
+    { 0x00, 0x00, 0xFE, 0x00, 0xFE, 0x00, 0x00, 0x00 }, // =, 32
+    { 0x6C, 0x6C, 0x48, 0x00, 0x00, 0x00, 0x00, 0x00 }, // ", 33
+    { 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x00 }, // \\, 34
+    { 0x00, 0x6C, 0x38, 0xFE, 0x38, 0x6C, 0x00, 0x00 }, // *, 35
+    { 0x7C, 0xC6, 0x0C, 0x18, 0x18, 0x00, 0x18, 0x00 }, // ?, 36
 
     { 0x61, 0x92, 0x94, 0x68, 0x1E, 0x29, 0x49, 0x86 }, // %, 37
 };
@@ -330,10 +370,15 @@ void outputhex16(u2* const buf, u1 const val)
     OutputText16b(buf + 8, FontData[(val & 0x0F) + 1], edx);
 }
 
+/* ASCII2Font names glyphs up to 140 for the 141-row GUI font, but this table
+   stops at 56: a character it lacks draws as a blank rather than as whatever
+   follows the table. */
 void outputchar16b(u2* const buf, u1 const glyph)
 {
     u4 const edx = (u2)vesa2_clbitng >> 1 << 16 | (u2)vesa2_clbitng;
-    OutputText16b(buf, FontData[glyph], edx);
+    u4 const rows = sizeof(FontData) / sizeof(*FontData);
+
+    OutputText16b(buf, FontData[glyph < rows ? glyph : 0], edx);
 }
 
 static void outputchar16b5x5(u2* buf, u1 const glyph)
@@ -341,6 +386,41 @@ static void outputchar16b5x5(u2* buf, u1 const glyph)
     u2 const c = textcolor16b;
     u1 const* src = GUIFontData[glyph];
     u4 y = 5;
+
+    if (ForceNonTransp != 1 && GUIEnableTransp != 0) {
+        /* The same shape the 8x8 font draws transparently - the glyph blended
+           half and half with the picture, and the row above it repeated one
+           pixel down and right as a shadow - in the 6x6 cell this font is
+           spaced on. The colour is carried through the blend rather than
+           dropped for the fixed grey the big font uses, so a coloured message
+           stays its colour; for white text the two come out the same. */
+        u4 const mask = (u2)vesa2_clbitng;
+        u4 const lit = (c & mask) >> 1;
+
+        y = 6;
+        do {
+            u4 eax = y != 1 ? (u4)src[0] << 1 : 0;
+            u4 ebx = y != 6 ? src[-1] : 0;
+            u4 x = 6;
+
+            do {
+                if (eax & 0x100) {
+                    buf[0] = (u2)(((buf[0] & mask) >> 1) + lit);
+                    buf[75036 * 2] = (u2)(((buf[75036 * 2] & mask) >> 1) + lit);
+                } else if (ebx & 0x100) {
+                    buf[0] = (u2)((buf[0] & mask) >> 1);
+                    buf[75036 * 2] = (u2)((buf[75036 * 2] & mask) >> 1);
+                }
+                eax <<= 1;
+                ebx <<= 1;
+                ++buf;
+            } while (--x != 0);
+            buf += 282;
+            ++src;
+        } while (--y != 0);
+        return;
+    }
+
     do {
         u1 ah = *src++;
         u1 x = 5;
@@ -917,7 +997,7 @@ static void ClockOutput(void)
             h += 12;
     }
 
-    char buf[9];
+    char buf[32];
     sprintf(buf, "%02d:%02d:%02d", h, m, s);
     OutputGraphicString16b5x5((u2*)vidbuffer + 216 * 288 + 32 + 192, buf);
 }

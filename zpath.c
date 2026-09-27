@@ -1,27 +1,8 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
+#include "types.h" /* IGNORE_RESULT */
 
 #ifdef __UNIXSDL__
 #include "gblhdr.h"
-#include "linux/safelib.h"
+#include "unix/safelib.h"
 #elif defined(__WIN32__)
 #include "win/confloc.h"
 #include "win/lib.h"
@@ -218,13 +199,13 @@ void cfgpath_ensure(const char* launch_command)
 }
 #endif
 
-void SaveGameSpecificInput();
+void SaveGameSpecificInput(void);
 
-void deinit_paths()
+void deinit_paths(void)
 {
     // Save data that depends on paths before deinit of them
-    void SaveSramData();
-    void GUISaveVars();
+    void SaveSramData(void);
+    void GUISaveVars(void);
 
     strcpy(ROMPath, ZRomPath);
 
@@ -264,19 +245,19 @@ void deinit_paths()
     if ((x##Path = malloc(PATH_SIZE))) { \
         x##Alloc = true;                 \
     } else {                             \
-        return (false);                  \
+        return false;                    \
     }
 #define INIT_NAME_HELPER(x)              \
     if ((x##Name = malloc(NAME_SIZE))) { \
         x##Alloc = true;                 \
         *x##Name = 0;                    \
     } else {                             \
-        return (false);                  \
+        return false;                    \
     }
 
 bool init_paths(char* launch_command)
 {
-    void GUIRestoreVars();
+    void GUIRestoreVars(void);
 
     INIT_PATH_HELPER(ZStart);
     INIT_PATH_HELPER(ZRom);
@@ -320,9 +301,9 @@ bool init_paths(char* launch_command)
         printf("ZSStatePath: %s\n", ZSStatePath);
         printf("ZMoviePath: %s\n", ZMoviePath);
 #endif
-        return (true);
+        return true;
     }
-    return (false);
+    return false;
 }
 
 static void set_save_path(char** path, char* primary, char* secondary)
@@ -367,9 +348,12 @@ bool init_rom_path(char* path)
 
         natify_slashes(ZRomPath);
         p = strrchr(ZRomPath, DIR_SLASH_C);
-        strcpy(ZCartName, (p) ? p + 1 : ZRomPath);
-        strcpy(ZSaveName, ZCartName);
-        strcpy(ZStateName, ZCartName);
+        /* These three are NAME_SIZE, while ZRomPath is PATH_SIZE: the
+           no-separator fallback would otherwise copy a whole path into a
+           name-sized buffer. */
+        snprintf(ZCartName, NAME_SIZE, "%s", (p) ? p + 1 : ZRomPath);
+        snprintf(ZSaveName, NAME_SIZE, "%s", ZCartName);
+        snprintf(ZStateName, NAME_SIZE, "%s", ZCartName);
         setextension(ZStateName, "zst");
 
         strdirname(ZRomPath);
@@ -381,9 +365,9 @@ bool init_rom_path(char* path)
         printf("ZStateName: %s\n", ZStateName);
 #endif
 
-        return (true);
+        return true;
     }
-    return (false);
+    return false;
 }
 
 char* strdupcat(const char* str1, const char* str2)
@@ -399,35 +383,56 @@ char* strdupcat(const char* str1, const char* str2)
 
 #ifndef DEBUG
 // This function is only for this file, and it uses an internal buffer, and is intended for path file merging
+/* Appends what is left of the buffer, always terminating: three pieces that
+   are each allowed to approach PATH_SIZE do not fit in one of twice that, and
+   every file the emulator opens is named through here. */
+static void path_append(char* const buf, size_t const size, size_t* const n,
+    char const* const s)
+{
+    size_t const room = size > *n + 1 ? size - *n - 1 : 0;
+    size_t const len = strlen(s);
+    size_t const take = len < room ? len : room;
+
+    memcpy(buf + *n, s, take);
+    *n += take;
+    buf[*n] = '\0';
+}
+
 static const char* strdupcat_internal(const char* path, const char* file)
 {
     static char buffer_dir[PATH_SIZE * 2];
+    size_t n = 0;
+
     *buffer_dir = 0;
     if (!IS_ABSOLUTE(file)) {
         if (!IS_ABSOLUTE(path)) {
-            strcat(buffer_dir, RelPathBase ? ZRomPath : ZCfgPath);
+            path_append(buffer_dir, sizeof(buffer_dir), &n,
+                RelPathBase ? ZRomPath : ZCfgPath);
         }
-        strcat(buffer_dir, path);
+        path_append(buffer_dir, sizeof(buffer_dir), &n, path);
     }
-    strcat(buffer_dir, file);
+    path_append(buffer_dir, sizeof(buffer_dir), &n, file);
     return (buffer_dir);
 }
 
-#define chdir_dir(path) chdir(path);
+#define chdir_dir(path) IGNORE_RESULT(chdir(path))
 
 #else
 
 static const char* strdupcat_internal(const char* path, const char* file, const char* func, const char* mode)
 {
     static char buffer_dir[PATH_SIZE * 2];
+    size_t n = 0;
+
     *buffer_dir = 0;
     if (!IS_ABSOLUTE(file)) {
         if (!IS_ABSOLUTE(path)) {
-            strcat(buffer_dir, RelPathBase ? ZRomPath : ZCfgPath);
+            path_append(buffer_dir, sizeof(buffer_dir), &n,
+                RelPathBase ? ZRomPath : ZCfgPath);
         }
-        strcat(buffer_dir, path);
+        path_append(buffer_dir, sizeof(buffer_dir), &n, path);
     }
-    strcat(buffer_dir, file);
+    path_append(buffer_dir, sizeof(buffer_dir), &n, file);
 
 #ifndef NO_DEBUGGER
     // maybe checking isendwin() would be better anyway, but only after we scrap
@@ -496,9 +501,9 @@ gzFile gzopen_dir(const char* path, const char* file, const char* mode)
     return (gzopen(strdupcat_internal(path, file), mode));
 }
 
-unzFile unzopen_dir(const char* path, const char* file)
+ZipFile* zipopen_dir(const char* path, const char* file)
 {
-    return (unzOpen(strdupcat_internal(path, file)));
+    return (zip_open(strdupcat_internal(path, file)));
 }
 
 int remove_dir(const char* path, const char* file)
@@ -508,7 +513,9 @@ int remove_dir(const char* path, const char* file)
 
 int mkdir_dir(const char* path, const char* dir)
 {
+#ifdef __UNIXSDL__
     mode_t mmode = 0755;
+#endif
     return (mkdir_p(strdupcat_internal(path, dir)));
 }
 
@@ -536,7 +543,7 @@ int system_dir(const char* path, const char* command)
     int ret_val;
     chdir_dir(path);
     ret_val = system(command);
-    chdir(ZStartPath);
+    IGNORE_RESULT(chdir(ZStartPath));
     return (ret_val);
 }
 
@@ -545,7 +552,7 @@ FILE* popen_dir(const char* path, char* command, const char* type)
     FILE* ret_val;
     chdir_dir(path);
     ret_val = popen(command, type);
-    chdir(ZStartPath);
+    IGNORE_RESULT(chdir(ZStartPath));
     return (ret_val);
 }
 
@@ -689,7 +696,8 @@ bool mkpath(const char* path, mode_t mode)
 // Like realpath(), but will return the last element as the link it is
 char* realpath_link(const char* path, char* resolved_path)
 {
-    char buffer[PATH_SIZE], *p, *base, *last_element;
+    char buffer[PATH_SIZE], *p, *last_element;
+    char const* base;
     strcpy(buffer, path);
     natify_slashes(buffer);
     p = strrchr(buffer, DIR_SLASH_C);

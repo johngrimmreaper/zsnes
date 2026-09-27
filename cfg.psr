@@ -1,22 +1,3 @@
-;Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-;
-;http://www.zsnes.com
-;http://sourceforge.net/projects/zsnes
-;https://zsnes.bountysource.com
-;
-;This program is free software; you can redistribute it and/or
-;modify it under the terms of the GNU General Public License
-;version 2 as published by the Free Software Foundation.
-;
-;This program is distributed in the hope that it will be useful,
-;but WITHOUT ANY WARRANTY; without even the implied warranty of
-;MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;GNU General Public License for more details.
-;
-;You should have received a copy of the GNU General Public License
-;along with this program; if not, write to the Free Software
-;Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
 @ PSR-produced config file (stock default in CAPS)
 @
 @ Note, if you're worried you messed up a setting, removing the line will have
@@ -127,7 +108,7 @@ ClockBox db 1
 SmallMsgText db 0
 
 @
-@ Transparent Messages - doesn't work with small font (0 = NO, 1 = Yes)
+@ Transparent Messages (0 = NO, 1 = Yes)
 GUIEnableTransp db 0
 
 @
@@ -176,9 +157,9 @@ ScreenShotFormat db 0
 @ properly use custom res support.
 @ WARNING: Custom resolutions are only valid if they are supported by your system!
 @ ZSNES will hang if an invalid fullscreen resolution is used.
-cvidmode db 2
+cvidmode db 3
 @ Last windowed & fullscreen modes (used when alt-tabbing)
-PrevWinMode db 2
+PrevWinMode db 3
 PrevFSMode db 6
 
 %elifdef __UNIXSDL__
@@ -204,10 +185,15 @@ PrevFSMode db 6
 @ You need to select the custom video mode and modify CustomResX/Y to properly
 @ use custom res support.
 %endif
-cvidmode db 2
-@ Last windowed & fullscreen modes (used when alt-tabbing)
-PrevWinMode db 2
-PrevFSMode db 3
+@ Default is 10: 768x672 OpenGL windowed, a 3x window that leaves room for the
+@ filters to be turned on without the picture being scaled twice.
+cvidmode db 10
+@ Last windowed & fullscreen modes (used when alt-tabbing). Both accelerated:
+@ the fullscreen one used to be a software mode, so alt-enter swapped the
+@ renderer under the picture and the filters behaved differently either side
+@ of it.
+PrevWinMode db 10
+PrevFSMode db 14
 
 %endif
 
@@ -274,10 +260,35 @@ hqFilterlevel db 2
 
 @
 @ Enable Scanlines (0 = NONE, 1 = Full, 2 = 25%, 3 = 50%) - simulate TV scanlines
-@ This is compatible with interpolation.
+@ This is compatible with interpolation. Setting it to anything but 0 also sets
+@ sl_intensity below, which is what everything except the plain software
+@ blitter actually draws its scanlines from.
 scanlines db 0
 @ OpenGL scanlines intensity [0..100]
 sl_intensity db 0
+@ Bloom [0..100]. Bright areas spill light into what surrounds them, the way a
+@ phosphor does. On an ordinary display the spill has to be clipped at white;
+@ with HDROutput on it is allowed past it, which is the point of turning HDR on
+@ at all - the source is 15-bit, so HDR buys headroom above white, not colours.
+@ Off by default, with the rest of the picture effects; it is worth turning on
+@ together with the scanlines, whose gaps it bleeds across.
+BloomLevel db 0
+
+@ Which monitor to open on, as the short ID shown in the Monitors tab. SDL
+@ renumbers displays every run and the ids it hands out do not survive a
+@ replug, but the name follows the monitor, so the ID is that name reduced to
+@ letters and digits: "DELLU2412M", "HDMI1". Empty, or a monitor that is not
+@ plugged in, opens on the primary one without forgetting the choice.
+MonitorID times 16 db ""
+
+@ Vibrancy [0..100]. Scanlines take light out of the picture; this puts it
+@ back as a gamma lift plus a little saturation, rather than as a plain
+@ multiply, which would flatten anything bright into white and drain the
+@ colour out of it. Measured over a frame, 50% scanlines at 3x cost about 12%
+@ of the brightness and 45 returns it, while a bright colour keeps essentially
+@ all of its saturation where a multiply of the same strength loses a tenth.
+@ Off by default; turn it up with the scanlines.
+sl_vibrancy db 0
 
 @
 @ Enable Grayscale Mode (0 = NO, 1 = Yes) - don't enable this for other than nostalgia
@@ -301,7 +312,8 @@ Mode7HiRes16b db 0
 %endif
 @ VSync is automatically enforced in SDL software modes.
 %endif
-vsyncon db 0
+@ On by default: without it the picture tears.
+vsyncon db 1
 
 #ifndef __UNIXSDL__
 @
@@ -404,8 +416,9 @@ PrimaryBuffer db 0
 @
 @ Sampling Rate: (0 = 8000Hz, 1 = 11025Hz, 2 = 22050Hz, 3 = 44100Hz,
 @                             4 = 16000Hz, 5 = 32000Hz, 6 = 48000Hz)
-@ Using any other sound frequencies other than the default 32000Hz
-@ is COMPLETELY UNACCEPTABLE in use for sound bug reports.
+@ Windows only. SDL, PipeWire and libao render at the DSP's own 32000Hz and
+@ let the sound server resample onward, so this setting does nothing there and
+@ the GUI reports the output rate rather than offering a choice.
 SoundQuality dd 5
 
 @
@@ -479,6 +492,12 @@ AutoIncSaveSlot db 0
 @ Save in 10 save block (0 = NO, 1 = Yes)
 @ This may be handy if you want to save within a block (0-9, 10-19, etc.)
 AutoIncSaveSlotBlock db 0
+
+@
+@ Bind game keys by physical position instead of the character the layout
+@ produces (0 = layout keys, the old behaviour; 1 = physical keys). Defaults to
+@ 0 so existing key configs are unchanged; a fresh install is stamped 1.
+InputPhysicalKeys db 0
 
 @
 @ Auto State Save/Load (0 = NO, 1 = Yes) - uses a special state

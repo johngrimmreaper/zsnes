@@ -1,7 +1,10 @@
 #include <string.h>
 
+#include "../cpu/c_dispatch.h"
 #include "../cpu/execute.h"
 #include "../cpu/memory.h"
+#include "../cpu/memseam.h"
+#include "../cpu/table.h"
 #include "../endmem.h"
 #include "../gblvars.h"
 #include "../initc.h"
@@ -45,80 +48,70 @@ static u4 SA1makedl(u4 edx)
 
 static void call_membank0w8(u2 const cx, u1 const al)
 {
-    u4 eax;
-    u4 ecx;
-    u4 ebx;
-    __asm__ volatile("call %P3" : "=a"(eax), "=c"(ecx), "=b"(ebx) : "X"(membank0w8), "a"(al), "c"(cx) : "cc", "memory");
+    uintptr_t const b = MemSeamB, c = MemSeamC, a = MemSeamA, d = MemSeamD;
+
+    MemSeamC = cx;
+    MemSeamA = al;
+    membank0w8();
+    MemSeamB = b;
+    MemSeamC = c;
+    MemSeamA = a;
+    MemSeamD = d;
 }
 
 // Push the SA-1 return context onto its stack and jump to the NMI/IRQ vector.
 // vec is the vector (SA1NMIV or SA1IRQV); irqexec_off selects which SA1IRQExec
 // byte is flagged (2 = NMI, 1 = IRQ).
-static void SA1switch(u4* const pedx, u1** const pesi, u2 const vec, int const irqexec_off)
+static void SA1switch(zreg* const pedx, u1** const pesi, u2 const vec, int const irqexec_off)
 {
     ((u1*)&SA1Message)[2] = (u1)SA1Message;
     ((u1*)&SA1IRQExec)[irqexec_off] = 1;
 
     u2 const xpc = (u2)(*pesi - initaddrl);
-    SA1xpc = SA1xpc & 0xFFFF0000 | xpc;
+    SA1xpc = (SA1xpc & 0xFFFF0000) | xpc;
 
     u2 cx = SA1xs;
 
     call_membank0w8(cx, (u1)SA1xpb);
-    cx = (cx - 1) & stackand | stackor;
+    cx = ((cx - 1) & stackand) | stackor;
 
     call_membank0w8(cx, (u1)(xpc >> 8));
-    cx = (cx - 1) & stackand | stackor;
+    cx = ((cx - 1) & stackand) | stackor;
 
     call_membank0w8(cx, (u1)xpc);
-    cx = (cx - 1) & stackand | stackor;
+    cx = ((cx - 1) & stackand) | stackor;
 
     u4 const edx = SA1makedl(*pedx);
     call_membank0w8(cx, (u1)edx);
-    cx = (cx - 1) & stackand | stackor;
+    cx = ((cx - 1) & stackand) | stackor;
 
-    SA1xs = cx;
+    /* The asm stores cx and bl, i.e. 16 and 8 bits; widening them here would
+       clear upper halves that every other write site preserves (sa1regs.c's
+       reset, and SET8/SET16 throughout the opcode core). */
+    SA1xs = (SA1xs & 0xFFFF0000u) | cx;
 
-    SA1xpb = 0;
+    SA1xpb &= 0xFFFFFF00u;
     u1* const esi = vec & 0x8000 ? snesmmap[0] : snesmap2[0];
     initaddrl = esi;
 
-    *pedx = edx & 0xFFFFFFF3 | 0x00000004;
+    *pedx = (edx & 0xFFFFFFF3) | 0x00000004;
     *pesi = esi + vec;
 }
 
-void SA1switchtonmi(u4* const pedx, u1** const pesi)
+void SA1switchtonmi(zreg* const pedx, u1** const pesi)
 {
     SA1switch(pedx, pesi, (u2)SA1NMIV, 2);
 }
 
-void SA1switchtovirq(u4* const pedx, u1** const pesi)
+void SA1switchtovirq(zreg* const pedx, u1** const pesi)
 {
     SA1switch(pedx, pesi, (u2)SA1IRQV, 1);
 }
 
-//
-// SA1Swap - give the SA-1 one instruction slot.
-//
-// Split in two so the opcode itself is still dispatched from assembly, where
-// the 65816 core's register ABI (and ebp, its SPC program counter) is live:
-// chips/sa1proc.asm pushad's the register file, calls SA1SwapEnter, runs one
-// opcode if it returns nonzero, then calls SA1SwapLeave. Both halves read and
-// write the caller's registers through that pushad block.
-//
-enum { R_EDI,
-    R_ESI,
-    R_EBP,
-    R_ESP,
-    R_EBX,
-    R_EDX,
-    R_ECX,
-    R_EAX };
-
 // dh is the scanline cycle counter; the assembly's `add dh,n` wraps in 8 bits.
-static u4 add_dh(u4 const edx, u1 const n)
+static u4 dh_plus(u4 const edx, u1 const n)
 {
-    return edx & 0xFFFF00FF | (u4)(u1)((u1)(edx >> 8) + n) << 8;
+    return (edx & 0xFFFF00FF) | (u4)(u1)((u1)(edx >> 8) + n) << 8;
 }
 
 static u4 peek32(u1 const* const p)
@@ -146,7 +139,7 @@ static u1 SA1IdleCharge(u1 const* const p)
     return 0;
 }
 
-u4 SA1SwapEnter(u4* const r)
+static u4 SA1SwapEnter(zreg* const r)
 {
     u1* const p = SA1Ptr;
 
@@ -154,8 +147,8 @@ u4 SA1SwapEnter(u4* const r)
 
     u1 const idle = SA1IdleCharge(p);
     if (idle != 0) {
-        r[R_EDX] = add_dh(r[R_EDX], idle);
-        r[R_EAX] = (u4)p;
+        r[R_EDX] = dh_plus(r[R_EDX], idle);
+        r[R_EAX] = (zreg)p;
         CurrentExecSA1 += 2;
         SA1Status = 0;
         return 0;
@@ -167,20 +160,20 @@ u4 SA1SwapEnter(u4* const r)
     prevedi = r[R_EDI];
     SNSPtr = (u1*)r[R_ESI];
 
-    u4 edx = r[R_EDX] & 0xFFFFFF00 | SA1RegP;
+    u4 edx = (r[R_EDX] & 0xFFFFFF00) | SA1RegP;
     initaddrl = SA1RegPCS;
     CurBWPtr = SA1BWPtr;
     snesmap2[0] = IRAM;
     wramdata = IRAM;
 
     u4 const eax = (u1)edx;
-    edx = add_dh(edx, 20);
+    edx = dh_plus(edx, 20);
     SA1Status = 1;
 
     r[R_EAX] = eax;
     r[R_EDX] = edx;
-    r[R_ESI] = (u4)SA1Ptr;
-    r[R_EDI] = (u4)SA1tablead[eax];
+    r[R_ESI] = (zreg)SA1Ptr;
+    r[R_EDI] = (zreg)SA1tablead[eax];
 
     if (SA1DoIRQ & 0xFF000003) {
         if (SA1DoIRQ & 3) {
@@ -192,7 +185,7 @@ u4 SA1SwapEnter(u4* const r)
                 SA1DoIRQ &= 0xFFFFFFFD;
                 SA1switchtonmi(&r[R_EDX], &esi);
             }
-            r[R_ESI] = (u4)esi;
+            r[R_ESI] = (zreg)esi;
         } else if (--((u1*)&SA1DoIRQ)[3] == 0) {
             ((u1*)&SA1DoIRQ)[0] |= 8;
         }
@@ -200,7 +193,7 @@ u4 SA1SwapEnter(u4* const r)
     return 1;
 }
 
-void SA1SwapLeave(u4* const r)
+static void SA1SwapLeave(zreg* const r)
 {
     // Save the SA-1 context, restore the 65816's.
     SA1RegP = (u1)r[R_EDX];
@@ -212,12 +205,41 @@ void SA1SwapLeave(u4* const r)
     wramdata = wramdataa;
     snesmap2[0] = wramdata;
 
-    r[R_EDX] = add_dh(r[R_EDX] & 0xFFFFFF00 | SNSRegP, 11);
-    r[R_ESI] = (u4)SNSPtr;
+    r[R_EDX] = dh_plus((r[R_EDX] & 0xFFFFFF00) | SNSRegP, 11);
+    r[R_ESI] = (zreg)SNSPtr;
     r[R_EDI] = prevedi;
     r[R_EAX] = 0;
 
     CurrentExecSA1++;
     SA1Status = 0;
     SA1TimerVal += 23;
+}
+
+// SA1Swap: install the SA-1's context, run its instructions until the
+// scanline's cycles are spent, then hand the 65816 its context back. The loop
+// here is the SA-1's own `endloop`, which unlike the 65816's does not step the
+// SPC700.
+void SA1Swap(zreg* const r)
+{
+    if (SA1SwapEnter(r) == 0)
+        return;
+
+    set_bl(r, *(u1*)r[R_ESI]);
+    r[R_ESI]++;
+
+    for (;;) {
+        ((opfn**)r[R_EDI])[r[R_EBX]](r);
+
+        set_bl(r, *(u1*)r[R_ESI]);
+        r[R_ESI]++;
+
+        u1 const c = cpucycle[r[R_EBX]];
+        u1 const dh = DH(r);
+        set_dh(r, (u1)(dh - c));
+        if (dh < c)
+            break;
+    }
+
+    r[R_ESI]--;
+    SA1SwapLeave(r);
 }

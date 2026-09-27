@@ -1,28 +1,10 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 /* Smoke effects implementation by Stainless et al. */
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "smoke.h"
 
 #define MIN(x, y) \
     (((x) < (y)) ? (x) : (y))
@@ -33,7 +15,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #define FIRE_HOTSPOTS 80
 
 static int fire_hotspot[FIRE_HOTSPOTS];
-extern char* vidbuffer;
+extern uint8_t* vidbuffer;
 
 #define SCRW 288
 #define SCRH 224
@@ -43,7 +25,7 @@ static unsigned char fire_buffer[SCRW * SCRH];
 
 static int fire_init_flag;
 
-static void draw_bottom_line_of_fire()
+static void draw_bottom_line_of_fire(void)
 {
     int count, count2;
 
@@ -53,7 +35,7 @@ static void draw_bottom_line_of_fire()
         for (count2 = (fire_hotspot[count] - 20);
             count2 < (fire_hotspot[count] + 20); count2++) {
             if ((count2 >= 0) && (count2 < SCRW)) {
-                fire_line[count2] = MIN((fire_line[count2] + 20) - ABS(fire_hotspot[count] - count2), 256);
+                fire_line[count2] = MIN((fire_line[count2] + 20) - ABS(fire_hotspot[count] - count2), 255);
             }
         }
 
@@ -71,7 +53,7 @@ static void draw_bottom_line_of_fire()
     }
 }
 
-static void init_fire()
+static void init_fire(void)
 {
     int x, y, pixel, count;
 

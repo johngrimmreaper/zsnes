@@ -1,33 +1,10 @@
-/*
- * Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
- *
- * http://www.zsnes.com
- * http://sourceforge.net/projects/zsnes
- * https://zsnes.bountysource.com
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- */
-
 #ifndef lengthof
 #define lengthof(x) (sizeof(x) / sizeof *(x))
 #endif
 #include <string.h>
 
-#include "../asm_call.h"
 #include "../c_intrf.h"
 #include "../c_vcache.h"
-#include "../cfg.h"
 #include "../cpu/c_65816d.h"
 #include "../cpu/c_execute.h"
 #include "../cpu/c_memory.h"
@@ -47,6 +24,7 @@
 #include "../video/procvidc.h"
 #include "../zip/zpng.h"
 #include "../zstate.h"
+#include "cfg.h"
 #include "gui.h"
 #include "guifuncs.h"
 #include "menu.h"
@@ -206,14 +184,14 @@ static void breakatsignb(void)
     esi += eax; // add program counter to address
     u1* ebp = spcPCRam;
     u4 edx = curcyc /* cycles */ << 8 | xp /* flags */;
-    eop** edi = Curtableaddr;
+    opfn** edi = Curtableaddr;
     UpdateDPage();
     // execute
     do {
         splitflags(edx);
         execute(&edx, &ebp, &esi, &edi);
         edx = joinflags(edx);
-        edx = edx & 0xFFFF00FF | pdh << 8;
+        edx = (edx & 0xFFFF00FF) | pdh << 8;
 
 #ifndef NO_DEBUGGER
         if ((++numinst & 0xFF) == 0 && Check_Key() != 0 && Get_Key() == 27)
@@ -268,15 +246,17 @@ void showmenu(void)
             if (PrevMenuPos == 3)
                 menucloc = 70 * 288;
 
-            char const* fmt = " BMP";
+            /* Scoped: savespckey below is jumped to from above, and a live
+               initialisation must not be skipped. */
+            {
+                char const* fmt = " BMP";
 #ifndef NO_PNG
-            if (ScreenShotFormat != 0) {
-                {
+                if (ScreenShotFormat != 0) {
                     fmt = " PNG";
                 }
-            }
 #endif
-            memcpy(menudrawbox_stringi + 13, fmt, 4);
+                memcpy(menudrawbox_stringi + 13, fmt, 4);
+            }
 
             nextmenupopup = 0;
             menu16btrans = 0;

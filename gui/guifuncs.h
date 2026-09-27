@@ -13,6 +13,11 @@ void GUIGenericJumpTo(void);
 void GUILoadData(void);
 void GUILoadKeysJumpTo(void);
 void GUIQuickLoadUpdate(void);
+u1 GUIScanlineIntensity(u1 level);
+void GUIFilterForMode(void);
+int GUIScanlineSlider(void);
+void GUISetScanlines(u1 intensity);
+void GUISetScanlineStep(u1 level);
 void GUISaveVars(void);
 void GetLoadData(void);
 void GetMovieForcedLength(void);
@@ -45,5 +50,7 @@ extern s4 GUIfileentries;
 extern s4* GUIJT_currentcursloc;
 extern s4* GUIJT_currentviewloc;
 extern u4 GUIcurrentfilewin;
+
+void ClampKeyBindings(void);
 
 #endif

@@ -1,18 +1,11 @@
 /*
- * video/c_mode716calc.c - CalculateNewValues, ported from video/mode716.asm.
- *
- * Called once per scanline from processmode7hires16b, which is still assembly
- * and reaches it with the renderer's registers live:
- *
- *     ebx  the scanline
- *     eax  the Y scroll accumulator
- *     edx  the X scroll accumulator
- *
- * and takes back eax, ecx and edx. The M7Seam* block below is what the
- * assembly spills them into; see the thunk in video/mode716.asm.
+ * CalculateNewValues, from video/mode716.asm. Once per scanline from
+ * processmode7hires16b, which reaches it with ebx = the scanline, eax = the Y
+ * scroll accumulator and edx = the X one, and takes back eax, ecx and edx.
+ * The M7Seam* block below is what the assembly spilled them into.
  */
-#include "../chips/regabi.h" /* REGABI_ENTRY/REGABI_SYM for the trampoline */
 #include "../types.h"
+#include "c_mode716gate.h"
 
 extern u4 mode7ab[256], mode7cd[256]; /* endmem.c: A|B and C|D per scanline */
 extern u2 mode7A, mode7B, mode7C, mode7D; /* cpu/regs.inc */
@@ -21,23 +14,20 @@ extern u1 BGMA[256]; /* endmem.c: BG mode per scanline */
 extern u1 mode7set; /* cpu/regs.inc */
 extern u2 m7starty; /* video/c_mode716data.c */
 
-u4 M7SeamA;
-u4 M7SeamB;
-u4 M7SeamC;
-u4 M7SeamD;
+zreg M7SeamA;
+zreg M7SeamB;
+zreg M7SeamC;
+zreg M7SeamD;
 /* processmode7hires16b also has esi, edi and ebp live across the renderer it
    calls, and does not restore them. */
-u4 M7SeamSI;
-u4 M7SeamDI;
-u4 M7SeamBP;
+zreg M7SeamSI;
+zreg M7SeamDI;
+zreg M7SeamBP;
 
-/* Predict this scanline's matrix entry. The tables hold two words per
-   scanline, so `half` picks A or B (C or D); the entries read are this
-   scanline's, the next one's and the one after that.
-
-   Note both index one and two scanlines ahead without a bounds check, as the
-   assembly does - endmem.c lays these tables out back to back, so the last
-   scanline reads into its neighbour rather than off the end. */
+/* Predict this scanline's matrix entry. Two words per scanline, so `half`
+   picks A or B (C or D), and it reads this scanline's, the next and the one
+   after. Both look ahead unchecked, as the assembly does: endmem.c lays the
+   tables back to back, so the last scanline reads its neighbour. */
 static void m7_newvaluepred(u4 const* const tab, u4 const half, u2* const out,
     u4 const bx)
 {
@@ -45,13 +35,10 @@ static void m7_newvaluepred(u4 const* const tab, u4 const half, u2* const out,
     s4 const v0 = p[0], v1 = p[2], v2 = p[4];
 
     if ((u2)v2 != (u2)v0 && BGMA[bx + 2] == 7) {
-        /* Quadratic step, as a 64-bit product divided by the two-scanline
-           span. The one place this is not the assembly: idiv faults when the
-           quotient will not fit in 32 bits, which needs |v1 - v0| > 46340 at a
-           span of one - no real matrix gets there, and truncating beats
-           trapping. The difftest keeps the oracle out of that corner, which
-           also means a 32-bit product would pass it: inside the range idiv
-           survives, the square always fits. The 64-bit one is still right. */
+        /* Quadratic step: a 64-bit product over the two-scanline span. The
+           one place this is not the assembly - idiv faults when the quotient
+           will not fit in 32 bits, which needs |v1 - v0| > 46340 at a span of
+           one. No real matrix reaches that, and truncating beats trapping. */
         *out = (u2)((s4)(((s8)(v1 - v0) * (v1 - v0)) / (v2 - v0)) + v0);
     } else {
         /* Arithmetic shift, matching sar. A logical one would agree here - the
@@ -86,56 +73,41 @@ void c_CalculateNewValues(void)
 
 /* --- processmode7hires16b ------------------------------------------------ *
  *
- * The hi-res Mode 7 pass: re-predict the matrix for this scanline, aim the
- * renderer at the second field of the buffer, and run it again with M7HROn
- * set. Only runs when the *next* scanline is in mode 7.
- */
+ * Re-predict the matrix, aim the renderer at the buffer's second field and run
+ * it again with M7HROn set. Only when the *next* scanline is in mode 7. */
 extern u1* curvidoffset; /* video/makevid.c */
 extern u4 M7HROn; /* video/c_mode716data.c */
-void drawmode7win16b(void); /* video/mode716.asm */
+/* Hand the renderer the whole register file the seam is carrying; it does not
+   restore any of it, and neither did the assembly. (The esi write-back is the
+   one part nothing can currently observe, because the only caller puts its own
+   esi back afterwards; keep it, so the next caller is not surprised.) */
+static void M7CallDraw(void)
+{
+    m7regs r;
 
-/* Call drawmode7win16b, which is still assembly and wants the renderer's whole
-   register file - ebp included, so this has to be naked rather than a
-   constrained asm. Everything the renderer leaves is written back: the
-   assembly does not restore it either. (The esi write-back is the one part
-   nothing can currently observe, because the only caller puts its own esi
-   back afterwards; keep it, so the next caller is not surprised.) */
-/* clang-format off */
-
-__asm__(REGABI_ENTRY(M7CallDraw)
-    "pushl %ebx\n"
-    "pushl %esi\n"
-    "pushl %edi\n"
-    "pushl %ebp\n"
-    "movl " REGABI_SYM(M7SeamA) ", %eax\n"
-    "movl " REGABI_SYM(M7SeamB) ", %ebx\n"
-    "movl " REGABI_SYM(M7SeamC) ", %ecx\n"
-    "movl " REGABI_SYM(M7SeamD) ", %edx\n"
-    "movl " REGABI_SYM(M7SeamSI) ", %esi\n"
-    "movl " REGABI_SYM(M7SeamDI) ", %edi\n"
-    "movl " REGABI_SYM(M7SeamBP) ", %ebp\n"
-    "call " REGABI_SYM(drawmode7win16b) "\n"
-    "movl %eax, " REGABI_SYM(M7SeamA) "\n"
-    "movl %ebx, " REGABI_SYM(M7SeamB) "\n"
-    "movl %ecx, " REGABI_SYM(M7SeamC) "\n"
-    "movl %edx, " REGABI_SYM(M7SeamD) "\n"
-    "movl %esi, " REGABI_SYM(M7SeamSI) "\n"
-    "movl %edi, " REGABI_SYM(M7SeamDI) "\n"
-    "movl %ebp, " REGABI_SYM(M7SeamBP) "\n"
-    "popl %ebp\n"
-    "popl %edi\n"
-    "popl %esi\n"
-    "popl %ebx\n"
-    "ret\n");
-
-/* clang-format on */
-
-void M7CallDraw(void);
+    r.ax = M7SeamA;
+    r.bx = M7SeamB;
+    r.cx = M7SeamC;
+    r.dx = M7SeamD;
+    r.si = M7SeamSI;
+    r.di = M7SeamDI;
+    r.bp = M7SeamBP;
+    drawmode7win16b(&r);
+    M7SeamA = r.ax;
+    M7SeamB = r.bx;
+    M7SeamC = r.cx;
+    M7SeamD = r.dx;
+    M7SeamSI = r.si;
+    M7SeamDI = r.di;
+    M7SeamBP = r.bp;
+}
 
 void c_processmode7hires16b(void)
 {
     u4 const bx = M7SeamB;
-    u4 const si = M7SeamSI;
+    /* esi is a pointer into the video buffer, so it has to stay pointer-wide;
+       narrowing it to 32 bits aimed the renderer at a truncated address. */
+    zreg const si = M7SeamSI;
 
     if (BGMA[bx + 1] != 7) {
         return;

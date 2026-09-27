@@ -1,28 +1,37 @@
-/* C port of cpu/dspproc.asm: the DSP/sound state block.
-
-   Everything left in dspproc.asm was pure data; the code moved to
-   cpu/c_dspproc.c long ago.  The save-state code walks this block by offset
-   (PHdspsave and friends are literal byte distances between symbols), so the
-   layout is reproduced verbatim with an inline-asm block (see asmdata.h).
-   resb N is N bytes, resw N is N*2, resd N is N*4; the asm ALIGN32/ALIGN16
-   macros pad with nop (0x90) bytes, not zeroes. */
+/* The DSP/sound state block from cpu/dspproc.asm; the code is in
+   cpu/c_dspproc.c. The save-state code walks this by offset - PHdspsave and
+   friends are literal byte distances between symbols - so the layout is
+   reproduced verbatim in an inline-asm block. resb N is N bytes, resw N is
+   N*2, resd N is N*4, and ALIGN32/ALIGN16 pad with nops, not zeroes. */
 #include "../asmdata.h"
 
 /* clang-format off */
 
-#define ASM_LSYM(sym) #sym ":\n"
-
 #define BSSB(sym, n) ASM_GSYM(sym) ".skip (" #n ")\n"
 #define BSSW(sym, n) ASM_GSYM(sym) ".skip (" #n ")*2\n"
 #define BSSD(sym, n) ASM_GSYM(sym) ".skip (" #n ")*4\n"
+/* resd in the assembly, but these hold host pointers, so the slot has to
+   follow the pointer width. On i386 it is the same four bytes. */
+/* Holds a host pointer, so the slot follows the pointer width. */
+/* A pointer-sized slot. The .balign belongs before the label: emitted after
+   it, the symbol names the padding rather than its own storage - four bytes
+   low on a 64-bit build, which aarch64 then cannot even address. */
+#define PTRSYM(sym)                              \
+    ".balign " ASM_STR(__SIZEOF_POINTER__) "\n"  \
+    ASM_GSYM(sym)                                \
+    ".skip " ASM_STR(__SIZEOF_POINTER__) "\n"
+
+#define BSSP(sym, n) \
+    ASM_GSYM(sym)    \
+    ".skip (" #n ")*" ASM_STR(__SIZEOF_POINTER__) "\n"
 #define BSSB_L(sym, n) ASM_LSYM(sym) ".skip (" #n ")\n"
 
 __asm__(
-    ASM_SEC_DATA(".data")
+    ASM_SEC_DATA_ALIGNED(".data")
     ASM_GSYM(SBHDMA)
     ".byte 0\n"
     ASM_SEC_END
-    ASM_SEC_BSS(".bss")
+    ASM_SEC_BSS_ALIGNED(".bss")
     ".balign 4\n"
     BSSW(DSPInterP, 1024)
     ASM_SEC_END
@@ -137,14 +146,14 @@ __asm__(
     BSSD(Voice5LoopPtr, 1)
     BSSD(Voice6LoopPtr, 1)
     BSSD(Voice7LoopPtr, 1)
-    BSSD(Voice0BufPtr, 1)
-    BSSD(Voice1BufPtr, 1)
-    BSSD(Voice2BufPtr, 1)
-    BSSD(Voice3BufPtr, 1)
-    BSSD(Voice4BufPtr, 1)
-    BSSD(Voice5BufPtr, 1)
-    BSSD(Voice6BufPtr, 1)
-    BSSD(Voice7BufPtr, 1)
+    BSSP(Voice0BufPtr, 1)
+    BSSP(Voice1BufPtr, 1)
+    BSSP(Voice2BufPtr, 1)
+    BSSP(Voice3BufPtr, 1)
+    BSSP(Voice4BufPtr, 1)
+    BSSP(Voice5BufPtr, 1)
+    BSSP(Voice6BufPtr, 1)
+    BSSP(Voice7BufPtr, 1)
     BSSD(SoundCounter, 1)
     BSSD(SoundCounter2, 1)
     BSSD(Voice0Prev0, 1)
@@ -508,11 +517,11 @@ __asm__(
     ASM_GSYM(AdsrSustLevLoc)
     ".byte 58,39,27,19,13,8,3,1\n"
     ASM_GSYM(PHdspsave)
-    ".long marksave - BRRBuffer\n"
+    ".long " ASM_LSYMREF(marksave) " - " ASM_SYMREF(BRRBuffer) "\n"
     ASM_GSYM(PHdspconvb)
-    ".long marksave - Voice0Freq\n"
+    ".long " ASM_LSYMREF(marksave) " - " ASM_SYMREF(Voice0Freq) "\n"
     ASM_GSYM(PHdspsave2)
-    ".long marksave2 - echoon0\n"
+    ".long " ASM_LSYMREF(marksave2) " - " ASM_SYMREF(echoon0) "\n"
     ASM_SEC_END
     ASM_SEC_BSS(".bss")
     BSSD(NoiseInc, 1)
@@ -523,8 +532,7 @@ __asm__(
     ASM_SEC_END
     ASM_SEC_DATA(".data")
     ".balign 16, 0x90\n"
-    ASM_GSYM(DSPInterpolate)
-    ".long 0\n"
+    PTRSYM(DSPInterpolate)
     ASM_SEC_END);
 
 /* clang-format on */

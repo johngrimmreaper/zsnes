@@ -2,7 +2,7 @@
    Byte-exact with the original NASM data; generated then verified. */
 #include "../types.h"
 
-#include "../asmdata.h"
+#include "gui.h"
 
 extern char SRAMPath[];
 extern char SStatePath[];
@@ -21,11 +21,11 @@ extern char GUIMovieForcedText[];
 extern char GUICustomX[];
 extern char GUICustomY[];
 
-/* cheatdataprev must sit immediately before cheatdata: cpu/execute.asm and
-   gui/guicheat.c read the previous entry as cheatdata[-28]. */
-__asm__(
-    ASM_SEC_BSS(".bss.cheatblk")
-        ASM_GSYM(cheatdataprev) ".zero 28\n" ASM_GSYM(cheatdata) ".zero 7196\n" ASM_SEC_END);
+/* The cheat table with one entry of headroom in front of it: c_execloop.c
+   probes the flags byte of the *previous* entry, which on the first pass is
+   the slot before cheatdata. One object, so that read stays inside it. */
+u1 cheatblock[CHEAT_ENTRY + CHEAT_TABLE];
+u1* const cheatdata = cheatblock + CHEAT_ENTRY;
 
 char CSDescDisplay[20] = { 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 0, 0 };
 char CSInputDisplay[12] = { 95, 0, 32, 32, 32, 32, 32, 32, 32, 32, 32, 0 };
@@ -39,10 +39,13 @@ u4 CalibYmin;
 u4 CalibYmin209;
 u1 CheatCompareValue;
 u1 CheatOn;
+
+/* The keyboard focus within the open panel; see guiwindp.h. */
+u1 GUIFocus;
 u1 CheatSearchStatus;
 u1 CheatWinMode;
-u1 CombinDataGlob[3300];
-u1 CombinDataLocl[3300];
+ComboData CombinDataGlob[50];
+ComboData CombinDataLocl[50];
 u4 CurCStextpos;
 u1 CurPalSelect;
 u1 EEgg;
@@ -100,8 +103,15 @@ u1 GUIQuit;
 u1 GUIReset;
 u4 GUIScrolTim1;
 u4 GUIScrolTim2;
-char GUIVideoTabs[22] = { 1, 0, 0, 0, 2, 0, 0, 0, 77, 79, 68, 69, 83, 0, 70, 73, 76, 84, 69, 82, 83, 0 };
-char GUIVntscTab[22] = { 0, 0, 0, 0, 2, 0, 0, 0, 78, 84, 83, 67, 0, 65, 68, 86, 32, 78, 84, 83, 67, 0 };
+/* Active tab, tab count, then the labels packed one after another.
+   GUIDrawTabs reads the first two as dwords. */
+char GUIVideoTabs[40] = { 1, 0, 0, 0, 4, 0, 0, 0,
+    'M', 'O', 'D', 'E', 'S', 0,
+    'F', 'I', 'L', 'T', 'E', 'R', 'S', 0,
+    'R', 'E', 'T', 'R', 'O', 0,
+    'M', 'O', 'N', 'I', 'T', 'O', 'R', 'S', 0,
+    0, 0, 0 };
+char GUIVntscTab[22] = { 0, 0, 0, 0, 2, 0, 0, 0, 78, 84, 83, 67, 0, 65, 68, 86, 0, 0, 0, 0, 0, 0 };
 u4 GUIccombcursloc;
 u4 GUIccomblcursloc;
 u4 GUIccombviewloc;

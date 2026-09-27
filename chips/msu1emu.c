@@ -1,23 +1,7 @@
-/*
-Copyright (C) 2023 Sneed, ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #include "msu1emu.h"
-#include "../cfg.h"
+#include "../gblhdr.h"
 #include "../ui.h"
+#include "cfg.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +12,7 @@ u1 MSU_StatusRead;
 u4 MSU_Data_SeekPort;
 u4 MSU_Data_Addr;
 u1* MSU_DATA = NULL;
+u4 MSU_Data_Length; /* bytes in MSU_DATA */
 
 // DSP
 short* TRACK_DATA = NULL;
@@ -69,7 +54,7 @@ void initMSU1regsWrite(void)
 }
 
 // Read the MSU binary file (.msu file)
-int readMSU()
+int readMSU(void)
 {
     // Cleanup
     if (MSU_DATA) {
@@ -105,7 +90,8 @@ int readMSU()
 
         MSU_DATA = (u1*)malloc(filelen);
         if (MSU_DATA) {
-            fread(MSU_DATA, filelen, 1, MSUBinary);
+            IGNORE_RESULT(fread(MSU_DATA, filelen, 1, MSUBinary));
+            MSU_Data_Length = (u4)filelen;
             fclose(MSUBinary);
             return 1;
         } else {
@@ -116,7 +102,7 @@ int readMSU()
     return 0;
 }
 
-void MSU1HandleTrackChange()
+void MSU1HandleTrackChange(void)
 {
     // Writes have no effect if audio busy bit set
     if (MSU_StatusRead & MSU_STATUS_AUDIO_BUSY) {
@@ -173,13 +159,19 @@ void MSU1HandleTrackChange()
         TRACK_DATA = (short*)malloc(filelen);
         if (TRACK_DATA) {
             fseek(TrackFileReader, 4, SEEK_SET);
-            fread(&MSU_Loop_Point, sizeof(int), 1, TrackFileReader);
-            fread(TRACK_DATA, filelen, 1, TrackFileReader);
+            IGNORE_RESULT(fread(&MSU_Loop_Point, sizeof(int), 1, TrackFileReader));
+            IGNORE_RESULT(fread(TRACK_DATA, filelen, 1, TrackFileReader));
             fclose(TrackFileReader);
 #ifdef DEBUG
             printf("Succesfully loaded Track %lu with length %lu\n", MSU_Track, filelen);
 #endif
-            MSU_Track_Length = filelen / 2;
+            /* Whole stereo pairs, so the right channel of the last one is
+               inside the buffer; and a loop point the file cannot honour -
+               negative, or past its end - restarts the track instead. */
+            MSU_Track_Length = (int)(filelen / 2) & ~1;
+            if (MSU_Loop_Point < 0 || MSU_Loop_Point > MSU_Track_Length / 2) {
+                MSU_Loop_Point = 0;
+            }
         } else {
             fclose(TrackFileReader);
             // Clear audio busy bit
@@ -199,7 +191,7 @@ void MSU1HandleTrackChange()
 }
 
 // Handle control register bits
-void MSU1HandleControlBits()
+void MSU1HandleControlBits(void)
 {
     // Writes have no effect if audio busy bit or error bit set
     if (MSU_StatusRead & (MSU_STATUS_AUDIO_BUSY | MSU_STATUS_ERROR)) {
@@ -225,10 +217,9 @@ void mixMSU1Audio(int* start, int* end, int rate)
     // Play
     if ((MSU_StatusRead & (MSU_STATUS_PLAY & ~MSU_STATUS_AUDIO_BUSY)) && MSU_Track_Length > 0) {
         MSU_StatusRead |= MSU_STATUS_AUDIO_BUSY; // Set audio busy flag
-        // printf("MSU Status: Track: %d   Playing: %d     Repeat: %d    Volume: %d     Pos: %d/%d\n", (int)MSU_Track, MSU_Playing, MSU_Repeat, (int)MSU_AudioVolume, MSU_Track_Position, MSU_Track_Length);
         for (; start < end; start++) {
             // Check if the pointer of the track is valid.
-            if (MSU_Track_Position < MSU_Track_Length) {
+            if (MSU_Track_Position >= 0 && MSU_Track_Position < MSU_Track_Length) {
                 *start += (TRACK_DATA[MSU_Track_Position] * MSU_AudioVolume * MusicVol) / 0x4000;
 
                 // Stereo Mixer

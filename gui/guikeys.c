@@ -1,24 +1,3 @@
-/*
- * Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
- *
- * http://www.zsnes.com
- * http://sourceforge.net/projects/zsnes
- * https://zsnes.bountysource.com
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- */
-
 #ifndef lengthof
 #define lengthof(x) (sizeof(x) / sizeof *(x))
 #endif
@@ -29,15 +8,13 @@
 #include <stdbool.h>
 #include <string.h>
 
-#include "../asm_call.h"
 #include "../c_init.h"
 #include "../c_intrf.h"
-#include "../cfg.h"
 #include "../cpu/execute.h"
 #include "../cpu/regs.h"
-#include "../input.h"
 #include "../link.h"
 #include "../types.h"
+#include "../video/filter.h"
 #include "../video/procvid.h"
 #include "../video/procvidc.h"
 #include "../zmovie.h"
@@ -45,19 +22,21 @@
 #include "../zstate.h"
 #include "c_gui.h"
 #include "c_guiwindp.h"
+#include "cfg.h"
 #include "gui.h"
 #include "guicheat.h"
 #include "guikeys.h"
 #include "guiwindp.h"
+#include "input.h"
 
 #include "../video/ntsc.h"
 #include "guifuncs.h"
 
 #ifdef __UNIXSDL__
-#include "../linux/sdllink.h"
+#include "../unix/sdllink.h"
 
 #ifdef __OPENGL__
-#include "../linux/gl_draw.h"
+#include "../unix/gl_draw.h"
 #endif
 #endif
 
@@ -178,6 +157,48 @@ static void KeyTabInc(u4* const first, ...) // tab arrays
     }
 
     va_end(ap);
+}
+
+/* Shift held, for the tab that steps backwards. Read from the scancode table
+   rather than a platform flag, so it works the same everywhere. */
+static int GUIShiftHeld(void)
+{
+    return (pressed[0x2A] & 1) || (pressed[0x36] & 1);
+}
+
+/* Tab steps forward through the tabs of a window; shift-tab steps back the
+   same way, wrapping into the previous group where a window has two of them
+   (the video window grows NTSC sub-tabs when that filter is on). A group whose
+   current tab is 0 is not the active one. */
+static void KeyTabDec(u4* const first, u4* const second)
+{
+    if (first[0] > 1) {
+        first[0]--;
+    } else if (first[0] == 1) {
+        if (second && second[1]) {
+            first[0] = 0;
+            second[0] = second[1]; /* the last tab of the other group */
+        } else {
+            first[0] = first[1]; /* wrap round within this one */
+        }
+    } else if (second && second[0] > 1) {
+        second[0]--;
+    } else if (second && second[0] == 1) {
+        second[0] = 0;
+        first[0] = first[1];
+    }
+}
+
+/* Tab, or shift-tab, over one or two groups. */
+static void KeyTabStep(u4* const first, u4* const second)
+{
+    if (GUIShiftHeld()) {
+        KeyTabDec(first, second);
+    } else if (second) {
+        KeyTabInc(first, second, (u4*)0);
+    } else {
+        KeyTabInc(first, (u4*)0);
+    }
 }
 
 static void GUIKeyCheckbox(u1* const p1, char const p2, char const dh)
@@ -340,7 +361,7 @@ static void GUIInputKeys(char dh)
 {
     dh = ToUpperASM(dh);
     if (dh == 9) {
-        KeyTabInc(GUIInputTabs, (u4*)0);
+        KeyTabStep(GUIInputTabs, (u4*)0);
         GUIFreshInputSelect = 1;
     }
     GUIKeyCheckbox(&GameSpecificInput, 'G', dh);
@@ -356,7 +377,7 @@ static void GUIInputKeys(char dh)
 static void GUIOptionKeys(char dh)
 {
     if (dh == 9) {
-        KeyTabInc(GUIOptionTabs, (u4*)0);
+        KeyTabStep(GUIOptionTabs, (u4*)0);
     }
     dh = ToUpperASM(dh);
     if (GUIOptionTabs[0] == 1) { // Basic
@@ -397,13 +418,63 @@ static void GUIVideoKeys(char dh, char const dl)
     dh = GUIInputBoxText(GUICustomResTextPtr, SetCustomXY, dh);
     if (dh == 9) {
         if (NTSCFilter != 0 && GUINTVID[cvidmode] != 0) {
-            KeyTabInc(GUIVideoTabs, GUIVntscTab, (u4*)0);
+            KeyTabStep(GUIVideoTabs, GUIVntscTab);
         } else {
-            KeyTabInc(GUIVideoTabs, (u4*)0);
+            KeyTabStep(GUIVideoTabs, (u4*)0);
         }
+        GUIFocus = 0; /* a new tab starts at its first control */
     }
 
     dh = ToUpperASM(dh);
+
+    if (GUIVideoTabs[0] == 3) { // Retro tab: up/down pick a slider, left/right work it
+        u1* const bar[CRT_FOCUS_COUNT]
+            = { &sl_intensity, &sl_vibrancy, &BloomLevel };
+        u1* const cur = bar[GUIFocus < CRT_FOCUS_COUNT ? GUIFocus : 0];
+        /* A step of five gets across the range in a reasonable number of
+           presses; shift gives the fine one. */
+        u1 const step = GUIShiftHeld() ? 1 : 5;
+
+        IFKEY(dl, 90, 72) // Up
+        {
+            GUIFocus = (u1)(GUIFocus == 0 ? CRT_FOCUS_COUNT - 1 : GUIFocus - 1);
+        }
+        IFKEY(dl, 96, 80) // Down
+        {
+            GUIFocus = (u1)((GUIFocus + 1) % CRT_FOCUS_COUNT);
+        }
+        IFKEY(dl, 92, 75) // Left
+        {
+            u1 const v = (u1)(*cur > step ? *cur - step : 0);
+
+            if (GUIFocus == CRT_FOCUS_SCANLINES) {
+                GUISetScanlines(v);
+            } else {
+                *cur = v;
+            }
+        }
+        IFKEY(dl, 94, 77) // Right
+        {
+            u1 const v = (u1)(*cur + step > 100 ? 100 : *cur + step);
+
+            if (GUIFocus == CRT_FOCUS_SCANLINES) {
+                GUISetScanlines(v);
+            } else {
+                *cur = v;
+            }
+        }
+
+        /* The four steps the setting has always named, as shortcuts. They used
+           to answer on the Filters tab, which has no scanline control on it.
+           '2' used to be tested as '5' as well, so it could not be reached. */
+        if (dh == 'O' || dh == 'F' || dh == '5' || dh == '2') {
+            VideoFilterSet(VFILTER_NONE);
+            GUISetScanlineStep(dh == 'F' ? 1 : dh == '2' ? 2
+                    : dh == '5'                          ? 3
+                                                         : 0);
+        }
+    }
+
     if (GUIVideoTabs[0] == 1) {
         IFKEY(dl, 89, 71) // "Home"
         {
@@ -476,12 +547,16 @@ static void GUIVideoKeys(char dh, char const dl)
                     u4 const ebx = cvidmode;
                     if (GUIBIFIL[ebx] != 0) {
                         BilinearFilter ^= 1;
-                        NTSCFilter = 0;
+                        if (VideoFilterGet() == VFILTER_NTSC) {
+                            VideoFilterSet(VFILTER_NONE);
+                        }
+                        if (!VideoSettingsLive()) {
 #ifdef __WIN32__
-                        initDirectDraw();
+                            initDirectDraw();
 #elif defined __OPENGL__
-                        initwinvideo();
+                            initwinvideo();
 #endif
+                        }
                         Clear2xSaIBuffer();
                     } else {
 #ifdef __WIN32__
@@ -492,117 +567,59 @@ static void GUIVideoKeys(char dh, char const dl)
                         {
                             antienab ^= 1;
                             if (antienab != 0) {
-                                En2xSaI = 0;
-                                hqFilter = 0;
-                                NTSCFilter = 0;
+                                VideoFilterSet(VFILTER_NONE);
+                                antienab = 1; // VideoFilterSet clears it
                             }
                         }
                     }
                 }
 
-                if (dh == 'N') {
-                    if (GUINTVID[cvidmode] != 0) {
-                        NTSCFilter ^= 1;
-                        if (NTSCFilter != 0) {
-                            En2xSaI = 0;
-                            hqFilter = 0;
-                            scanlines = 0;
-                            antienab = 0;
+                if (dh == 'N' && GUINTVID[cvidmode] != 0) {
+                    if (VideoFilterGet() != VFILTER_NTSC) {
 #ifdef __OPENGL__
-                            BilinearFilter = 0;
+                        BilinearFilter = 0;
 #endif
 #ifdef __WIN32__
-                            if (NTSCFilter != 0)
-                                Keep4_3Ratio = 1;
+                        Keep4_3Ratio = 1;
 #endif
-                            NTSCFilterInit();
-                        }
                     }
+                    VideoFilterToggle(VFILTER_NTSC);
                 }
 
                 if (GUIDSIZE[cvidmode] != 0) {
                     switch (dh) {
-                        u1 al;
                     case 'S':
-                        al = 1;
-                        goto yesfilter;
-                    case 'E':
-                        al = 2;
-                        goto yesfilter;
-                    case 'P':
-                        al = 3;
-                        goto yesfilter;
-                    yesfilter:
-                        Clear2xSaIBuffer();
-                        hqFilter = 0;
-                        scanlines = 0;
-                        antienab = 0;
-                        NTSCFilter = 0;
-                        En2xSaI = En2xSaI != al ? al : 0;
+                        VideoFilterToggle(VFILTER_2XSAI);
                         return;
+                    case 'E':
+                        VideoFilterToggle(VFILTER_SUPEREAGLE);
+                        return;
+                    case 'P':
+                        VideoFilterToggle(VFILTER_SUPER2XSAI);
+                        return;
+                    default:
+                        break;
                     }
                 }
 
-                if (dh == 'Q') {
-                    if (GUIHQ2X[cvidmode] != 0 || GUIHQ3X[cvidmode] != 0 || GUIHQ4X[cvidmode] != 0) {
-                        Clear2xSaIBuffer();
-                        hqFilter ^= 1;
-                        if (hqFilter != 0) {
-                            scanlines = 0;
-                            En2xSaI = 0;
-                            antienab = 0;
-                            NTSCFilter = 0;
-                        }
-                    }
+                if (dh == 'Q'
+                    && (GUIHQ2X[cvidmode] != 0 || GUIHQ3X[cvidmode] != 0
+                        || GUIHQ4X[cvidmode] != 0)) {
+                    VideoFilterToggle(hqFilterlevel >= 4 ? VFILTER_HQ4X
+                            : hqFilterlevel == 3         ? VFILTER_HQ3X
+                                                         : VFILTER_HQ2X);
                 }
 
-                if (dh == 'X') {
-                    if (hqFilter != 0 && GUIHQ2X[cvidmode] != 0) {
-                        Clear2xSaIBuffer();
-                        GUIKeyButtonHole(&hqFilterlevel, 2, 'X', dh);
-                    }
+                if (dh == 'X' && hqFilter != 0 && GUIHQ2X[cvidmode] != 0) {
+                    VideoFilterSet(VFILTER_HQ2X);
                 }
 
-                if (dh == '3') {
-                    if (hqFilter != 0 && GUIHQ3X[cvidmode] != 0) {
-                        Clear2xSaIBuffer();
-                        GUIKeyButtonHole(&hqFilterlevel, 3, '3', dh);
-                    }
+                if (dh == '3' && hqFilter != 0 && GUIHQ3X[cvidmode] != 0) {
+                    VideoFilterSet(VFILTER_HQ3X);
                 }
 
-                if (dh == '4') {
-                    if (hqFilter != 0 && GUIHQ4X[cvidmode] != 0) {
-                        Clear2xSaIBuffer();
-                        GUIKeyButtonHole(&hqFilterlevel, 4, '4', dh);
-                    }
-                }
-            }
-
-            if (GUIDSIZE[cvidmode] != 0) {
-                GUIKeyButtonHole(&scanlines, 0, 'O', dh);
-                if (dh == 'F') {
-                    En2xSaI = 0;
-                    hqFilter = 0;
-                    NTSCFilter = 0;
-                    GUIKeyButtonHole(&scanlines, 1, 'F', dh);
-                }
-            }
-
-            {
-                if (GUIDSIZE[cvidmode] != 0) {
-                    if (dh == '5') {
-                        En2xSaI = 0;
-                        hqFilter = 0;
-                        NTSCFilter = 0;
-                        GUIKeyButtonHole(&scanlines, 3, '5', dh);
-                    }
-
-                    if (dh == '5') {
-                        En2xSaI = 0;
-                        hqFilter = 0;
-                        NTSCFilter = 0;
-                        GUIKeyButtonHole(&scanlines, 2, '2', dh);
-                    }
+                if (dh == '4' && hqFilter != 0 && GUIHQ4X[cvidmode] != 0) {
+                    VideoFilterSet(VFILTER_HQ4X);
                 }
             }
         }
@@ -612,24 +629,6 @@ static void GUIVideoKeys(char dh, char const dl)
             if (GUIM7VID[cvidmode] != 0)
                 Mode7HiRes16b ^= 1;
         }
-
-#if !defined __UNIXSDL__ || defined __OPENGL__
-        if (dh == 'V') {
-#ifdef __UNIXSDL__
-            if (allow_glvsync == 1 && GUIBIFIL[cvidmode] != 0)
-#endif
-            {
-                vsyncon ^= 1;
-#ifdef __WIN32__
-                initDirectDraw();
-                Clear2xSaIBuffer();
-#elif defined __OPENGL__
-                initwinvideo();
-                Clear2xSaIBuffer();
-#endif
-            }
-        }
-#endif
 
 #ifndef __UNIXSDL__
         if (dh == 'T') {
@@ -658,7 +657,26 @@ static void GUIVideoKeys(char dh, char const dl)
         }
     }
 
-    if ((s4)GUIVntscTab >= 1) {
+#if !defined __UNIXSDL__ || defined __OPENGL__
+    if (GUIVideoTabs[0] == 4 && dh == 'V') { // Monitors tab
+#ifdef __UNIXSDL__
+        if (allow_glvsync == 1 && GUIBIFIL[cvidmode] != 0)
+#endif
+        {
+            vsyncon ^= 1;
+            if (!VideoSettingsLive()) {
+#ifdef __WIN32__
+                initDirectDraw();
+#elif defined __OPENGL__
+                initwinvideo();
+#endif
+            }
+            Clear2xSaIBuffer();
+        }
+    }
+#endif
+
+    if ((s4)GUIVntscTab[0] >= 1) {
         GUIKeyCheckbox(&NTSCBlend, 'B', dh);
         GUIKeyCheckbox(&NTSCRef, 'R', dh);
     }
@@ -682,10 +700,12 @@ static void GUISoundKeys(char dh)
     GUIKeyCheckbox(&PrimaryBuffer, 'P', dh);
 #endif
 
+#ifndef __UNIXSDL__
     if (dh == 'R') { // Sampling Rate
         static u1 const sampratenext[] = { 1, 4, 5, 6, 2, 3, 0, 0 };
-        SoundQuality = SoundQuality & 0xFFFFFF00 | sampratenext[SoundQuality & 0xFF];
+        SoundQuality = (SoundQuality & 0xFFFFFF00) | sampratenext[SoundQuality & 0xFF];
     }
+#endif
 
     GUIKeyButtonHole(&SoundInterpType, 0, 'N', dh);
     GUIKeyButtonHole(&SoundInterpType, 1, 'G', dh);
@@ -715,7 +735,7 @@ static void GUICheatKeys(char dh, char al)
                     u1 const al = digit2num(GUICheatTextZ1[0]);
                     u1 const ah = digit2num(GUICheatTextZ1[1]);
                     u1* esi = cheatdata + GUIcurrentcheatcursloc * 28;
-                    esi[1] = al << 4 | ah & 0x0F;
+                    esi[1] = al << 4 | (ah & 0x0F);
                     GUICheatTextZ1[0] = '\0';
                     EnableCheatCodeNoPrevMod(esi);
                 } else {
@@ -803,10 +823,10 @@ static void GUICheatKeys(char dh, char al)
             CheatCodeToggle();
             return;
         case 'S':
-            asm_call(CheatCodeSave);
+            CheatCodeSave();
             return;
         case 'L':
-            asm_call(CheatCodeLoad);
+            CheatCodeLoad();
             return;
         case 'F':
             CheatCodeFix();
@@ -979,7 +999,7 @@ static void InsertSearchCharacter(char const dh)
         if (ecx == CSInputDisplay + 10)
             return;
         // Add character if necessary
-        if ('0' <= dh && dh <= '9' || (CheatSrcByteBase != 0 && 'A' <= dh && dh <= 'F')) {
+        if (('0' <= dh && dh <= '9') || (CheatSrcByteBase != 0 && 'A' <= dh && dh <= 'F')) {
             *ecx++ = dh;
         } else {
             return;
@@ -1264,7 +1284,7 @@ static void GUIMovieKeys(char dh)
     dh = GUIInputBoxText(GUIMovieTextPtr, SetMovieForcedLength, dh);
     if (dh == 9) {
         if (MovieProcessing == 0)
-            KeyTabInc(GUIMovieTabs, GUIDumpingTab, (u4*)0);
+            KeyTabStep(GUIMovieTabs, GUIDumpingTab);
     }
 
     GUIKeyButtonHole((u1*)&CMovieExt, 'v', '0', dh); // XXX ugly cast
@@ -1382,6 +1402,9 @@ static void GUINetplayKeys(char dh)
     case 'U':
         NetplayUDPConfig ^= 1;
         break;
+    case 'R':
+        NetplayRelayConfig ^= 1;
+        break;
     }
 }
 
@@ -1395,7 +1418,7 @@ static void GUIPathKeys(char dh)
         dh = GUIInputBoxText(GUIPathsTab3Ptr, init_save_paths, dh);
 
     if (dh == 9)
-        KeyTabInc(GUIPathTabs, (u4*)0);
+        KeyTabStep(GUIPathTabs, (u4*)0);
 
     if (GUIPathTabs[0] == 1) { // General
         GUIKeyButtonHole(&RelPathBase, 0, 'C', dh);
@@ -1638,8 +1661,8 @@ void GUIgetcurrentinput(void)
 
 done:
     if (GUIcmenupos == 0) {
-        if (al == 27 && GUIwinptr == 0) {
-            if (romloadskip == 0)
+        if (GUIwinptr == 0) {
+            if (al == 27 && romloadskip == 0)
                 GUIQuit = 2;
         } else {
             u4 const eax = GUIwinptr - 1;
@@ -1864,16 +1887,22 @@ done:
             switch (dh) {
             case 'K':
                 GUIcrowpos = 0;
+                break;
             case 'U':
                 GUIcrowpos = 1;
+                break;
             case 'O':
                 GUIcrowpos = 2;
+                break;
             case 'E':
                 GUIcrowpos = 3;
+                break;
             case 'S':
                 GUIcrowpos = 4;
+                break;
             case 'A':
                 GUIcrowpos = 6;
+                break;
             }
         }
 

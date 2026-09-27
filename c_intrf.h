@@ -48,6 +48,8 @@ void initvideo(void);
 // Toggle fullscreen on the existing window without recreating it.
 // Returns 1 on success, 0 if a full reinit via initvideo() is needed.
 int TryToggleFullScreen(void);
+/* Whether bilinear and vsync take effect without rebuilding the window. */
+int VideoSettingsLive(void);
 
 void deinitvideo(void);
 
@@ -121,6 +123,47 @@ extern u1 GUISMODE[]; // Win Stretched Modes
 extern u1 GUII2VID[]; // Interpolation
 #endif
 
+/* The displays the machine has, and which one to open on. Every port answers
+   these: the GUI's Monitors tab, the mouse handler and the -mo flag all call
+   them without knowing which platform is underneath. A port with no display
+   enumeration reports a single monitor and no HDR. */
+u4 VideoMonitorCount(void);
+char const* VideoMonitorName(u4 i);
+void VideoMonitorID(u4 i, char* out, u4 len);
+u4 VideoMonitorSelected(void);
+void VideoMonitorSelect(u4 i);
+/* Whether monitor `i` is in HDR mode; VideoMonitorHDR asks it of the chosen
+   one, which is the only monitor the picture can be on. */
+int VideoMonitorIsHDR(u4 i);
+int VideoMonitorHDR(void);
+
+/* The short ID is the name with everything but letters and digits taken out, so
+   for a plain name like "HDMI-1" it comes back the same and listing both just
+   repeats it. True when that is the case - the ID already spells the whole name
+   out and nothing was lost to truncation - so the caller can drop the name. */
+static inline int VideoMonitorNameRedundant(char const* id, char const* name)
+{
+    u4 k = 0;
+    int any = 0;
+
+    for (; *name; ++name) {
+        char c = *name;
+
+        if (c >= 'a' && c <= 'z') {
+            c = (char)(c - 'a' + 'A');
+        }
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z'))) {
+            continue;
+        }
+        any = 1;
+        if (id[k] != c) {
+            return 0;
+        }
+        ++k;
+    }
+    return !any || id[k] == '\0';
+}
+
 // Input Device Names
 extern char const GUIInputNames[][17];
 
@@ -129,5 +172,9 @@ extern u4 const NumInputDevices;
 
 // GUI Description codes for each corresponding key pressed value
 extern char const ScanCodeListing[];
+
+/* Catch SIGINT/SIGTERM and exit cleanly, so Ctrl-C (or a `timeout` that ends a
+   headless run) still runs the atexit cleanup that saves the config. */
+void InstallQuitSignalHandlers(void);
 
 #endif

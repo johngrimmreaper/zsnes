@@ -1,25 +1,6 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
-#include "../cfg.h"
+#include "../gblhdr.h"
 #include "../zpath.h"
+#include "cfg.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -204,48 +185,10 @@ INLINE void update_context(uint8_t con)
     }
 }
 
-/*
-For future calls, the value of pixel_left must be shifted into the first position,
-with the rest of the array moved after the first position.
-However, a pixel must be returned. The pixel returned is chosen by sorting
-pixel_left, pixel_above, and pixel_above_left into the first three positions in a
-copied array, with the rest of the array moved after the positions containing
-pixel_left, pixel_above, and pixel_above_left. Then index into this copied array.
-However this copied is never needed again.
-A stable copy and move/sort of 3 values could be done optimally in 4 loops.
-But since the array is then thrown away, it would be better to find the appropriate
-values without needing to copy and move/sort.
-
-These defines do a copy and move/sort:
-
-#define PIXEL_SHIFT(array, value) \
-  temp = array[0]; \
-  for(m = 0; temp != value; ++m) \
-  { \
-    temp2 = temp; \
-    temp = array[m+1]; \
-    array[m+1] = temp2; \
-  } \
-  array[0] = temp
-
-#define PIXEL_SHIFT_ALL(ct) \
-  PIXEL_SHIFT(pixelorder, pixel_left); \
-  memcpy(realorder, pixelorder, ct*sizeof(uint32_t)); \
-  PIXEL_SHIFT(realorder, pixel_above_left); \
-  PIXEL_SHIFT(realorder, pixel_above); \
-  PIXEL_SHIFT(realorder, pixel_left)
-
-The function below moves pixel_left where needed, but instead of copying and sorting
-to find the pixel to return, it uses the following algorithm:
-Check for equality between pixel_left, pixel_above, and pixel_above_left, and
-determine if any of the first 3 positions of the array are desired. In those cases,
-the value can be returned immediatly. In other cases, only a single pass is required
-to go through the array to account for pixel_above and pixel_above_left (pixel_left
-is always at the beginning), and then directly return the value.
-
-This method saves needing a whole array, a copy, and extra sorting loops, replacing
-with a method at maximum requiring a single loop through the array.
-*/
+/* Move pixel_left to the front of pixelorder, then return the pixel at `index`
+   of the order pixel_left, pixel_above and pixel_above_left would give if they
+   were sorted to the front of a copy. The copy is dead afterwards, so the
+   equality cases below answer directly and everything else needs one pass. */
 
 INLINE uint32_t pixel_shift(int index)
 {
@@ -342,7 +285,6 @@ static void InitDecompression(int inmode, uint8_t* data)
 
 #define CONTEXT() (pixel_left == pixel_above ? pixel_above != pixel_above_left : pixel_above == pixel_above_left ? 2 \
                                                                                                                  : 3 + (pixel_left != pixel_above_left))
-// #define CONTEXT() ((pixel_left==pixel_above && pixel_above==pixel_above_left)?0:(pixel_left==pixel_above)?1:(pixel_above==pixel_above_left)?2:(pixel_left==pixel_above_left)?3:4)
 
 static uint8_t DecompressByte(void)
 {
@@ -454,10 +396,10 @@ static uint8_t DecompressByte(void)
     return (buffer[buf_idx++]);
 }
 
-static void DecompressSkipBytesBuffer(uint8_t* buffer, uint16_t amount)
+static void DecompressSkipBytesBuffer(uint8_t* buf, uint16_t amount)
 {
     while (amount--) {
-        *buffer++ = DecompressByte();
+        *buf++ = DecompressByte();
     }
 }
 
@@ -485,6 +427,7 @@ extern uint8_t* romdata;
 
 #define TABLE_AMOUNT 256
 #define LOOKUP_AMOUNT 64
+#define GRAPHICS_BUFFER_SIZE 0x1000000u
 
 struct decompression_table {
     uint8_t* data;
@@ -517,9 +460,10 @@ static struct
 
     struct address_lookup* lookup;
     uint8_t lookup_used;
+    bool buffered_cache_enabled;
 } decompression_state;
 
-static void save_decompression_state()
+static void save_decompression_state(void)
 {
     if (decompression_state.graphics_buffer) {
         char fname[13];
@@ -553,7 +497,7 @@ static void save_decompression_state()
     }
 }
 
-static void load_decompression_state()
+static void load_decompression_state(void)
 {
     if (decompression_state.graphics_buffer) {
         char fname[13];
@@ -567,25 +511,39 @@ static void load_decompression_state()
             if ((fp_gfx = gzopen_dir(ZSramPath, fname, "rb"))) {
                 struct address_lookup* lookup_ptr = decompression_state.lookup - 1;
 
-                uint32_t address = 0, last_address = 0;
+                /* No 3-byte address can equal this, so the first record
+                   always opens a lookup; starting at 0 meant a record with
+                   address 0 wrote through the entry before the table. */
+                uint32_t address = 0, last_address = 0xFFFFFFFFu;
                 uint16_t length;
                 uint8_t entry;
+                bool valid = true;
 
                 for (;;) {
-                    fread(&address, 3, 1, fp_idx);
-                    fread(&entry, 1, 1, fp_idx);
-                    fread(&length, 2, 1, fp_idx);
+                    IGNORE_RESULT(fread(&address, 3, 1, fp_idx));
+                    IGNORE_RESULT(fread(&entry, 1, 1, fp_idx));
+                    IGNORE_RESULT(fread(&length, 2, 1, fp_idx));
 
                     if (feof(fp_idx)) {
                         break;
                     }
 
                     if (last_address != address) {
+                        if (decompression_state.lookup_used >= LOOKUP_AMOUNT) {
+                            valid = false;
+                            break;
+                        }
                         ++decompression_state.lookup_used;
                         (++lookup_ptr)->address = last_address = address;
                         lookup_ptr->table = decompression_state.tables + decompression_state.table_used;
                         decompression_state.table_used += TABLE_AMOUNT;
                     }
+
+                    if (decompression_state.graphics_buffer_used > GRAPHICS_BUFFER_SIZE || length > GRAPHICS_BUFFER_SIZE - decompression_state.graphics_buffer_used) {
+                        valid = false;
+                        break;
+                    }
+
                     lookup_ptr->table[entry].data = decompression_state.graphics_buffer + decompression_state.graphics_buffer_used;
                     lookup_ptr->table[entry].length = length;
                     decompression_state.graphics_buffer_used += length;
@@ -593,13 +551,25 @@ static void load_decompression_state()
                     gzread(fp_gfx, lookup_ptr->table[entry].data, length);
                 }
                 gzclose(fp_gfx);
+
+                if (!valid) {
+                    memset(decompression_state.lookup, 0,
+                        LOOKUP_AMOUNT * sizeof(*decompression_state.lookup));
+                    memset(decompression_state.tables, 0,
+                        TABLE_AMOUNT * LOOKUP_AMOUNT * sizeof(*decompression_state.tables));
+                    decompression_state.lookup_used = 0;
+                    decompression_state.table_used = 0;
+                    decompression_state.graphics_buffer_used = 0;
+                    decompression_state.table_current = 0;
+                    decompression_state.buffered_cache_enabled = false;
+                }
             }
             fclose(fp_idx);
         }
     }
 }
 
-static bool SPC7110_init_decompression_state()
+static bool SPC7110_init_decompression_state(void)
 {
     if (SPC7110Cache) {
         size_t lookup_bytes = LOOKUP_AMOUNT * sizeof(struct address_lookup);
@@ -608,13 +578,14 @@ static bool SPC7110_init_decompression_state()
         if (!decompression_state.graphics_buffer) {
             memset(&decompression_state, 0, sizeof(decompression_state));
 
-            decompression_state.graphics_buffer = malloc(0x1000000); // 16MB
+            decompression_state.graphics_buffer = malloc(GRAPHICS_BUFFER_SIZE);
             if (decompression_state.graphics_buffer) {
                 decompression_state.lookup = malloc(lookup_bytes);
                 if (decompression_state.lookup) {
                     decompression_state.tables = malloc(table_bytes);
                     if (decompression_state.tables) {
                         memset(decompression_state.tables, 0, table_bytes);
+                        decompression_state.buffered_cache_enabled = true;
                         decompression_state.rom_crc32 = CRC32;
                         load_decompression_state();
                     } else {
@@ -638,6 +609,7 @@ static bool SPC7110_init_decompression_state()
             decompression_state.graphics_buffer = graphics_buffer;
             decompression_state.tables = tables;
             decompression_state.lookup = lookup;
+            decompression_state.buffered_cache_enabled = true;
 
             memset(decompression_state.tables, 0, table_bytes);
             decompression_state.rom_crc32 = CRC32;
@@ -648,7 +620,7 @@ static bool SPC7110_init_decompression_state()
     return (decompression_state.graphics_buffer);
 }
 
-void SPC7110_deinit_decompression_state()
+void SPC7110_deinit_decompression_state(void)
 {
     if (decompression_state.graphics_buffer) {
         save_decompression_state();
@@ -661,7 +633,22 @@ void SPC7110_deinit_decompression_state()
     }
 }
 
-static void get_lookup(uint32_t address)
+static void init_non_buffered_decompression(uint32_t address, uint8_t entry, uint16_t skip_amount);
+static uint8_t read_non_buffered_decompress(uint8_t byte);
+static uint8_t read_non_buffered_current(uint8_t byte);
+
+void (*init_decompression)(uint32_t address, uint8_t entry, uint16_t skip_amount);
+uint8_t (*read_decompress)(uint8_t byte);
+
+static void disable_buffered_decompression(void)
+{
+    decompression_state.buffered_cache_enabled = false;
+    decompression_state.table_current = 0;
+    init_decompression = init_non_buffered_decompression;
+    read_decompress = read_non_buffered_decompress;
+}
+
+static bool get_lookup(uint32_t address)
 {
     int low = 0,
         high = decompression_state.lookup_used - 1,
@@ -682,12 +669,17 @@ static void get_lookup(uint32_t address)
     }
 
     if (!decompression_state.table_current) {
+        if (decompression_state.lookup_used >= LOOKUP_AMOUNT) {
+            return false;
+        }
         memmove(decompression_state.lookup + (low + 1), decompression_state.lookup + low, (decompression_state.lookup_used - low) * sizeof(struct address_lookup));
         ++decompression_state.lookup_used;
         decompression_state.lookup[low].address = address;
         decompression_state.table_current = decompression_state.lookup[low].table = decompression_state.tables + decompression_state.table_used;
         decompression_state.table_used += TABLE_AMOUNT;
     }
+
+    return true;
 }
 
 static void init_buffered_decompression(uint32_t address, uint8_t entry, uint16_t skip_amount)
@@ -697,6 +689,11 @@ static void init_buffered_decompression(uint32_t address, uint8_t entry, uint16_
         if (decompression_state.last_address && // Check that there was indeed a last decompression
             !decompression_state.table_current->length) // And it exceeded the known length
         {
+            if (decompression_state.graphics_buffer_used > GRAPHICS_BUFFER_SIZE || decompression_state.decompression_used_length > GRAPHICS_BUFFER_SIZE - decompression_state.graphics_buffer_used) {
+                disable_buffered_decompression();
+                init_non_buffered_decompression(address, entry, skip_amount);
+                return;
+            }
             decompression_state.table_current->length = decompression_state.decompression_used_length;
             decompression_state.graphics_buffer_used += decompression_state.decompression_used_length;
         }
@@ -709,10 +706,19 @@ static void init_buffered_decompression(uint32_t address, uint8_t entry, uint16_
             decompression_state.compression_begin = romdata + 0x100000 + READ_WORD24_BE(spc7110_table);
             decompression_state.decompression_used_length = skip_amount << decompression_state.compression_mode;
 
-            get_lookup(address);
+            if (!get_lookup(address)) {
+                disable_buffered_decompression();
+                init_non_buffered_decompression(address, entry, skip_amount);
+                return;
+            }
             decompression_state.table_current += entry;
 
             if (!decompression_state.table_current->length) {
+                if (decompression_state.graphics_buffer_used > GRAPHICS_BUFFER_SIZE || decompression_state.decompression_used_length > GRAPHICS_BUFFER_SIZE - decompression_state.graphics_buffer_used) {
+                    disable_buffered_decompression();
+                    init_non_buffered_decompression(address, entry, skip_amount);
+                    return;
+                }
                 decompression_state.table_current->data = decompression_state.graphics_buffer + decompression_state.graphics_buffer_used;
                 InitDecompression(decompression_state.compression_mode, decompression_state.compression_begin);
                 DecompressSkipBytesBuffer(decompression_state.table_current->data, decompression_state.decompression_used_length);
@@ -729,6 +735,9 @@ static uint8_t read_buffered_decompress(uint8_t byte)
         if (decompression_state.table_current->length && // There is a known length
             decompression_state.table_current->length <= decompression_state.decompression_used_length) // And it's about to exceed it
         {
+            if (decompression_state.graphics_buffer_used > GRAPHICS_BUFFER_SIZE || decompression_state.decompression_used_length >= GRAPHICS_BUFFER_SIZE - decompression_state.graphics_buffer_used) {
+                return read_non_buffered_current(byte);
+            }
             decompression_state.table_current->data = decompression_state.graphics_buffer + decompression_state.graphics_buffer_used;
             decompression_state.table_current->length = 0;
 
@@ -737,6 +746,10 @@ static uint8_t read_buffered_decompress(uint8_t byte)
 
             // puts("Exceeded previous known length");
         } else if (!decompression_state.table_current->length) {
+            if (decompression_state.graphics_buffer_used > GRAPHICS_BUFFER_SIZE || decompression_state.decompression_used_length >= GRAPHICS_BUFFER_SIZE - decompression_state.graphics_buffer_used) {
+                disable_buffered_decompression();
+                return read_non_buffered_decompress(byte);
+            }
             decompression_state.table_current->data[decompression_state.decompression_used_length] = DecompressByte();
         }
 
@@ -767,11 +780,23 @@ static uint8_t read_non_buffered_decompress(uint8_t byte)
     return (byte);
 }
 
-void copy_spc7110_state_data(uint8_t** buffer, void (*copy_func)(unsigned char**, void*, size_t), bool load)
+static uint8_t read_non_buffered_current(uint8_t byte)
 {
-    copy_func(buffer, &decompression_state.last_address, 3);
-    copy_func(buffer, &decompression_state.last_entry, sizeof(uint8_t));
-    copy_func(buffer, &decompression_state.decompression_used_length, sizeof(uint16_t));
+    uint16_t decompression_used_length = decompression_state.decompression_used_length;
+
+    disable_buffered_decompression();
+    InitDecompression(decompression_state.compression_mode, decompression_state.compression_begin);
+    DecompressSkipBytes(decompression_used_length);
+    decompression_state.decompression_used_length = decompression_used_length;
+
+    return read_non_buffered_decompress(byte);
+}
+
+void copy_spc7110_state_data(uint8_t** buf, void (*copy_func)(unsigned char**, void*, size_t), bool load)
+{
+    copy_func(buf, &decompression_state.last_address, 3);
+    copy_func(buf, &decompression_state.last_entry, sizeof(uint8_t));
+    copy_func(buf, &decompression_state.decompression_used_length, sizeof(uint16_t));
 
     if (load && decompression_state.last_address) {
         uint32_t last_address = decompression_state.last_address;
@@ -782,7 +807,7 @@ void copy_spc7110_state_data(uint8_t** buffer, void (*copy_func)(unsigned char**
         decompression_state.last_entry = 0;
         decompression_state.decompression_used_length = 0;
 
-        if (decompression_state.graphics_buffer) {
+        if (decompression_state.graphics_buffer && decompression_state.buffered_cache_enabled) {
             init_buffered_decompression(last_address, last_entry, 0);
         } else {
             init_non_buffered_decompression(last_address, last_entry, 0);
@@ -810,13 +835,10 @@ B - Decompression control register
 C - Decompression status
 */
 
-void (*init_decompression)(uint32_t address, uint8_t entry, uint16_t skip_amount);
-uint8_t (*read_decompress)(uint8_t byte);
-
-void SPC7110initC()
+void SPC7110initC(void)
 {
     memset(SPCCompressionRegs, 0, 0x0C);
-    if (SPC7110_init_decompression_state()) {
+    if (SPC7110_init_decompression_state() && decompression_state.buffered_cache_enabled) {
         init_decompression = init_buffered_decompression;
         read_decompress = read_buffered_decompress;
     } else {
@@ -827,13 +849,13 @@ void SPC7110initC()
 
 // DECOMPRESSED DATA CONTINUOUS READ PORT
 // Returns a decompressed value from bank $50 and decrements 16 bit counter value at $4809/A by 1
-void SPC7110_4800()
+void SPC7110_4800(void)
 {
     WRITE_WORD16_LE(SPCCompressionRegs + 9, READ_WORD16_LE(SPCCompressionRegs + 9) - 1);
     SPCCompressionRegs[0] = read_decompress(SPCCompressionRegs[0]);
 }
 
-void SPC7110_4806w()
+void SPC7110_4806w(void)
 {
     init_decompression(READ_WORD24_LE(SPCCompressionRegs + 1), SPCCompressionRegs[4], READ_WORD16_LE(SPCCompressionRegs + 5));
     SPCCompressionRegs[0xC] = 0x80;

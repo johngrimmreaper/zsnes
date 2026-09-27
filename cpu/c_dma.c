@@ -4,17 +4,54 @@
 #include "c_dma.h"
 #include "../initc.h"
 #include "../ui.h"
+#include "memseam.h"
 #include "memtable.h"
 
 u1 AddrNoIncr = 0;
 
+/* A general-purpose DMA moves one byte per eight master cycles and holds the
+   CPU off the bus while it runs, so a large transfer spans scanlines. The
+   balance is kept in master cycles - the scanline budget's own unit varies
+   with the SA-1 paths - and a scanline is 1364 of them. cpu/c_execute.c parks
+   the 65816 until it is gone; cpu/c_execloop.c draws it down a line at a
+   time. */
+u4 dmaowedcyc = 0;
+
+static void dma_charge(u4 const bytes)
+{
+    dmaowedcyc += bytes * 8u;
+}
+
+/* HDMA takes the bus too, but a slice at a time: eighteen master cycles for
+   the scanline while any channel is on, eight more for each channel it
+   visits, and eight a byte. */
+static void hdma_charge_line(void)
+{
+    dmaowedcyc += 18u;
+}
+
+static void hdma_charge_channel(u4 const bytes)
+{
+    dmaowedcyc += 8u + bytes * 8u;
+}
+
+/* An I/O register handler takes the address through the seam (cpu/memseam.h).
+   The seam is put back around the call: a DMA runs inside the register write
+   that started it, and the handler that is still on the stack out there reads
+   its own value back out afterwards. A read leaves MemSeamA alone on the way
+   in, which is what the assembly did with eax. */
 static u1 read_reg(eop* const reg, u2 const address)
 {
+    uintptr_t const b = MemSeamB, c = MemSeamC, a = MemSeamA, d = MemSeamD;
     u1 al;
-    __asm__ volatile("call %A1"
-                 : "=a"(al)
-                 : "rm"(reg), "c"(address)
-                 : "cc", "memory", "ebx");
+
+    MemSeamC = address;
+    reg();
+    al = (u1)MemSeamA;
+    MemSeamB = b;
+    MemSeamC = c;
+    MemSeamA = a;
+    MemSeamD = d;
     return al;
 }
 
@@ -49,12 +86,9 @@ static void transdmappu2cpu(u1 const al, DMAInfo* const esi)
     u2 cx = esi->offset;
     esi->count = 0;
 
-#if 0 // XXX seems to be unused in the loop
-	u1 const* const esi = (cx & 0x8000 ? snesmmap : snesmap2)[curbank];
-#endif
-
     // Do loop
     u4 edx = dx != 0 ? dx : 65536;
+    dma_charge(edx);
     while (edx > 4) {
         memw8no_rom(curbank, cx, read_reg(regptr_, cx));
         cx += addrincr;
@@ -86,8 +120,15 @@ static void transdmappu2cpu(u1 const al, DMAInfo* const esi)
 
 static inline void write_reg(eop* const reg, u2 const address, u1 const val)
 {
-    __asm__ volatile("call %A0" ::"rm"(reg), "c"(address), "a"(val)
-                 : "cc", "memory", "ebx");
+    uintptr_t const b = MemSeamB, c = MemSeamC, a = MemSeamA, d = MemSeamD;
+
+    MemSeamC = address;
+    MemSeamA = val;
+    reg();
+    MemSeamB = b;
+    MemSeamC = c;
+    MemSeamA = a;
+    MemSeamD = d;
 }
 
 static void transdma(DMAInfo* const esi)
@@ -121,7 +162,7 @@ static void transdma(DMAInfo* const esi)
     u1 const* const edi = addrwrite[mode];
 
     // Pointer address of registers
-    eop* const regptra = REGPTW(0x2100 + esi->destination + edi[0]); // PPU memory - 21xx
+    eop* const regptr_ = REGPTW(0x2100 + esi->destination + edi[0]); // PPU memory - 21xx
     eop* const regptrb = REGPTW(0x2100 + esi->destination + edi[1]); // PPU memory - 21xx
     eop* const regptrc = REGPTW(0x2100 + esi->destination + edi[2]); // PPU memory - 21xx
     eop* const regptrd = REGPTW(0x2100 + esi->destination + edi[3]); // PPU memory - 21xx
@@ -131,15 +172,12 @@ static void transdma(DMAInfo* const esi)
     u2 cx = esi->offset;
     esi->count = 0;
 
-#if 0 // XXX seems to be unused in the loop
-	u1 const* const esi = (cx & 0x8000 ? snesmmap : snesmap2)[curbank];
-#endif
-
     // Do loop
     u4 edx = dx != 0 ? dx : 65536;
+    dma_charge(edx);
     while (edx > 4) {
         u1 const vala = memr8(curbank, cx);
-        write_reg(regptra, cx += addrincr, vala);
+        write_reg(regptr_, cx += addrincr, vala);
         u1 const valb = memr8(curbank, cx);
         write_reg(regptrb, cx += addrincr, valb);
         u1 const valc = memr8(curbank, cx);
@@ -149,7 +187,7 @@ static void transdma(DMAInfo* const esi)
         edx -= 4;
     }
     u1 const vala = memr8(curbank, cx);
-    write_reg(regptra, cx += addrincr, vala);
+    write_reg(regptr_, cx += addrincr, vala);
     if (--edx != 0) {
         u1 const valb = memr8(curbank, cx);
         write_reg(regptrb, cx += addrincr, valb);
@@ -167,10 +205,10 @@ static void transdma(DMAInfo* const esi)
     AddrNoIncr = 0;
 }
 
-void c_reg420Bw(u4 eax)
+void c_reg420Bw(u1 const al)
 {
-    DMAInfo* esi = dmadata;
-    for (eax &= 0xFF; eax != 0; ++esi, eax >>= 1) {
+    DMAInfo* esi = (DMAInfo*)dmadata;
+    for (u4 eax = al; eax != 0; ++esi, eax >>= 1) {
         if (eax & 0x01)
             transdma(esi);
     }
@@ -214,15 +252,14 @@ void setuphdma(u4 const ah, HDMAInfo* const edx, DMAInfo* const esi)
     hdmatype |= ah;
 }
 
-void c_reg420Cw(u4 eax)
+void c_reg420Cw(u1 const al)
 {
-    u1 const al = eax;
     curhdma = al;
     // [sneed] fix games that use double HDMA.
     if (curypos < resolutn && (!(INTEnab & 0x10) || (80 <= HIRQLoc && HIRQLoc <= 176))) {
         nexthdma = al;
         if (al != 0x00) {
-            DMAInfo* esi = dmadata;
+            DMAInfo* esi = (DMAInfo*)dmadata;
             HDMAInfo* edx = hdmadata;
             for (u1 i = 0x01; i != 0; ++esi, ++edx, i <<= 1) {
                 if (al & i)
@@ -272,7 +309,7 @@ void starthdma(void)
     if (al == 0x00)
         return;
 
-    DMAInfo* esi = dmadata;
+    DMAInfo* esi = (DMAInfo*)dmadata;
     HDMAInfo* edx = hdmadata;
     for (u1 i = 0x01; i != 0; ++esi, ++edx, i <<= 1) {
         if (al & i)
@@ -282,13 +319,14 @@ void starthdma(void)
 
 static void hdmatype2indirect(HDMAInfo const* const edx, DMAInfo* const esi)
 {
+    hdma_charge_channel(edx->count);
     u1 tempdecr = edx->count;
-    eop* const* reg = edx->dst_reg;
+    u4 n = 0;
     do {
         u2 const cx = esi->count++; // increment/decrement/keep pointer location
         u1 const al = memr8(esi->hdma_bank, cx);
-        write_reg(*reg, cx, al);
-    } while (++reg, --tempdecr != 0);
+        write_reg(edx->dst_reg[n], cx, al);
+    } while (++n, --tempdecr != 0);
 
     --esi->hdma_line_counter;
 }
@@ -312,13 +350,14 @@ static void indirectaddr(u4 const ah, HDMAInfo* const edx, DMAInfo* const esi)
         if (esi->hdma_line_counter > 0x80)
             goto hdmatype2indirect;
 
+        hdma_charge_channel(edx->count);
         u1 tempdecr = edx->count;
         u2 cx = esi->count; // increment/decrement/keep pointer location
-        eop* const* reg = edx->dst_reg;
+        u4 n = 0;
         do {
             u1 const al = memr8(esi->hdma_bank, cx);
-            write_reg(*reg, cx, al);
-        } while (++cx, ++reg, --tempdecr != 0);
+            write_reg(edx->dst_reg[n], cx, al);
+        } while (++cx, ++n, --tempdecr != 0);
     } else if (esi->hdma_line_counter & 0x80) {
     hdmatype2indirect:
         hdmatype2indirect(edx, esi);
@@ -331,13 +370,14 @@ static void indirectaddr(u4 const ah, HDMAInfo* const edx, DMAInfo* const esi)
 
 static void hdmatype2(HDMAInfo* const edx, DMAInfo* const esi)
 {
+    hdma_charge_channel(edx->count);
     u1 tempdecr = edx->count;
-    eop* const* reg = edx->dst_reg;
+    u4 n = 0;
     do {
         u2 const cx = edx->addr_inc++; // increment/decrement/keep pointer location
         u1 const al = memr8(esi->bank, cx);
-        write_reg(*reg, cx, al);
-    } while (++reg, --tempdecr != 0);
+        write_reg(edx->dst_reg[n], cx, al);
+    } while (++n, --tempdecr != 0);
 
     esi->hdma_table = edx->addr_inc;
     --esi->hdma_line_counter;
@@ -367,13 +407,14 @@ static void dohdma(u4 const ah, HDMAInfo* const edx, DMAInfo* const esi)
         if (esi->hdma_line_counter > 0x80)
             goto hdmatype2;
 
+        hdma_charge_channel(edx->count);
         u1 tempdecr = edx->count;
         u2 cx = edx->addr_inc;
-        eop* const* reg = edx->dst_reg;
+        u4 n = 0;
         do {
             u1 const al = memr8(esi->bank, cx);
-            write_reg(*reg, cx, al);
-        } while (++cx, ++reg, --tempdecr != 0);
+            write_reg(edx->dst_reg[n], cx, al);
+        } while (++cx, ++n, --tempdecr != 0);
     } else if (esi->hdma_line_counter & 0x80) {
     hdmatype2:
         hdmatype2(edx, esi);
@@ -388,8 +429,10 @@ static void exechdmars(void)
 {
     u1 const al = nexthdma;
     if (al != 0x00) {
-        DMAInfo* esi = dmadata;
+        DMAInfo* esi = (DMAInfo*)dmadata;
         HDMAInfo* edx = hdmadata;
+
+        hdma_charge_line();
         for (u1 i = 0x01; i != 0; ++esi, ++edx, i <<= 1) {
             if (!(al & i))
                 continue;
@@ -411,7 +454,9 @@ void exechdma(void)
     if (al == 0x00)
         return;
 
-    DMAInfo* esi = dmadata;
+    hdma_charge_line();
+
+    DMAInfo* esi = (DMAInfo*)dmadata;
     HDMAInfo* edx = hdmadata;
     for (u1 i = 0x01; i != 0; ++esi, ++edx, i <<= 1) {
         if (al & i)

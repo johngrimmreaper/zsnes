@@ -2,18 +2,17 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../asm_call.h"
 #include "../c_intrf.h"
 #include "../c_vcache.h"
-#include "../cfg.h"
 #include "../chips/msu1emu.h"
 #include "../cpu/dspproc.h"
 #include "../cpu/execute.h"
 #include "../gblvars.h"
 #include "../gui/c_gui.h"
-#include "../input.h"
 #include "../intrf.h"
 #include "../link.h"
+#include "cfg.h"
+#include "input.h"
 #ifndef lengthof
 #define lengthof(x) (sizeof(x) / sizeof *(x))
 #endif
@@ -185,6 +184,55 @@ static void InitializeGfxStuff(void)
     vesa2_clbit ^= 0xFFFF;
     genfulladdtab();
     Init_2xSaI(converta != 1 ? 565 : 555);
+}
+
+/* The Windows port opens on whichever display Windows gives it and has no
+   display enumeration of its own, so it reports one monitor and no HDR. The
+   GUI's Monitors tab and the -mo flag then have a single entry to show rather
+   than an empty list. */
+u4 VideoMonitorCount(void)
+{
+    return 1;
+}
+
+char const* VideoMonitorName(u4 const i)
+{
+    (void)i;
+    return "Primary display";
+}
+
+void VideoMonitorID(u4 const i, char* const out, u4 const len)
+{
+    (void)i;
+    if (out && len) {
+        snprintf(out, len, "%s", "primary");
+    }
+}
+
+u4 VideoMonitorSelected(void)
+{
+    return 0;
+}
+
+void VideoMonitorSelect(u4 const i)
+{
+    (void)i;
+}
+
+int VideoMonitorIsHDR(u4 const i)
+{
+    (void)i;
+    return 0;
+}
+
+int VideoMonitorHDR(void)
+{
+    return 0;
+}
+
+int VideoSettingsLive(void)
+{
+    return 0;
 }
 
 void initvideo(void)
@@ -478,7 +526,7 @@ u4 const NumVideoModes = lengthof(GUIVideoModeNames);
  *                 0                   1                   2                   3                   4                   5
  *                 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 */
 u1 GUIBIFIL[] = { _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X };
-u1 GUIDSIZE[] = { _, _, _, X, _, X, X, X, _, _, X, _, X, _, X, X, _, X, _, X, X, _, X, _, X, _, X, X, _, X, _, X, X, _, X, X, X, _, X, X, _, _, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X };
+u1 GUIDSIZE[] = { _, _, X, X, _, X, X, X, _, _, X, _, X, _, X, X, _, X, _, X, X, _, X, _, X, _, X, X, _, X, _, X, X, _, X, X, X, _, X, X, _, _, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X };
 u1 GUIDSMODE[] = { _, _, _, _, _, X, _, X, _, _, _, _, X, _, _, X, _, X, _, _, X, _, _, _, X, _, _, X, _, X, _, _, X, _, X, _, X, _, X, X, _, _, _, _, X, X, _, X, X, X, X, _, X, X, X, X, X, X, X, X };
 u1 GUIHQ2X[] = { _, _, _, X, _, X, X, X, _, _, X, _, X, _, X, X, _, X, _, X, X, _, X, _, X, _, X, X, _, X, _, X, X, _, X, X, X, _, X, X, _, _, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X };
 u1 GUIHQ3X[] = { _, _, _, _, _, _, _, _, _, _, X, _, X, _, X, X, _, X, _, X, X, _, X, _, X, _, X, X, _, X, _, X, X, _, X, X, X, _, X, X, _, _, X, _, _, _, X, X, X, X, X, X, X, X, X, X, X, X, X, X };

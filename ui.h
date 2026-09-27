@@ -40,7 +40,7 @@ extern u1* vram; // vram = 65536
 extern u1 vrama[65536];
 extern u1* wramdata; // stack (64K = 65536)
 extern u2 VolumeConvTable[32768];
-extern u2 fulladdtab[65536];
+extern u2 fulladdtab[65537];
 extern u2 selcA000;
 
 void MultiMouseProcess(void);
@@ -50,5 +50,30 @@ extern u1 mouse;
 extern u2 MouseButtons[2];
 extern u2 MouseMoveX[2];
 extern u2 MouseMoveY[2];
+
+/* Exact sizes. The assembly's page of padding on each buffer is what hid every
+   overrun found so far from AddressSanitizer - a read into your own slack is
+   not a report. Tails that are really used are named below. */
+enum {
+    BITCONV32_BYTES = 65536 * 4,
+    RGBTOYUV_BYTES = 65536 * 4,
+    /* Four bytes of decoded sample per byte of SPC RAM, plus one BRR block:
+       a block that starts in the last nine bytes decodes past the 64K mark. */
+    SPCBUFFER_BYTES = 65536 * 4 + 64,
+    SPRITETABLE_BYTES = 256 * 64 * 12, /* 64 SpriteInfo per line; 12 bytes is the 64-bit size */
+    /* The EXTBG mode 7 writers stash a priority byte per pixel at line +
+       75036*8 and hi-res mode 7 draws its second field 75036*4 further in, so
+       the tail has to leave room for both at once. */
+    VIDBUFFER_BYTES = 512 * 296 * 4 + 512 * 296 + 75036 * 4,
+    VIDBUFFER2_BYTES = 288 * 2 * 256,
+    NGWIN_BYTES = 256 * 224,
+    VIDBUFFERD_BYTES = 1024 * 296,
+    VCACHE2S_BYTES = 65536 * 4 * 4,
+    VCACHE4S_BYTES = 65536 * 4 * 2,
+    VCACHE8S_BYTES = 65536 * 4,
+    VCACHE2_BYTES = 262144,
+    VCACHE4_BYTES = 131072,
+    VCACHE8_BYTES = 65536
+};
 
 #endif

@@ -19,22 +19,30 @@ esac; done
 [ -n "$ROM" ] || { echo "usage: zab.sh -r ROM [-R REV] [-i SCRIPT] [-s SLOT] [-t SECS]" >&2; exit 2; }
 
 ROOT=$(git rev-parse --show-toplevel) || exit 2
-WT=$ROOT/.claude/worktrees/_ab_baseline
+# Scratch worktrees live outside the checkout: a second build tree inside it
+# shows up as untracked files and gets picked up by tools that walk the repo.
+# Keyed by user so two people on one machine do not collide.
+WTBASE=${TMPDIR:-/tmp}/zsnes-harness-$(id -u)
+WT=$WTBASE/ab_baseline
+mkdir -p "$WTBASE"
+git -C "$ROOT" worktree prune
 OUT=$ROOT/test/harness/out; mkdir -p "$OUT"
 
 echo "=== building baseline $REV ==="
 git -C "$ROOT" worktree remove --force "$WT" 2>/dev/null
 git -C "$ROOT" worktree add --detach "$WT" "$REV" >/dev/null 2>&1 || { echo "worktree add failed"; exit 1; }
-if ! make -C "$WT" -j"$(nproc)" >"$OUT/baseline_build.log" 2>&1; then
+if ! make -C "$WT" WITH_DEBUG_HOOKS=1 -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4)" >"$OUT/baseline_build.log" 2>&1; then
     echo "BASELINE BUILD FAILED - see $OUT/baseline_build.log"; exit 1
 fi
 echo "=== building candidate (working tree) ==="
-if ! make -C "$ROOT" -j"$(nproc)" >"$OUT/candidate_build.log" 2>&1; then
+if ! make -C "$ROOT" WITH_DEBUG_HOOKS=1 -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4)" >"$OUT/candidate_build.log" 2>&1; then
     echo "CANDIDATE BUILD FAILED - see $OUT/candidate_build.log"; exit 1
 fi
 
 H=$ROOT/test/harness/zrun.sh
-common=(-r "$ROM" -t "$SECS" -p 0)
+# -p 30: a PNG every 30 *emulated* frames. That is the only comparison here
+# that is not paced by the host clock - see the frame-indexed check below.
+common=(-r "$ROM" -t "$SECS" -p 30)
 [ -n "$INPUT" ] && common+=(-i "$INPUT")
 [ -n "$SLOT" ]  && common+=(-s "$SLOT")
 # zrun.sh bails before it clears its output directory, so a run that never
@@ -53,6 +61,32 @@ if [ "$distinct" -lt 10 ]; then
     echo "INCONCLUSIVE: baseline produced $distinct distinct states (<10) - it likely never booted. Re-run."
     exit 3
 fi
+
+# The authoritative comparison. zsnes_ppu.txt and zsnes_hashes.txt are written
+# once per *displayed* frame, so their line numbers are paced by the host clock;
+# two binaries of different speed - which a port always is - drift against each
+# other and report a difference that is not one. The PNGs are named for the
+# emulated frame that produced them, so matching names really are the same
+# point in the run. Compare those, and treat the streams below as a smoke test.
+python3 - "$OUT/base/png" "$OUT/cand/png" <<'PY'
+import sys, os, hashlib
+base, cand = sys.argv[1], sys.argv[2]
+if not (os.path.isdir(base) and os.path.isdir(cand)):
+    print("frames: NO PNGs (built without libpng?)")
+    raise SystemExit(0)
+def digest(d, n):
+    with open(os.path.join(d, n), "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
+common = sorted(set(os.listdir(base)) & set(os.listdir(cand)))
+bad = [n for n in common if digest(base, n) != digest(cand, n)]
+if not common:
+    print("frames: NO OVERLAP")
+elif bad:
+    print("FRAMES DIFFER: %d of %d, first %s" % (len(bad), len(common), bad[0]))
+else:
+    print("SAME: %d frames identical at matching emulated frame numbers"
+          % len(common))
+PY
 
 python3 - "$OUT/base" "$OUT/cand" <<'PY'
 import sys, os
@@ -73,10 +107,23 @@ for name in ("zsnes_ppu.txt", "zsnes_hashes.txt"):
     if first is None:
         print(f"SAME: {name} identical over {n} common frames (base {len(B)}, cand {len(C)})")
     else:
-        print(f"DIFFER: {name} diverges at frame {first+1} of {n} common")
-        print(f"   base: {B[first]}")
-        print(f"   cand: {C[first]}")
-        rc = 1
+        # The frame index is wall-clock paced, so the two runs do not always
+        # line up and a positional mismatch on its own is not a divergence -
+        # comparing an unmodified tree against itself hits this about one run
+        # in three. What settles it is the *content*: if neither side produced
+        # a frame the other never produced, the pixels are identical and only
+        # the timing moved.
+        onlyB = set(B) - set(C)
+        onlyC = set(C) - set(B)
+        if not onlyB and not onlyC:
+            print(f"SAME: {name} same {len(set(B))} distinct frames "
+                  f"(positional skew only, first at {first+1})")
+        else:
+            print(f"DIFFER: {name} diverges at frame {first+1} of {n} common; "
+                  f"{len(onlyB)} frames only in base, {len(onlyC)} only in cand")
+            print(f"   base: {B[first]}")
+            print(f"   cand: {C[first]}")
+            rc = 1
     if n < 500:
         print(f"   WARNING: only {n} common frames - raise -t for real coverage")
 sys.exit(rc)

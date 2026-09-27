@@ -1,17 +1,20 @@
-/* C port of the emulation-loop state block from cpu/execute.asm. The routines
-   that use it (execloop, pexecs, the rewind helpers) are still there; this is
-   only the data they and the rest of the emulator share.
-
-   Two ALIGN32 gaps inside the block are reproduced with an explicit 0x90 fill:
-   NASM's ALIGN pads with nop bytes even in a data section, so a plain .balign
-   would zero-fill and change the image. Emitted through one inline-asm block
-   (see asmdata.h) to pin the layout. */
+/* The emulation-loop state block from cpu/execute.asm. The two ALIGN32 gaps
+   are filled with 0x90 explicitly: NASM's ALIGN pads with nops even in a data
+   section, where .balign would zero-fill. One inline-asm block pins the
+   layout. */
 #include "../asmdata.h"
+
+/* Holds a host pointer, so the slot follows the pointer width. */
+/* A pointer-sized slot. The .balign belongs before the label: emitted after
+   it, the symbol names the padding rather than its own storage - four bytes
+   low on a 64-bit build, which aarch64 then cannot even address. */
+#define PTRSYM(sym) \
+    ".balign " ASM_STR(__SIZEOF_POINTER__) "\n" ASM_GSYM(sym) ".skip " ASM_STR(__SIZEOF_POINTER__) "\n"
 
 /* clang-format off */
 
 __asm__(
-    ASM_SEC_DATA(".data")
+    ASM_SEC_DATA_ALIGNED(".data")
     ASM_GSYM(tempedx)
     ".long 0\n"
     ASM_GSYM(tempesi)
@@ -58,6 +61,8 @@ __asm__(
     ".long 0\n"
     ASM_GSYM(oldhand8s)
     ".short 0\n"
+    /* 24 bytes from here are saved as one run; see zstate.c. */
+    ASM_GSYM(opcd_run)
     ASM_GSYM(opcd)
     ".long 0\n"
     ASM_GSYM(pdh)
@@ -66,7 +71,7 @@ __asm__(
     ".long 0\n"
     ASM_GSYM(timercount)
     ".long 0\n"
-    ASM_GSYM(initaddrl)
+    ASM_GSYM(initaddrlSt)
     ".long 0\n"
     ASM_GSYM(NetSent)
     ".long 0\n"
@@ -86,10 +91,14 @@ __asm__(
     ".long 0\n"
     ASM_GSYM(curexecstate)
     ".long 0\n"
+    /* These hold the 65816 program counter, which is a host pointer, so they
+       follow the pointer width. zstate.c copies four bytes of each, which is
+       the low half and all the save-state format ever carried. */
+    ".balign " ASM_STR(__SIZEOF_POINTER__) "\n"
     ASM_GSYM(nmiprevaddrl)   /* observed address -5 */
-    ".long 0\n"
+    ".skip " ASM_STR(__SIZEOF_POINTER__) "\n"
     ASM_GSYM(nmiprevaddrh)   /* observed address +5 */
-    ".long 0\n"
+    ".skip " ASM_STR(__SIZEOF_POINTER__) "\n"
     ASM_GSYM(nmirept)   /* NMI repeat check, if 6 then okay */
     ".long 0\n"
     ASM_GSYM(nmiprevline)   /* previous line */
@@ -118,6 +127,8 @@ __asm__(
     ".long 0\n"
     ASM_GSYM(NetCommand)
     ".long 0\n"
+    /* 40 bytes from here are saved as one run; see zstate.c. */
+    ASM_GSYM(spc700read_run)
     ASM_GSYM(spc700read)
     ".long 0\n"
     ASM_GSYM(lowestspc)
@@ -147,3 +158,8 @@ __asm__(
     ASM_SEC_END);
 
 /* clang-format on */
+
+__asm__(
+    ASM_SEC_BSS_ALIGNED(".bss")
+        PTRSYM(initaddrl)
+            ASM_SEC_END);

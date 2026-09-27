@@ -2,6 +2,7 @@
 #include "../cpu/regs.h"
 #include "../endmem.h"
 #include "../ui.h"
+#include "../unaligned.h"
 #include "../vcache.h"
 #include "makev16b.h"
 #include "newgfx.h"
@@ -376,8 +377,8 @@ void BackAreaFill(u4 const eax)
                     --edx;
                     u4 const ebx = BackAreaUnFillCol;
                     for (;;) {
-                        *(u4*)buf = ebx;
-                        *(u4*)(buf + 4) = ebx;
+                        st32u(buf, ebx);
+                        st32u(buf + 4, ebx);
                         buf += 8;
                         if (eax < 4)
                             return;
@@ -388,7 +389,7 @@ void BackAreaFill(u4 const eax)
                     }
                     edx -= 4;
                     eax -= edx + 1;
-                    buf += edx * 2 + 2;
+                    buf += (s4)(edx * 2u + 2u); /* edx just went negative: step back */
                 }
             }
 
@@ -396,8 +397,8 @@ void BackAreaFill(u4 const eax)
                 u4 edx = *edi++ - 1;
                 u4 const ebx = BackAreaFillCol;
                 for (;;) {
-                    *(u4*)buf = ebx;
-                    *(u4*)(buf + 4) = ebx;
+                    st32u(buf, ebx);
+                    st32u(buf + 4, ebx);
                     buf += 8;
                     if (eax < 4)
                         return;
@@ -408,15 +409,15 @@ void BackAreaFill(u4 const eax)
                 }
                 edx -= 4;
                 eax -= edx + 1;
-                buf += edx * 2 + 2;
+                buf += (s4)(edx * 2u + 2u); /* edx just went negative: step back */
             }
         }
     } else {
         u4 const ebx = BackAreaUnFillCol;
         u4 eax = 64;
         do {
-            *(u4*)buf = ebx;
-            *(u4*)(buf + 4) = ebx;
+            st32u(buf, ebx);
+            st32u(buf + 4, ebx);
             buf += 8;
         } while (--eax != 0);
     }

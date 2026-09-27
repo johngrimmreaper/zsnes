@@ -1,0 +1,431 @@
+#include "../gblhdr.h"
+#include "../link.h"
+#include "../video/copyvwin.h"
+#include "../video/filter.h"
+#include "cfg.h"
+#include "sdllink.h"
+#include <stdint.h>
+
+// VIDEO VARIABLES
+extern SDL_Window* sdl_window;
+extern SDL_Surface* surface;
+extern int SurfaceLocking;
+extern uint64_t BitDepth;
+
+// OPENGL VARIABLES
+static unsigned short* glvidbuffer = 0;
+static GLuint gltextures[4];
+/* What each texture is currently allocated as, so gl_upload knows whether it
+   can write into the existing storage. */
+static int gltexture_w[4], gltexture_h[4];
+static int gltexture256, gltexture512;
+static int glfilters = GL_NEAREST;
+static int glscanready = 0;
+extern Uint8 GUIOn2;
+
+extern uint8_t* vidbuffer;
+extern uint8_t curblank;
+extern uint8_t GUIRESIZE[];
+
+#ifdef __OPENGL__
+extern SDL_GLContext gl_context;
+#endif
+
+void gl_clearwin(void);
+
+void gl_scanlines(void);
+
+char CheckOGLMode(void);
+
+char allow_glvsync = 1;
+
+void SetGLAttributes(void)
+{
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    int const value = vsyncon ? 1 : 0;
+    SDL_GL_SetSwapInterval(value);
+    SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, 1);
+}
+
+int gl_start(int width, int height, int req_depth, int FullScreen)
+{
+    uint32_t flags = SDL_WINDOW_OPENGL;
+    int i;
+
+    flags |= (GUIRESIZE[cvidmode] ? SDL_WINDOW_RESIZABLE : 0);
+    flags |= (FullScreen ? SDL_WINDOW_FULLSCREEN : 0);
+
+    if (BilinearFilter) {
+        glfilters = GL_LINEAR;
+        if (GUIOn2 && !FilteredGUI) {
+            glfilters = GL_NEAREST;
+        }
+    } else {
+        glfilters = GL_NEAREST;
+    }
+
+    SurfaceX = width;
+    SurfaceY = height;
+    SetGLAttributes();
+
+    if (gl_context) {
+        SDL_GL_DestroyContext(gl_context);
+        gl_context = NULL;
+    }
+    if (sdl_window) {
+        SDL_PumpEvents();
+        SDL_DestroyWindow(sdl_window);
+    }
+    sdl_window = SDL_CreateWindow("ZSNES", SurfaceX, SurfaceY, flags);
+    PlaceWindowOnMonitor(sdl_window);
+    if (sdl_window == NULL) {
+        fprintf(stderr, "Could not create %dx%d-GL window.\n", SurfaceX, SurfaceY);
+        return false;
+    }
+
+    gl_context = SDL_GL_CreateContext(sdl_window);
+    if (gl_context == NULL) {
+        fprintf(stderr, "Could not create GL context: %s\n", SDL_GetError());
+        return false;
+    }
+
+    if (!glvidbuffer) {
+        /* Zeroed: the upload below hands the whole 512x512 texture over, and
+           a filtered picture only fills the rows the frame has. */
+        glvidbuffer = (unsigned short*)calloc(512 * 512, sizeof(short));
+        if (!glvidbuffer) {
+            fprintf(stderr, "Could not allocate the GL video buffer\n");
+            return false;
+        }
+    }
+    gl_clearwin();
+
+    // Grab mouse in fullscreen mode
+    SDL_SetWindowMouseGrab(sdl_window, FullScreen ? true : false);
+
+    SDL_HideCursor();
+
+    /* Setup some GL stuff */
+
+    glEnable(GL_TEXTURE_1D);
+    glEnable(GL_TEXTURE_2D);
+
+    glViewport(0, 0, SurfaceX, SurfaceY);
+
+    /*
+     * gltextures[0]: 2D texture, 256x224
+     * gltextures[1]: 2D texture, 512x224
+     * gltextures[3]: 1D texture, 256 lines of alternating alpha
+     */
+    glGenTextures(4, gltextures);
+    for (i = 0; i < 4; i++) {
+        gltexture_w[i] = gltexture_h[i] = 0;
+    }
+    for (i = 0; i < 3; i++) {
+        glBindTexture(GL_TEXTURE_2D, gltextures[i]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, glfilters);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, glfilters);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    }
+
+    if (sl_intensity) {
+        gl_scanlines();
+    }
+
+    return true;
+}
+
+/* Reallocating the texture every upload throws away the driver's storage and
+   makes it find new storage each frame. The size only changes when the video
+   mode does, so allocate on a change and write into the existing storage the
+   rest of the time. */
+static void gl_upload(int const tex, GLint const internal, int const w, int const h,
+    void const* const pixels)
+{
+    if (gltexture_w[tex] == w && gltexture_h[tex] == h) {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGB,
+            GL_UNSIGNED_SHORT_5_6_5, pixels);
+        return;
+    }
+    glTexImage2D(GL_TEXTURE_2D, 0, internal, w, h, 0, GL_RGB,
+        GL_UNSIGNED_SHORT_5_6_5, pixels);
+    gltexture_w[tex] = w;
+    gltexture_h[tex] = h;
+}
+
+void gl_end(void)
+{
+    if (glvidbuffer) {
+        glDeleteTextures(4, gltextures);
+        free(glvidbuffer);
+        glvidbuffer = 0;
+    }
+    if (gl_context) {
+        SDL_GL_DestroyContext(gl_context);
+        gl_context = NULL;
+    }
+    if (sdl_window) {
+        SDL_PumpEvents();
+        SDL_DestroyWindow(sdl_window);
+        sdl_window = NULL;
+    }
+}
+
+extern uint32_t NGNoTransp; /* a dword where it is defined (video/c_newgfx16data.c) */
+extern uint8_t SpecialLine[256]; /* 0 if lo-res, > 0 if hi-res; real size (see endmem) */
+
+void gl_clearwin(void)
+{
+    glClear(GL_COLOR_BUFFER_BIT);
+    memset(glvidbuffer, 0, 512 * 448 * 2);
+}
+
+/* Put a quad on the screen for the hi-res/lo-res span from `start` to `end`,
+   building the 256x256 / 512x256 textures if they do not exist yet. */
+static void gl_drawspan(int hires, int start, int end)
+{
+    int i, j;
+
+    switch (hires) {
+    case 0:
+        break;
+    case 3:
+    case 7:
+        hires = 2;
+        break;
+    default:
+        hires = 1;
+        break;
+    }
+
+    if (hires) {
+        if (hires != gltexture512) {
+            unsigned short* vbuf1 = (unsigned short*)vidbuffer + VID_FIRST;
+            unsigned short* vbuf2 = (unsigned short*)vidbuffer + VID_FIRST + 75036 * 2;
+            unsigned short* vbuf = glvidbuffer;
+
+            if (hires > 1) // mode 7
+            {
+                for (j = 224; j--;) {
+                    for (i = 256; i--;) {
+                        *vbuf++ = *vbuf1++;
+                    }
+                    for (i = 256; i--;) {
+                        *vbuf++ = *vbuf2++;
+                    }
+                    vbuf1 += 32;
+                    vbuf2 += 32;
+                }
+                glBindTexture(GL_TEXTURE_2D, gltextures[1]);
+                gl_upload(1, 3, 256, 512, glvidbuffer);
+
+                gltexture512 = 2;
+            } else {
+                for (j = 224; j--;) {
+                    for (i = 256; i--;) {
+                        *vbuf++ = *vbuf1++;
+                        *vbuf++ = *vbuf2++;
+                    }
+                    vbuf1 += 32;
+                    vbuf2 += 32; // skip the two 16-pixel-wide columns
+                }
+
+                glBindTexture(GL_TEXTURE_2D, gltextures[1]);
+                gl_upload(1, 3, 512, 256, glvidbuffer);
+
+                gltexture512 = 1;
+            }
+        }
+
+        glBindTexture(GL_TEXTURE_2D, gltextures[1]);
+        glBegin(GL_QUADS);
+        glTexCoord2f(0.0f, (224.0 / 256.0) * (start / 224.0));
+        glVertex2f(-1.0f, (112 - start) / 112.0);
+        glTexCoord2f(1.0f, (224.0 / 256.0) * (start / 224.0));
+        glVertex2f(1.0f, (112 - start) / 112.0);
+        glTexCoord2f(1.0f, (224.0 / 256.0) * (end / 224.0));
+        glVertex2f(1.0f, (112 - end) / 112.0);
+        glTexCoord2f(0.0f, (224.0 / 256.0) * (end / 224.0));
+        glVertex2f(-1.0f, (112 - end) / 112.0);
+        glEnd();
+    } else {
+        glBindTexture(GL_TEXTURE_2D, gltextures[0]);
+        if (!gltexture256) {
+            glPixelStorei(GL_UNPACK_SKIP_PIXELS, 16);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, VID_STRIDE);
+
+            gl_upload(0, 3, 256, 256, (unsigned short*)vidbuffer + VID_STRIDE);
+
+            glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+
+            gltexture256 = 1;
+        }
+
+        glBegin(GL_QUADS);
+        glTexCoord2f(0.0f, (224.0 / 256.0) * (start / 224.0));
+        glVertex2f(-1.0f, (112 - start) / 112.0);
+        glTexCoord2f(1.0f, (224.0 / 256.0) * (start / 224.0));
+        glVertex2f(1.0f, (112 - start) / 112.0);
+        glTexCoord2f(1.0f, (224.0 / 256.0) * (end / 224.0));
+        glVertex2f(1.0f, (112 - end) / 112.0);
+        glTexCoord2f(0.0f, (224.0 / 256.0) * (end / 224.0));
+        glVertex2f(-1.0f, (112 - end) / 112.0);
+        glEnd();
+    }
+}
+
+void gl_drawwin(void)
+{
+    int i;
+
+    NGNoTransp = 0; // Set this value to 1 within the appropriate
+    // Where a custom or hardware transparency routine would go. Only reachable
+    // with newengen == 1; see ProcessTransparencies (video/c_ngtransp.c).
+    UpdateVFrame();
+    if (curblank || !CheckOGLMode()) {
+        return;
+    }
+
+    /* The buffer and the quad below are fixed at 512x512, so only the filters
+       that make a 512 wide picture fit; VideoFilterDraw refuses the rest and
+       they fall through to the unfiltered path. */
+    if (VideoFilterDraw(VideoFilterGet(), glvidbuffer, 1024, 512u * 512u * 2u)) {
+        /* Display 1 512x448 quad for the 512x448 buffer */
+        glBindTexture(GL_TEXTURE_2D, gltextures[1]);
+        glTexEnvi(GL_TEXTURE_2D, GL_TEXTURE_ENV_MODE, GL_DECAL);
+        gl_upload(1, GL_RGB, 512, 512, glvidbuffer);
+
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_LIGHTING);
+        glDisable(GL_BLEND);
+
+        glBegin(GL_QUADS);
+        glTexCoord2f(0.0f, 0.0f);
+        glVertex3f(-1.0f, 1.0f, -1.0f);
+        glTexCoord2f(1.0f, 0.0f);
+        glVertex3f(1.0f, 1.0f, -1.0f);
+        glTexCoord2f(1.0f, 448.0f / 512.0f);
+        glVertex3f(1.0f, -1.0f, -1.0f);
+        glTexCoord2f(0.0f, 448.0f / 512.0f);
+        glVertex3f(-1.0f, -1.0f, -1.0f);
+        glEnd();
+    } else {
+        /*
+         * This code splits the hires/lores portions up, and draws
+         * them with gl_drawspan
+         */
+        int lasthires, lasthires_line = 0;
+
+        gltexture256 = gltexture512 = 0;
+
+        lasthires = SpecialLine[1];
+        for (i = 0; i < 224; i++) {
+            if (SpecialLine[i + 1]) {
+                if (lasthires) {
+                    continue;
+                }
+                gl_drawspan(lasthires, lasthires_line, i);
+
+                lasthires = SpecialLine[i + 1];
+                lasthires_line = i;
+            } else {
+                if (!lasthires) {
+                    continue;
+                }
+                gl_drawspan(lasthires, lasthires_line, i);
+
+                lasthires = SpecialLine[i + 1];
+                lasthires_line = i;
+            }
+        }
+
+        if (i - lasthires_line > 1) {
+            gl_drawspan(lasthires, lasthires_line, i);
+        }
+
+        /* Inside the filter branch only because the GUI does not let
+           scanlines be selected while a filter is on; nothing technical stops
+           it. Move this out if the GUI ever allows both. */
+        if (sl_intensity) {
+            glDisable(GL_TEXTURE_2D);
+            glEnable(GL_BLEND);
+
+            if (sl_intensity != glscanready) {
+                gl_scanlines();
+            }
+
+            glBlendFunc(GL_DST_COLOR, GL_ZERO);
+            glBindTexture(GL_TEXTURE_1D, gltextures[3]);
+            glBegin(GL_QUADS);
+            for (i = 0; i < SurfaceY; i += 256) {
+                glTexCoord1f(0.0f);
+                glVertex3f(-1.0f, (SurfaceY - i * 2.0) / SurfaceY, -1.0f);
+                glTexCoord1f(0.0f);
+                glVertex3f(1.0f, (SurfaceY - i * 2.0) / SurfaceY, -1.0f);
+                glTexCoord1f(1.0f);
+                glVertex3f(1.0f, (SurfaceY - (i + 256) * 2.0) / SurfaceY, -1.0f);
+                glTexCoord1f(1.0f);
+                glVertex3f(-1.0f, (SurfaceY - (i + 256) * 2.0) / SurfaceY, -1.0f);
+            }
+            glEnd();
+
+            glDisable(GL_BLEND);
+            glEnable(GL_TEXTURE_2D);
+        }
+    }
+#ifdef ZSNES_DEBUG_HOOKS
+    /* glReadPixels hands back the rows bottom up, so walk the destination
+       backwards to land the picture the right way round. */
+    if (ZSnesFrameDumpWanted()) {
+        int w = 0;
+        int h = 0;
+
+        SDL_GetWindowSizeInPixels(sdl_window, &w, &h);
+        if (w > 0 && h > 0) {
+            unsigned char* const rows = (unsigned char*)malloc((size_t)w * (size_t)h * 3);
+
+            if (rows) {
+                SDL_Surface* shot = SDL_CreateSurface(w, h, SDL_PIXELFORMAT_RGB24);
+
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, rows);
+                if (shot) {
+                    int y;
+
+                    for (y = 0; y < h; y++) {
+                        memcpy((unsigned char*)shot->pixels + (size_t)y * (size_t)shot->pitch,
+                            rows + (size_t)(h - 1 - y) * (size_t)w * 3, (size_t)w * 3);
+                    }
+                    ZSnesFrameDumpSurface(shot, "gl");
+                    SDL_DestroySurface(shot);
+                }
+                free(rows);
+            }
+        }
+    }
+#endif
+    SDL_GL_SwapWindow(sdl_window);
+}
+
+void gl_scanlines(void)
+{
+    GLubyte scanbuffer[256][4];
+    int i, j = (100 - sl_intensity) * 256 / 100;
+
+    for (i = 0; i < 256; i += 2) {
+        scanbuffer[i][0] = scanbuffer[i][1] = scanbuffer[i][2] = j;
+        scanbuffer[i][3] = 0xFF;
+
+        scanbuffer[i + 1][0] = scanbuffer[i + 1][1] = scanbuffer[i + 1][2] = 0xFF;
+        scanbuffer[i + 1][3] = 0xFF;
+    }
+
+    glBindTexture(GL_TEXTURE_1D, gltextures[3]);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA, 256, 0, GL_RGBA, GL_UNSIGNED_BYTE, scanbuffer);
+
+    glscanready = sl_intensity;
+}

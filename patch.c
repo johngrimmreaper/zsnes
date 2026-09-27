@@ -1,24 +1,3 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #ifdef __UNIXSDL__
 #include "gblhdr.h"
 #else
@@ -54,31 +33,31 @@ struct
     unsigned int buffer_total;
     unsigned int proccessed;
 
-    unzFile zipfile;
+    ZipFile* zipfile;
     FILE* fp;
 } IPSPatch;
 
-bool reloadBuffer()
+bool reloadBuffer(void)
 {
     if (IPSPatch.proccessed == IPSPatch.file_size) {
-        return (false);
+        return false;
     }
 
     IPSPatch.buffer_total = IPSPatch.fp ?
                                         /* Regular Files */ fread(IPSPatch.data, 1, BUFFER_SIZE, IPSPatch.fp)
                                         :
-                                        /* Zip Files     */ (unsigned int)unzReadCurrentFile(IPSPatch.zipfile, IPSPatch.data, BUFFER_SIZE);
+                                        /* Zip Files     */ (unsigned int)zip_read(IPSPatch.zipfile, IPSPatch.data, BUFFER_SIZE);
 
     IPSPatch.current = IPSPatch.data;
     if (IPSPatch.buffer_total && (IPSPatch.buffer_total <= BUFFER_SIZE)) {
-        return (true);
+        return true;
     }
 
     IPSPatch.buffer_total = 0;
-    return (false);
+    return false;
 }
 
-int IPSget()
+int IPSget(void)
 {
     int retVal;
     if (IPSPatch.current == IPSPatch.data + IPSPatch.buffer_total) {
@@ -102,7 +81,7 @@ bool initPatch(const char* ext)
         IPSPatch.fp = fopen_dir(ZRomPath, ZSaveName, "rb");
     }
     if (!IPSPatch.fp) {
-        return (false);
+        return false;
     }
 
     fseek(IPSPatch.fp, 0, SEEK_END);
@@ -112,10 +91,10 @@ bool initPatch(const char* ext)
     if ((IPSPatch.data = (unsigned char*)malloc(BUFFER_SIZE))) {
         return (reloadBuffer());
     }
-    return (false);
+    return false;
 }
 
-void deinitPatch()
+void deinitPatch(void)
 {
     if (IPSPatch.data) {
         free(IPSPatch.data);
@@ -128,8 +107,8 @@ void deinitPatch()
     }
 
     if (IPSPatch.zipfile) {
-        unzCloseCurrentFile(IPSPatch.zipfile);
-        unzClose(IPSPatch.zipfile);
+        zip_close_entry(IPSPatch.zipfile);
+        zip_close(IPSPatch.zipfile);
         IPSPatch.zipfile = 0;
     }
 }
@@ -139,22 +118,21 @@ bool PatchUsingIPS(const char* ext)
     unsigned char* ROM = (unsigned char*)romdata;
     int location = 0, length = 0, last = 0;
     int sub = Header512 ? 512 : 0;
+    bool valid = false;
 
     if (!AutoPatch) {
         deinitPatch(); // Needed if the call to this function was done from findZipIPS()
-        return (false);
+        return false;
     }
 
     if (!IPSPatch.zipfile) // Regular file, not Zip
     {
         if (!initPatch(ext)) {
             deinitPatch(); // Needed because if it didn't fully init, some things could have
-            return (false);
+            return false;
         }
     }
 
-    // Yup, it's goto! :)
-    // See 'IPSDone:' for explanation
     if (IPSget() != 'P') {
         goto IPSDone;
     }
@@ -170,10 +148,25 @@ bool PatchUsingIPS(const char* ext)
     if (IPSget() != 'H') {
         goto IPSDone;
     }
+    valid = true;
 
-    while (IPSPatch.proccessed != IPSPatch.file_size) {
+    while (IPSPatch.proccessed < IPSPatch.file_size) {
         // Location is a 3 byte value (max 16MB)
-        int inloc = (IPSget() << 16) | (IPSget() << 8) | IPSget();
+        int const loc_hi = IPSget();
+        int const loc_mid = IPSget();
+        int const loc_lo = IPSget();
+        int inloc;
+        int len_hi;
+        int len_lo;
+
+        /* A patch that stops mid-record - a truncated file, or a zip member
+           whose directory claims more than it holds - leaves the reader at its
+           end, where it stops advancing and reports -1. Reading on from there
+           shifted a negative and never reached file_size. */
+        if (loc_hi < 0 || loc_mid < 0 || loc_lo < 0) {
+            break;
+        }
+        inloc = (loc_hi << 16) | (loc_mid << 8) | loc_lo;
 
         if (inloc == 0x454f46) // EOF
         {
@@ -184,7 +177,12 @@ bool PatchUsingIPS(const char* ext)
         location = inloc - sub;
 
         // Length is a 2 byte value (max 64KB)
-        length = (IPSget() << 8) | IPSget();
+        len_hi = IPSget();
+        len_lo = IPSget();
+        if (len_hi < 0 || len_lo < 0) {
+            break;
+        }
+        length = (len_hi << 8) | len_lo;
 
         if (length) // Not RLE
         {
@@ -206,7 +204,13 @@ bool PatchUsingIPS(const char* ext)
         {
             int i;
             unsigned char newVal;
-            length = (IPSget() << 8) | IPSget();
+
+            len_hi = IPSget();
+            len_lo = IPSget();
+            if (len_hi < 0 || len_lo < 0) {
+                break;
+            }
+            length = (len_hi << 8) | len_lo;
             newVal = (unsigned char)IPSget();
             for (i = 0; i < length; i++, location++) {
                 if (location >= 0) {
@@ -222,12 +226,13 @@ bool PatchUsingIPS(const char* ext)
         }
     }
 
-// We use gotos to break out of the nested loops,
-// as well as a simple way to check for 'PATCH' in
-// some cases like this one, goto is the way to go.
 IPSDone:
 
     deinitPatch();
+
+    if (!valid) {
+        return false;
+    }
 
     IPSPatched = true;
 
@@ -237,38 +242,27 @@ IPSDone:
         NumofBanks = NumofBytes / 32768;
     }
 
-    /*
-  //Write out patched ROM
-  {
-    FILE *fp = 0;
-    fp = fopen_dir(ZCfgPath, "zsnes.rom", "wb");
-    if (!fp) { perror("zsnes.rom"); __asm__ volatile("int $3"); }
-    fwrite(ROM, 1, curromspace, fp);
-    fclose(fp);
-  }
-  */
-
-    return (true);
+    return true;
 }
 
 bool findZipIPS(char* compressedfile, const char* ext)
 {
     bool FoundIPS = false;
-    unz_file_info cFileInfo; // Create variable to hold info for a compressed file
+    uint32_t cFileSize = 0;
     int cFile;
 
     memset(&IPSPatch, 0, sizeof(IPSPatch));
 
-    IPSPatch.zipfile = unzopen_dir(ZRomPath, compressedfile); // Open zip file
-    cFile = unzGoToFirstFile(IPSPatch.zipfile); // Set cFile to first compressed file
+    IPSPatch.zipfile = zipopen_dir(ZRomPath, compressedfile); // Open zip file
+    cFile = zip_first(IPSPatch.zipfile); // Set cFile to first compressed file
 
-    while (cFile == UNZ_OK) // While not at end of compressed file list
+    while (cFile == ZIP_OK) // While not at end of compressed file list
     {
         // Temporary char array for file name
         char cFileName[256];
 
-        // Gets info on current file, and places it in cFileInfo
-        unzGetCurrentFileInfo(IPSPatch.zipfile, &cFileInfo, cFileName, 256, NULL, 0, NULL, 0);
+        // Name and size of the member the cursor is on
+        zip_entry(IPSPatch.zipfile, cFileName, 256, &cFileSize);
 
         // Find IPS file
         if (isextension(cFileName, ext)) {
@@ -277,14 +271,14 @@ bool findZipIPS(char* compressedfile, const char* ext)
         }
 
         // Go to next file in zip file
-        cFile = unzGoToNextFile(IPSPatch.zipfile);
+        cFile = zip_next(IPSPatch.zipfile);
     }
 
     if (FoundIPS) {
         // Open file
-        unzOpenCurrentFile(IPSPatch.zipfile);
+        zip_open_entry(IPSPatch.zipfile);
 
-        IPSPatch.file_size = (unsigned int)cFileInfo.uncompressed_size;
+        IPSPatch.file_size = (unsigned int)cFileSize;
         if ((IPSPatch.data = (unsigned char*)malloc(BUFFER_SIZE))) {
             reloadBuffer();
             return (PatchUsingIPS(0));
@@ -292,8 +286,8 @@ bool findZipIPS(char* compressedfile, const char* ext)
             deinitPatch();
         }
     } else {
-        unzClose(IPSPatch.zipfile);
+        zip_close(IPSPatch.zipfile);
         IPSPatch.zipfile = 0;
     }
-    return (false);
+    return false;
 }

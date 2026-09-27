@@ -1,16 +1,15 @@
 /*
- * chips/c_fxtable.c - SuperFX table initialisation, ported from chips/fxtable.asm.
+ * SuperFX table initialisation, from chips/fxtable.asm. InitFxTables() runs
+ * once from initc.c and fills the opcode dispatch tables, the PLOT jump
+ * tables, the bit-expansion lookups, the screen-line offsets and the memory
+ * map. Handlers are the bodies in chips/fx_ops.h; the tables hold raw
+ * addresses in endmem.c's u4 arrays, and CMODE patches entry $4C at run time.
  *
- * InitFxTables() is called once, from initc.c, and fills the SuperFX opcode
- * dispatch tables, the PLOT jump tables, the bit-expansion lookups, the
- * screen-line offset tables and the SuperFX memory map. The handlers are the C
- * bodies in chips/fx_ops.h; the dispatch tables still hold raw addresses in the
- * u4 arrays that endmem.c lays out, and CMODE patches entry $4C at run time.
- *
- * The d table is the one MainLoop threads through. Its bodies are the base
- * table's, except for STOP and for the 8bpp dithered PLOT variants, which the
- * assembly wired to the undithered code.
+ * MainLoop threads the d table, whose bodies are the base table's except STOP
+ * and the 8bpp dithered PLOT variants, which the assembly wired to the
+ * undithered code.
  */
+#include "../unaligned.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -162,7 +161,7 @@ extern fxop c_FxOpFCA2, c_FxOpFD, c_FxOpFDA1, c_FxOpFDA2, c_FxOpFE, c_FxOpFEA1, 
 extern fxop c_FxOpFFA2;
 
 /* Where the SuperFX screen-line offset tables ended up in SuperFX RAM. */
-u4 sfx128lineloc, sfx160lineloc, sfx192lineloc, sfxobjlineloc;
+zreg sfx128lineloc, sfx160lineloc, sfx192lineloc, sfxobjlineloc;
 
 /* SuperFX disassembly mnemonics, eight characters per entry, indexed by opcode
  * and ALT mode. The assembly stored them packed 8 bytes apart; nothing reads
@@ -1194,10 +1193,10 @@ char const sfxnametab[1024][9] = {
     "IWT R15 ",
 };
 
-#define A(x) ((u4)(uintptr_t)(x))
+#define A(x) ((zreg)(uintptr_t)(x))
 #define lengthof(x) (sizeof(x) / sizeof *(x))
 
-static void fill(u4* const dst, fxop* const* const src, u4 const n)
+static void fill(zreg* const dst, fxop* const* const src, u4 const n)
 {
     for (u4 i = 0; i != n; ++i)
         dst[i] = A(src[i]);
@@ -3282,7 +3281,7 @@ typedef struct {
     fxop* fn;
 } fxpatch;
 
-static void patch(u4* const dst, fxpatch const* const p, u4 const n)
+static void patch(zreg* const dst, fxpatch const* const p, u4 const n)
 {
     for (u4 i = 0; i != n; ++i)
         dst[p[i].idx] = A(p[i].fn);
@@ -3697,7 +3696,7 @@ static fxop* const plot_b[4][4] = {
     { c_FxOp4C1282bzd, c_FxOp4C1284bzd, c_FxOp4C1288bz, c_FxOp4C1288bzl }, /* bzd */
 };
 
-static void fill_plot(u4* const dst, fxop* const (*const src)[4])
+static void fill_plot(zreg* const dst, fxop* const (*const src)[4])
 {
     for (u4 i = 0; i != 64; ++i) {
         u4 const c = i & 3;

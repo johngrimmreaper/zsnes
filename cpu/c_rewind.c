@@ -1,22 +1,17 @@
 /*
- * cpu/c_rewind.c - rewind bookkeeping, ported from cpu/execute.asm.
- *
- * Both routines run inside the 65816 execute loop, where the core's register
- * ABI is live: esi is the 65816 PC pointer, edi the opcode table, ebp the SPC
- * program counter and edx the cycle/flag word. They do not just read those
- * registers, they *restore* them - a rewind swaps in a previously saved frame,
- * so the core has to resume from the registers that frame was saved with.
- *
- * cpu/execute.asm therefore keeps the ProcessRewind and UpdateRewind entry
- * points and reduces each to a pushad thunk; the register file is handed over
- * as a block and read and written in place. This is the same seam that
- * chips/sa1proc.asm uses for SA1Swap, and is deliberately not an attempt to
- * restructure execute() itself.
+ * Rewind bookkeeping, from cpu/execute.asm. Both routines run inside the 65816
+ * execute loop with the core's register ABI live - esi the PC pointer, edi the
+ * opcode table, ebp the SPC program counter, edx the cycle/flag word - and
+ * they *restore* those registers, because a rewind resumes from the ones the
+ * saved frame was taken with. Hence the register file is handed over as a
+ * block and written in place, the same seam SA1Swap uses.
  */
+#include "c_rewind.h"
 #include "../types.h"
 #include "c_memory.h" /* UpdateDPage */
-#include "c_rewind.h"
 #include "execute.h" /* pressed */
+
+extern u1 SPCRAM[];
 
 /* Order of the dwords pushad leaves on the stack, lowest address first. */
 enum { R_EDI,
@@ -41,7 +36,7 @@ void BackupCVFrame(void);
 void RestoreCVFrame(void);
 void BackupPauseFrame(void);
 
-void ProcessRewindC(u4* const r)
+void ProcessRewindC(zreg* const r)
 {
     u4 const key = KeyRewind;
     if (pressed[key] != 1)
@@ -55,14 +50,17 @@ void ProcessRewindC(u4* const r)
 
     UpdateDPage();
 
-    /* Resume the core from the state the restored frame was saved with. */
+    /* Resume the core from the state the restored frame was saved with. esi
+       and edi are rebuilt before the next instruction; ebp is the SPC700's
+       PC and is not, so it travels as an offset - the slot is four bytes and
+       a pointer into .bss is not, on the PIE targets. */
     r[R_ESI] = tempesi;
     r[R_EDI] = tempedi;
-    r[R_EBP] = tempebp;
+    r[R_EBP] = (zreg)(uintptr_t)SPCRAM + (tempebp & 0xFFFFu);
     r[R_EDX] = tempedx;
 }
 
-void UpdateRewindC(u4* const r)
+void UpdateRewindC(zreg* const r)
 {
     if (AllocatedRewindStates == 0 || KeyRewind == 0)
         return;
@@ -74,7 +72,7 @@ void UpdateRewindC(u4* const r)
         tempedx = r[R_EDX];
         tempesi = r[R_ESI];
         tempedi = r[R_EDI];
-        tempebp = r[R_EBP];
+        tempebp = (u4)(r[R_EBP] - (zreg)(uintptr_t)SPCRAM);
         BackupCVFrame();
     }
 

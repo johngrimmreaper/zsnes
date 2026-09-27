@@ -4,7 +4,9 @@
  * Covers: packet byte-swap roundtrip, magic constant, FNV1a hash,
  * UDP loopback send/recv, TCP loopback send/recv, desync detection logic.
  *
- * All logic is self-contained — no ZSNES object files needed.
+ * The packet codec is the emulator's own (net/packet.c), which is why that
+ * file exists: this test used to carry its own copy of the struct and the
+ * byte-swapping, and had drifted a field behind the real one.
  */
 
 #include <arpa/inet.h>
@@ -15,47 +17,47 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "zstest.h"
 
-/* Types mirroring c_guiwindp.c */
+/* usleep is gone from POSIX.1-2008; nanosleep replaced it. */
+static void zsleep_us(unsigned int const usec)
+{
+    struct timespec ts;
 
-typedef struct {
-    uint32_t magic;
-    uint32_t seq;
-    uint32_t joy;
-    uint32_t crc;
-} Packet;
+    ts.tv_sec = (time_t)(usec / 1000000u);
+    ts.tv_nsec = (long)(usec % 1000000u) * 1000L;
+    while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {
+    }
+}
 
-static const uint32_t NETP_MAGIC = 0x4E455450u; /* "NETP" */
+#include "../net/packet.h"
+#include "../net/znp.h"
+
+typedef NetplayPacket Packet;
+
+static const uint32_t NETP_MAGIC = NETPLAY_MAGIC;
 static const uint16_t TEST_PORT_UDP = 17845;
 static const uint16_t TEST_PORT_TCP = 17846;
 
-static void pkt_hton(Packet* p)
+/* The tests below send a decoded packet and read one back; on the wire it is
+   always NETPLAY_PACKET_BYTES big-endian bytes. */
+static void pkt_encode(uint8_t out[NETPLAY_PACKET_BYTES], Packet const* p)
 {
-    p->magic = htonl(p->magic);
-    p->seq = htonl(p->seq);
-    p->joy = htonl(p->joy);
-    p->crc = htonl(p->crc);
+    netplay_packet_encode(out, p);
 }
 
-static void pkt_ntoh(Packet* p)
+static int pkt_decode(Packet* out, uint8_t const in[NETPLAY_PACKET_BYTES])
 {
-    p->magic = ntohl(p->magic);
-    p->seq = ntohl(p->seq);
-    p->joy = ntohl(p->joy);
-    p->crc = ntohl(p->crc);
+    return netplay_packet_decode(out, in);
 }
 
 static uint32_t fnv1a(uint8_t const* data, int len)
 {
-    uint32_t h = 2166136261u;
-    for (int i = 0; i < len; i++) {
-        h ^= (uint32_t)data[i];
-        h *= 16777619u;
-    }
-    return h;
+    return netplay_fnv1a(data, (size_t)len);
 }
 
 /* Helpers */
@@ -130,20 +132,97 @@ static int recv_exact(int fd, void* buf, size_t n)
 
 /* Tests */
 
-static void test_packet_byteswap(void)
+static void test_packet_roundtrip(void)
 {
-    ZT_SECTION("packet byte-swap roundtrip");
+    ZT_SECTION("packet survives a trip through the wire format");
 
-    Packet p = { NETP_MAGIC, 42, 0xDEADBEEFu, 0xCAFEBABEu };
-    Packet orig = p;
+    Packet const orig = { NETP_MAGIC, 0x11223344u, 42, 0xDEADBEEFu, 0xCAFEBABEu };
+    uint8_t wire[NETPLAY_PACKET_BYTES];
+    Packet back;
 
-    pkt_hton(&p);
-    pkt_ntoh(&p);
+    pkt_encode(wire, &orig);
+    ZT_CHECK(pkt_decode(&back, wire));
+    ZT_CHECK(back.magic == orig.magic);
+    ZT_CHECK(back.session == orig.session);
+    ZT_CHECK(back.seq == orig.seq);
+    ZT_CHECK(back.joy == orig.joy);
+    ZT_CHECK(back.crc == orig.crc);
+}
 
-    ZT_CHECK(p.magic == orig.magic);
-    ZT_CHECK(p.seq == orig.seq);
-    ZT_CHECK(p.joy == orig.joy);
-    ZT_CHECK(p.crc == orig.crc);
+static void test_packet_wire_layout(void)
+{
+    ZT_SECTION("wire layout is five big-endian words");
+
+    Packet const p = { NETP_MAGIC, 0x01020304u, 0x05060708u, 0x090A0B0Cu,
+        0x0D0E0F10u };
+    uint8_t wire[NETPLAY_PACKET_BYTES];
+    uint8_t const expect[NETPLAY_PACKET_BYTES] = { 'N', 'E', 'T', 'P',
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10 };
+
+    pkt_encode(wire, &p);
+    ZT_CHECK(memcmp(wire, expect, sizeof(expect)) == 0);
+}
+
+static void test_packet_rejects_rubbish(void)
+{
+    ZT_SECTION("a packet that is not ours is refused");
+
+    uint8_t wire[NETPLAY_PACKET_BYTES];
+    Packet out;
+    unsigned i;
+
+    /* Anything at all on the port: the decoder has to say no rather than hand
+       back a packet built from someone else's datagram. */
+    memset(wire, 0, sizeof(wire));
+    ZT_CHECK(!pkt_decode(&out, wire));
+
+    for (i = 0; i < sizeof(wire); i++) {
+        wire[i] = (uint8_t)(i * 37u + 11u);
+    }
+    ZT_CHECK(!pkt_decode(&out, wire));
+
+    /* One bit off in the magic is still not ours. */
+    {
+        Packet const good = { NETP_MAGIC, 1, 2, 3, 4 };
+
+        pkt_encode(wire, &good);
+        ZT_CHECK(pkt_decode(&out, wire));
+        wire[3] ^= 0x01u;
+        ZT_CHECK(!pkt_decode(&out, wire));
+    }
+}
+
+static void test_handshake_recognised(void)
+{
+    ZT_SECTION("handshake is magic and session on frame zero");
+
+    Packet p = netplay_hello(0xABCDu, 0x1234u);
+
+    ZT_CHECK(netplay_packet_is_handshake(&p, 0xABCDu));
+    ZT_CHECK(!netplay_packet_is_handshake(&p, 0xABCEu));
+
+    p.seq = 1;
+    ZT_CHECK(!netplay_packet_is_handshake(&p, 0xABCDu));
+    p.seq = 0;
+    p.magic ^= 1u;
+    ZT_CHECK(!netplay_packet_is_handshake(&p, 0xABCDu));
+}
+
+static void test_hello_verdict(void)
+{
+    ZT_SECTION("hello carries protocol and game");
+
+    Packet p = netplay_hello(7, 0x1234u);
+
+    ZT_CHECK(p.joy == NETPLAY_PROTOCOL && p.crc == 0x1234u);
+    ZT_CHECK(netplay_hello_verdict(&p, 0x1234u) == NETPLAY_HELLO_OK);
+    ZT_CHECK(netplay_hello_verdict(&p, 0x1235u) == NETPLAY_HELLO_GAME);
+
+    /* What a build before the check sends. */
+    p.joy = NETPLAY_JOY_NEUTRAL;
+    p.crc = 0;
+    ZT_CHECK(netplay_hello_verdict(&p, 0) == NETPLAY_HELLO_VERSION);
 }
 
 static void test_magic_bytes(void)
@@ -238,16 +317,14 @@ static void* udp_server_thread(void* arg)
     struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    Packet wire;
-    ssize_t n = recv(fd, &wire, sizeof(wire), 0);
+    uint8_t wire[NETPLAY_PACKET_BYTES];
+    ssize_t n = recv(fd, wire, sizeof(wire), 0);
     close(fd);
-    if (n != (ssize_t)sizeof(wire)) {
+    if (n != (ssize_t)sizeof(wire) || !pkt_decode(&r->received, wire)) {
         r->ok = 0;
         return NULL;
     }
 
-    pkt_ntoh(&wire);
-    r->received = wire;
     r->ok = 1;
     return NULL;
 }
@@ -263,7 +340,7 @@ static void test_udp_loopback(void)
         return;
     }
 
-    usleep(20000); /* 20 ms – give server time to bind */
+    zsleep_us(20000); /* 20 ms – give server time to bind */
 
     int fd = make_udp_sock(0); /* ephemeral source port */
     if (fd < 0) {
@@ -278,10 +355,11 @@ static void test_udp_loopback(void)
     dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     dst.sin_port = htons(TEST_PORT_UDP);
 
-    Packet pkt = { NETP_MAGIC, 7, 0x00008000u, 0xDEADu };
-    Packet wire = pkt;
-    pkt_hton(&wire);
-    sendto(fd, &wire, sizeof(wire), 0, (struct sockaddr*)&dst, sizeof(dst));
+    Packet pkt = { NETP_MAGIC, 3, 7, NETPLAY_JOY_NEUTRAL, 0xDEADu };
+    uint8_t wire[NETPLAY_PACKET_BYTES];
+
+    pkt_encode(wire, &pkt);
+    sendto(fd, wire, sizeof(wire), 0, (struct sockaddr*)&dst, sizeof(dst));
     close(fd);
 
     pthread_join(srv, NULL);
@@ -319,15 +397,17 @@ static void* tcp_server_thread(void* arg)
 
     setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    Packet wire;
-    if (!recv_exact(cfd, &wire, sizeof(wire))) {
+    uint8_t wire[NETPLAY_PACKET_BYTES];
+    if (!recv_exact(cfd, wire, sizeof(wire))) {
         close(cfd);
         r->ok = 0;
         return NULL;
     }
     close(cfd);
-    pkt_ntoh(&wire);
-    r->received = wire;
+    if (!pkt_decode(&r->received, wire)) {
+        r->ok = 0;
+        return NULL;
+    }
     r->ok = 1;
     return NULL;
 }
@@ -343,7 +423,7 @@ static void test_tcp_loopback(void)
         return;
     }
 
-    usleep(20000);
+    zsleep_us(20000);
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -365,10 +445,11 @@ static void test_tcp_loopback(void)
         return;
     }
 
-    Packet pkt = { NETP_MAGIC, 99, 0xFFFF0000u, 0xBEEFu };
-    Packet wire = pkt;
-    pkt_hton(&wire);
-    send_exact(fd, &wire, sizeof(wire));
+    Packet pkt = { NETP_MAGIC, 5, 99, 0xFFFF0000u, 0xBEEFu };
+    uint8_t wire[NETPLAY_PACKET_BYTES];
+
+    pkt_encode(wire, &pkt);
+    send_exact(fd, wire, sizeof(wire));
     close(fd);
 
     pthread_join(srv, NULL);
@@ -380,19 +461,171 @@ static void test_tcp_loopback(void)
     ZT_CHECK(result.received.crc == 0xBEEFu);
 }
 
-static void test_packet_layout(void)
+/* ---- the relay protocol (net/znp.c) ---- */
+
+static void test_znp_target_parsing(void)
 {
-    ZT_SECTION("packet struct layout");
+    ZT_SECTION("znp: host, port and room out of one field");
 
-    /* 4 x uint32_t, no padding */
-    ZT_CHECK_INT((int)sizeof(Packet), 16);
+    char host[64], room[ZNP_ROOM_BYTES + 1];
+    uint16_t port = 0;
 
-    /* each field is 4 bytes at the expected offset */
-    Packet p;
-    ZT_CHECK_INT((int)((char*)&p.magic - (char*)&p), 0);
-    ZT_CHECK_INT((int)((char*)&p.seq - (char*)&p), 4);
-    ZT_CHECK_INT((int)((char*)&p.joy - (char*)&p), 8);
-    ZT_CHECK_INT((int)((char*)&p.crc - (char*)&p), 12);
+    znp_parse_target("relay.example.com:9000/mygame", host, sizeof(host), &port,
+        room, sizeof(room));
+    ZT_CHECK(!strcmp(host, "relay.example.com"));
+    ZT_CHECK(port == 9000);
+    ZT_CHECK(!strcmp(room, "mygame"));
+
+    /* Each part has a default. */
+    znp_parse_target("", host, sizeof(host), &port, room, sizeof(room));
+    ZT_CHECK(!strcmp(host, "127.0.0.1"));
+    ZT_CHECK(port == ZNP_DEFAULT_PORT);
+    ZT_CHECK(!strcmp(room, "default"));
+
+    /* A colon inside an address is not a port. */
+    znp_parse_target("::1/r", host, sizeof(host), &port, room, sizeof(room));
+    ZT_CHECK(!strcmp(host, "::1"));
+    ZT_CHECK(port == ZNP_DEFAULT_PORT);
+    ZT_CHECK(!strcmp(room, "r"));
+
+    /* Bracketed, a port can follow an IPv6 literal. */
+    znp_parse_target("[::1]:80/x", host, sizeof(host), &port, room, sizeof(room));
+    ZT_CHECK(!strcmp(host, "::1"));
+    ZT_CHECK(port == 80);
+    ZT_CHECK(!strcmp(room, "x"));
+
+    znp_parse_target("[fe80::2]", host, sizeof(host), &port, room, sizeof(room));
+    ZT_CHECK(!strcmp(host, "fe80::2"));
+    ZT_CHECK(port == ZNP_DEFAULT_PORT);
+
+    /* A room is only what follows the slash. */
+    znp_parse_target("h:1/", host, sizeof(host), &port, room, sizeof(room));
+    ZT_CHECK(!strcmp(host, "h"));
+    ZT_CHECK(port == 1);
+    ZT_CHECK(!strcmp(room, "default"));
+}
+
+static void test_znp_hello_layout(void)
+{
+    ZT_SECTION("znp: client hello is fixed-width and NUL-padded");
+
+    uint8_t hello[ZNP_HELLO_BYTES];
+
+    ZT_CHECK(ZNP_HELLO_BYTES == 69);
+    znp_hello_encode(hello, ZNP_MODE_CREATE, "room1", "pw", "nick");
+    ZT_CHECK(hello[0] == 0 && hello[1] == 0 && hello[2] == 0 && hello[3] == ZNP_VERSION);
+    ZT_CHECK(hello[4] == ZNP_MODE_CREATE);
+    ZT_CHECK(!memcmp(hello + 5, "room1\0\0\0\0\0\0\0\0\0\0\0", ZNP_ROOM_BYTES));
+    ZT_CHECK(hello[5 + ZNP_ROOM_BYTES] == 'p');
+    ZT_CHECK(hello[5 + ZNP_ROOM_BYTES + 2] == 0);
+    ZT_CHECK(!memcmp(hello + 5 + ZNP_ROOM_BYTES + ZNP_PASSWORD_BYTES, "nick", 4));
+
+    /* An over-long field is cut, not written past. */
+    znp_hello_encode(hello, ZNP_MODE_JOIN, "0123456789abcdefTAIL", "", "");
+    ZT_CHECK(!memcmp(hello + 5, "0123456789abcdef", ZNP_ROOM_BYTES));
+    ZT_CHECK(hello[5 + ZNP_ROOM_BYTES] == 0);
+}
+
+static void test_znp_server_hello_decode(void)
+{
+    ZT_SECTION("znp: server hello, and what is not one");
+
+    uint8_t in[ZNP_SERVER_HELLO_BYTES];
+    char room[ZNP_ROOM_BYTES + 1];
+    unsigned role = 0;
+
+    memset(in, 0, sizeof(in));
+    in[3] = ZNP_VERSION;
+    in[4] = ZNP_ROLE_CLIENT;
+    memcpy(in + 5, "abc", 3);
+    ZT_CHECK(znp_server_hello_decode(in, sizeof(in), &role, room, sizeof(room)) == 1);
+    ZT_CHECK(role == ZNP_ROLE_CLIENT);
+    ZT_CHECK(!strcmp(room, "abc"));
+
+    /* Short, wrong version, or a role with no pad. */
+    ZT_CHECK(znp_server_hello_decode(in, sizeof(in) - 1, &role, room, sizeof(room)) == 0);
+    in[3] = ZNP_VERSION + 1;
+    ZT_CHECK(znp_server_hello_decode(in, sizeof(in), &role, room, sizeof(room)) == 0);
+    in[3] = ZNP_VERSION;
+    in[4] = 9;
+    ZT_CHECK(znp_server_hello_decode(in, sizeof(in), &role, room, sizeof(room)) == 0);
+}
+
+static void test_znp_framing_loopback(void)
+{
+    ZT_SECTION("znp: a frame over a socket comes back as it went");
+
+    int sv[2];
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        fprintf(stderr, "    SKIP: socketpair failed (errno %d)\n", errno);
+        return;
+    }
+    net_adopt(sv[0], 0);
+    net_adopt(sv[1], 0);
+
+    uint8_t payload[NETPLAY_PACKET_BYTES];
+    NetplayPacket const sent = { NETPLAY_MAGIC, 7, 11, 0x1234u, 0xABCDu };
+
+    netplay_packet_encode(payload, &sent);
+    ZT_CHECK(znp_frame_send(sv[0], ZNP_INPUT, payload, sizeof(payload), 1000) == 1);
+    ZT_CHECK(znp_frame_send(sv[0], ZNP_BYE, NULL, 0, 1000) == 1);
+
+    uint8_t got[ZNP_MAX_PAYLOAD];
+    unsigned type = 0;
+    size_t len = 0;
+
+    ZT_CHECK(znp_frame_recv(sv[1], &type, got, sizeof(got), &len, 1000) == 1);
+    ZT_CHECK(type == ZNP_INPUT);
+    ZT_CHECK(len == NETPLAY_PACKET_BYTES);
+
+    NetplayPacket back;
+    ZT_CHECK(netplay_packet_decode(&back, got) == 1);
+    ZT_CHECK(back.session == 7 && back.seq == 11 && back.joy == 0x1234u);
+
+    /* An empty payload is a frame too. */
+    ZT_CHECK(znp_frame_recv(sv[1], &type, got, sizeof(got), &len, 1000) == 1);
+    ZT_CHECK(type == ZNP_BYE);
+    ZT_CHECK(len == 0);
+
+    /* Too big for the buffer fails; a cut tail would read as a header. */
+    ZT_CHECK(znp_frame_send(sv[0], ZNP_INPUT, payload, sizeof(payload), 1000) == 1);
+    ZT_CHECK(znp_frame_recv(sv[1], &type, got, 4, &len, 1000) == 0);
+
+    /* Nothing to read, and it says so. */
+    close(sv[0]);
+    ZT_CHECK(znp_frame_recv(sv[1], &type, got, sizeof(got), &len, 50) == 0);
+    close(sv[1]);
+}
+
+static void test_znp_prefix_exchange(void)
+{
+    ZT_SECTION("znp: the stream prefix, and refusing a stranger");
+
+    int sv[2];
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        fprintf(stderr, "    SKIP: socketpair failed (errno %d)\n", errno);
+        return;
+    }
+    net_adopt(sv[0], 0);
+    net_adopt(sv[1], 0);
+
+    /* The other end goes first; both at once would deadlock. */
+    ZT_CHECK(net_send_all(sv[1], znp_prefix, ZNP_PREFIX_BYTES, 1000) == 1);
+    ZT_CHECK(znp_prefix_exchange(sv[0], 1000) == 1);
+    close(sv[0]);
+    close(sv[1]);
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        return;
+    }
+    net_adopt(sv[0], 0);
+    net_adopt(sv[1], 0);
+    ZT_CHECK(net_send_all(sv[1], "HTTP", 4, 1000) == 1);
+    ZT_CHECK(znp_prefix_exchange(sv[0], 1000) == 0);
+    close(sv[0]);
+    close(sv[1]);
 }
 
 /* Entry point */
@@ -401,13 +634,21 @@ int main(void)
 {
     printf("ZSNES2 netplay tests\n");
 
-    test_packet_layout();
+    test_packet_wire_layout();
     test_magic_bytes();
-    test_packet_byteswap();
+    test_packet_roundtrip();
+    test_packet_rejects_rubbish();
+    test_handshake_recognised();
+    test_hello_verdict();
     test_fnv1a();
     test_desync_detection();
     test_udp_loopback();
     test_tcp_loopback();
+    test_znp_target_parsing();
+    test_znp_hello_layout();
+    test_znp_server_hello_decode();
+    test_znp_framing_loopback();
+    test_znp_prefix_exchange();
 
     ZT_RESULTS();
 }

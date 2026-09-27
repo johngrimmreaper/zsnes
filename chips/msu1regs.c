@@ -1,16 +1,14 @@
 /*
- * MSU-1 register stubs
+ * MSU-1 register stubs, from chips/msu1regs.asm.
  *
- * Ported from chips/msu1regs.asm.
- *
- * msustatusread    - returns MSU_StatusRead
- * msudataread      - returns MSU_DATA[MSU_Data_Addr], increments data address
- * msuid1..msuid6   - return the six ID bytes: 'S', '-', 'M', 'S', 'U', '1'
- * msudataseek0..3  - write one byte of MSU_Data_SeekPort (little-endian byte n)
- * msu1track0       - write low byte of MSU_Track
- * msu1track1       - write high byte of MSU_Track, then call MSU1HandleTrackChange
- * msu1volume       - write MSU_AudioVolume
- * msu1statecontrol - write MSU_StateControl, then call MSU1HandleControlBits
+ * msustatusread    MSU_StatusRead
+ * msudataread      MSU_DATA[MSU_Data_Addr], then step the address
+ * msuid1..6        the ID bytes 'S', '-', 'M', 'S', 'U', '1'
+ * msudataseek0..3  one little-endian byte of MSU_Data_SeekPort
+ * msu1track0/1     the two halves of MSU_Track; the high one also runs
+ *                  MSU1HandleTrackChange
+ * msu1volume       MSU_AudioVolume
+ * msu1statecontrol MSU_StateControl, then MSU1HandleControlBits
  */
 
 #include <stdint.h>
@@ -22,6 +20,7 @@
 extern uint8_t MSU_StatusRead;
 extern uint32_t MSU_Data_SeekPort;
 extern uint32_t MSU_Data_Addr;
+extern uint32_t MSU_Data_Length;
 extern uint8_t* MSU_DATA;
 extern uint16_t MSU_Track;
 extern uint8_t MSU_AudioVolume;
@@ -37,12 +36,17 @@ uint8_t c_msustatusread(void)
 
 uint8_t c_msudataread(void)
 {
+    /* The address is whatever the game seeked to, and the file is whatever
+       size it is; past the end reads as nothing, as with no file at all. */
+    uint8_t const byte = MSU_DATA && MSU_Data_Addr < MSU_Data_Length
+        ? MSU_DATA[MSU_Data_Addr]
+        : 0;
+
     // Reads have no effect when data busy bit set
-    if (MSU_StatusRead & MSU_STATUS_DATA_BUSY) {
-        return MSU_DATA[MSU_Data_Addr];
-    } else {
-        return MSU_DATA[MSU_Data_Addr++];
+    if (!(MSU_StatusRead & MSU_STATUS_DATA_BUSY)) {
+        MSU_Data_Addr++;
     }
+    return byte;
 }
 
 uint8_t c_msuid1(void) { return 'S'; }

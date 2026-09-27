@@ -1,19 +1,17 @@
 /* PPU read handlers ported from cpu/regs.inc.
  *
- * Kept apart from cpu/c_regs.c, which is the table setup and pulls in the
- * whole register file, so the difftest can link these on their own.
+ * Kept apart from cpu/c_regs.c, which is the table setup.
  */
 #include "../chips/regabi.h"
 #include "../types.h"
+#include "memseam.h"
 
-/* --- PPU reads ported from cpu/regs.inc ---------------------------------- *
+/* --- PPU reads, from cpu/regs.inc ---------------------------------------- *
  *
- * Legacy ABI: no argument, the value comes back in al, and the trampoline in
- * chips/regabi.h keeps ecx, edx and the upper half of eax. It does not keep
- * ebx, and neither did the assembly - checkmultchange used bx as scratch. The
- * only callers are the trampolines in cpu/mem_ops.h, which restore their own
- * ebx around the call.
- */
+ * Legacy ABI: no argument, value back in al, and chips/regabi.h's trampoline
+ * keeps ecx, edx and eax's upper half but not ebx - neither did the assembly,
+ * where checkmultchange used bx as scratch. The callers in cpu/mem_ops.h
+ * restore their own ebx. */
 extern u1 vidbright, forceblnk, multchange, compmult[3];
 extern u2 mode7A, mode7B;
 extern u1 rtoflags, romispal, ppustatus, cfield, extlatch, ppu2_mdr;
@@ -22,19 +20,20 @@ extern u4 wramrwadr;
 extern u1 ioportval;
 extern u2 divres, multres;
 extern u4 JoyARead, JoyBRead, JoyCRead2, JoyDRead;
-extern u1 oamram[1024];
-extern u2 cgram[256];
+extern u1 oamram[1024] ASM_ALIGNED(1);
+extern u2 cgram[256] ASM_ALIGNED(1);
 extern u4 oamaddr;
 extern u2 cgaddr, latchx, latchy;
 extern u1 winl1, winr1, winl2, winr2, winlogica, winlogicb;
 extern u1 winenabm, winenabs, scaddset, scaddtype, INTEnab, multa;
 extern u2 scrnon, diva;
 extern u1 bgscrolPrev, vramread;
-extern u2 bg1scrolx, bg2scrolx, bg3scrolx, bg4scrolx;
-extern u2 bg1scroly, bg2scroly, bg3scroly, bg4scroly;
+extern u2 bg1scrolx[4]; /* one per layer */
+extern u2 bg1scroly[4];
 extern u2 bg1scrolx_m7, bg1scroly_m7;
 extern u2 mode7C, mode7D, mode7X0, mode7Y0;
-extern u1 dmadata[129], hdmarestart, nohdmaframe, hdmadelay, SPC7110Enable;
+extern u1 dmadata[129] ASM_ALIGNED(1);
+extern u1 hdmarestart, nohdmaframe, hdmadelay, SPC7110Enable;
 extern u2 resolutn, curypos;
 extern u1* wramdata;
 extern u1 NextLineCache, prevoamptr, oamlow, nexthprior, nosprincr, objhipr;
@@ -46,28 +45,35 @@ extern u1 reg2101w_objmovs1[8], reg2101w_objmovs2[8];
 extern u2 reg2101w_objadds1[8], reg2101w_objadds2[8];
 extern u1 bgmode, bg3highst, bgtilesz, mosaicon, mosaicsz;
 extern u1 BG116x16t, BG216x16t, BG316x16t, BG416x16t;
-extern u2 bg1ptr, bg2ptr, bg3ptr, bg4ptr;
-extern u2 bg1ptrb, bg2ptrb, bg3ptrb, bg4ptrb;
-extern u2 bg1ptrc, bg2ptrc, bg3ptrc, bg4ptrc;
-extern u2 bg1ptrd, bg2ptrd, bg3ptrd, bg4ptrd;
-extern u4 bg1ptrx, bg2ptrx, bg3ptrx, bg4ptrx;
-extern u4 bg1ptry, bg2ptry, bg3ptry, bg4ptry;
+extern u2 bg1ptr[4], bg1ptrb[4], bg1ptrc[4], bg1ptrd[4];
+extern u4 bg1ptrx[4] ASM_ALIGNED(4), bg1ptry[4] ASM_ALIGNED(4);
 extern u1 bg1scsize, bg2scsize, bg3scsize, bg4scsize;
-extern u2 bg1objptr, bg2objptr, bg3objptr, bg4objptr;
+extern u2 bg1objptr[4];
 extern u1 cgmod, winbg1en, winbg2en, winbg3en, winbg4en, winobjen, wincolen;
 extern u1 coladdr, coladdg, coladdb, interlval;
-extern u1 iohvlatch, MultiTapStat;
+extern u1 iohvlatch, MultiTapStat, JoyCRead;
+extern u4 JoyAOrig, JoyBOrig, JoyCOrig, JoyDOrig, JoyEOrig;
+extern u4 JoyANow, JoyBNow, JoyCNow, JoyDNow, JoyENow;
 extern u4 vramaddr;
 extern u1 vramread2, mode7set;
 extern u1* vram;
 extern u1 vrama[65536];
 extern u1 vidmemch2[4096], vidmemch4[4096], vidmemch8[4096];
-extern u1 vramincby8left, vramincby8totl;
+extern u1 vramincby8left, vramincby8totl, vraminctype, vramincby8on, vramincr;
+extern u1 vramincby8rowl;
+extern u1 nssdip1, nssdip2, nssdip3, nssdip4, nssdip5, nssdip6;
+extern u2 RumbleData;
+extern u1 MultiTap, device2, hblank;
+extern u4 nmistatus;
+extern void (*regptwa[0x3000])(void);
+void reg2118(void), reg2118inc(void), reg2118inc8(void), reg2118inc8inc(void);
+void reg2119(void), reg2119inc(void), reg2119inc8(void), reg2119inc8inc(void);
 extern u2 vramincby8var, vramincby8ptri, addrincr;
 extern u2 HIRQLoc, VIRQLoc, totlines;
 extern u4 HIRQCycNext;
 extern u1 HIRQNextExe;
-extern u1 cycpl, cycphb, xirqb, cycpblt;
+extern u1 cycpl, cycphb, xirqb;
+extern u4 cycpblt; /* u4 where it is defined (initdata.c) */
 extern u1 opexec268, opexec268cph, opexec358, opexec358cph, cycpb268, cycpb358;
 
 /* The mode 7 multiply is deferred until a result register is read. mode7B's
@@ -283,8 +289,8 @@ u1 c_reg213Dr(void) { return counter_latch(latchy, &latchyr); }
  * Same ABI the other way: al carries the value. Where the target is wider than
  * a byte the assembly stores only its low byte, so the rest has to survive.
  */
-#define REG_WRITE_BYTE(reg, target)                                           \
-    REGABI_REG_WRITE8(reg);                                                   \
+#define REG_WRITE_BYTE(reg, target) \
+    REGABI_REG_WRITE8(reg);         \
     void c_##reg(u1 const al) { target = al; }
 
 REG_WRITE_BYTE(reg2126w, winl1) /* window 1 left */
@@ -336,34 +342,34 @@ static u2 scroll_x(u2 const cur, u1 const al)
     return (u2)(ebx >> 13);
 }
 
-#define REG_SCROLL_X(reg, target)                                             \
-    REGABI_REG_WRITE8(reg);                                                   \
+#define REG_SCROLL_X(reg, target) \
+    REGABI_REG_WRITE8(reg);       \
     void c_##reg(u1 const al) { target = scroll_x(target, al); }
 
-#define REG_SCROLL_Y(reg, target)                                             \
-    REGABI_REG_WRITE8(reg);                                                   \
+#define REG_SCROLL_Y(reg, target) \
+    REGABI_REG_WRITE8(reg);       \
     void c_##reg(u1 const al) { target = scroll_y(al); }
 
 REGABI_REG_WRITE8(reg210Dw); /* BG1 horizontal, mirrored for mode 7 */
 void c_reg210Dw(u1 const al)
 {
-    bg1scrolx = scroll_x(bg1scrolx, al);
-    bg1scrolx_m7 = bg1scrolx;
+    bg1scrolx[0] = scroll_x(bg1scrolx[0], al);
+    bg1scrolx_m7 = bg1scrolx[0];
 }
 
 REGABI_REG_WRITE8(reg210Ew); /* BG1 vertical, mirrored for mode 7 */
 void c_reg210Ew(u1 const al)
 {
-    bg1scroly = scroll_y(al);
-    bg1scroly_m7 = bg1scroly;
+    bg1scroly[0] = scroll_y(al);
+    bg1scroly_m7 = bg1scroly[0];
 }
 
-REG_SCROLL_X(reg210Fw, bg2scrolx)
-REG_SCROLL_Y(reg2110w, bg2scroly)
-REG_SCROLL_X(reg2111w, bg3scrolx)
-REG_SCROLL_Y(reg2112w, bg3scroly)
-REG_SCROLL_X(reg2113w, bg4scrolx)
-REG_SCROLL_Y(reg2114w, bg4scroly)
+REG_SCROLL_X(reg210Fw, bg1scrolx[1])
+REG_SCROLL_Y(reg2110w, bg1scroly[1])
+REG_SCROLL_X(reg2111w, bg1scrolx[2])
+REG_SCROLL_Y(reg2112w, bg1scroly[2])
+REG_SCROLL_X(reg2113w, bg1scrolx[3])
+REG_SCROLL_Y(reg2114w, bg1scroly[3])
 
 #undef REG_SCROLL_X
 #undef REG_SCROLL_Y
@@ -510,30 +516,34 @@ void c_reg2103w(u1 const al)
     NextLineCache = 1;
 }
 
-/* OAM data. The low table is written a word at a time: an even address only
-   latches the byte, the odd one flushes both. The high table (bit 9) takes
-   single bytes. Running past the end of OAM leaves the byte in the latch. */
+/* OAM data. The address is ten bits and wraps there; the low table is written
+   a word at a time, an even address latching the byte and the odd one flushing
+   both, while the high table (bit 9) takes single bytes and repeats every 32,
+   so a write past its end lands back at its start. The write latch is loaded
+   on every even address, whichever table it selects.
+
+   This is what snes9x (ppu.h REGISTER_2104, masking the word address with
+   0x10f) and bsnes (sfc/ppu/io.cpp with a uint10 address, and writeObject
+   masking with 0x1f) both do. The assembly this replaced instead reset the
+   address to 1 and dropped the byte into the latch once it passed 544, and
+   only when the auto-increment was live. */
 REGABI_REG_WRITE8(reg2104w);
 void c_reg2104w(u1 const al)
 {
-    u4 const ebx = oamaddr;
+    u4 const ebx = oamaddr & 0x3FFu;
 
     NextLineCache = 1;
     if (nosprincr != 1) {
-        oamaddr = ebx + 1;
-        if (ebx >= 544u) {
-            oamaddr = 1;
-            oamlow = al;
-            return;
-        }
+        oamaddr = (oamaddr & ~0x3FFu) | ((ebx + 1u) & 0x3FFu);
+    }
+    if (!(ebx & 1u)) {
+        oamlow = al;
     }
     if (ebx & 0x200u) {
-        oamram[ebx] = al;
+        oamram[0x200u + (ebx & 0x1Fu)] = al;
     } else if (ebx & 1u) {
         oamram[ebx] = al;
         oamram[ebx - 1] = oamlow;
-    } else {
-        oamlow = al;
     }
 }
 
@@ -562,7 +572,7 @@ void c_reg2106w(u1 const al)
    size bits say which of them are offset, and ptrx/ptry are the same offsets
    as plain distances. */
 static void bg_tilemap(u1 const al, u2* const p, u4* const px, u4* const py,
-                       u1* const scsize)
+    u1* const scsize)
 {
     u2 const base = (u2)((u2)(u1)(al >> 2) << 11);
     u1 const sz = (u1)(al & 0x03u);
@@ -595,17 +605,19 @@ static void bg_tilemap(u1 const al, u2* const p, u4* const px, u4* const py,
 
 /* bgNptr, bgNptrb, bgNptrc and bgNptrd are one per-BG group but are stored
    interleaved across the BGs, so the quadrants have to be gathered by hand. */
-#define REG_BG_TILEMAP(reg, n)                                                \
-    REGABI_REG_WRITE8(reg);                                                   \
-    void c_##reg(u1 const al)                                                 \
-    {                                                                         \
-        u2 p[4] = { bg##n##ptr, bg##n##ptrb, bg##n##ptrc, bg##n##ptrd };      \
-                                                                              \
-        bg_tilemap(al, p, &bg##n##ptrx, &bg##n##ptry, &bg##n##scsize);        \
-        bg##n##ptr = p[0];                                                    \
-        bg##n##ptrb = p[1];                                                   \
-        bg##n##ptrc = p[2];                                                   \
-        bg##n##ptrd = p[3];                                                   \
+#define REG_BG_TILEMAP(reg, n)                                           \
+    REGABI_REG_WRITE8(reg);                                              \
+    void c_##reg(u1 const al)                                            \
+    {                                                                    \
+        u2 p[4] = { bg1ptr[(n) - 1], bg1ptrb[(n) - 1], bg1ptrc[(n) - 1], \
+            bg1ptrd[(n) - 1] };                                          \
+                                                                         \
+        bg_tilemap(al, p, &bg1ptrx[(n) - 1], &bg1ptry[(n) - 1],          \
+            &bg##n##scsize);                                             \
+        bg1ptr[(n) - 1] = p[0];                                          \
+        bg1ptrb[(n) - 1] = p[1];                                         \
+        bg1ptrc[(n) - 1] = p[2];                                         \
+        bg1ptrd[(n) - 1] = p[3];                                         \
     }
 
 REG_BG_TILEMAP(reg2107w, 1)
@@ -620,15 +632,15 @@ REG_BG_TILEMAP(reg210Aw, 4)
 REGABI_REG_WRITE8(reg210Bw);
 void c_reg210Bw(u1 const al)
 {
-    bg1objptr = (u2)((u2)(al & 0x0Fu) << 13);
-    bg2objptr = (u2)((u2)(al >> 4) << 13);
+    bg1objptr[0] = (u2)((u2)(al & 0x0Fu) << 13);
+    bg1objptr[1] = (u2)((u2)(al >> 4) << 13);
 }
 
 REGABI_REG_WRITE8(reg210Cw);
 void c_reg210Cw(u1 const al)
 {
-    bg3objptr = (u2)((u2)(al & 0x0Fu) << 13);
-    bg4objptr = (u2)((u2)(al >> 4) << 13);
+    bg1objptr[2] = (u2)((u2)(al & 0x0Fu) << 13);
+    bg1objptr[3] = (u2)((u2)(al >> 4) << 13);
 }
 
 /* Rewriting the same value does not dirty the cache; the address still moves. */
@@ -646,12 +658,12 @@ void c_reg2122w(u1 const al)
 
 /* One nibble per layer. The asm branches on bits 1 and 3, but both arms are
    the same - the `or bl,02h` they guarded is commented out. */
-#define REG_WIN_SEL(reg, lo, hi)                                               \
-    REGABI_REG_WRITE8(reg);                                                    \
-    void c_##reg(u1 const al)                                                  \
-    {                                                                          \
-        lo = (u1)(al & 0x0Fu);                                                 \
-        hi = (u1)(al >> 4);                                                    \
+#define REG_WIN_SEL(reg, lo, hi) \
+    REGABI_REG_WRITE8(reg);      \
+    void c_##reg(u1 const al)    \
+    {                            \
+        lo = (u1)(al & 0x0Fu);   \
+        hi = (u1)(al >> 4);      \
     }
 
 REG_WIN_SEL(reg2123w, winbg1en, winbg2en)
@@ -677,7 +689,8 @@ void c_reg2132w(u1 const al)
     }
 }
 
-/* Keeps only interlace and pseudo-hires; bit 2 is the 239-line switch. */
+/* Keeps interlace, object interlace and EXTBG; bit 2 is the 239-line switch.
+   Pseudo-hires (bit 3) is not emulated. */
 REGABI_REG_WRITE8(reg2133w);
 void c_reg2133w(u1 const al)
 {
@@ -804,7 +817,13 @@ static void vram_write(u4 const off, u4 const lohi, u1 const al)
     vram_dirty(off);
 }
 
-#define REG_VRAM_DATA(reg, offexpr, lohi, bump)                                   REGABI_REG_WRITE8(reg);                                                       void c_##reg(u1 const al)                                                     {                                                                                 vram_write((offexpr), (lohi), al);                                            bump                                                                      }
+#define REG_VRAM_DATA(reg, offexpr, lohi, bump) \
+    REGABI_REG_WRITE8(reg);                     \
+    void c_##reg(u1 const al)                   \
+    {                                           \
+        vram_write((offexpr), (lohi), al);      \
+        bump                                    \
+    }
 
 REG_VRAM_DATA(reg2118, vramaddr, 0, )
 REG_VRAM_DATA(reg2118inc, vramaddr, 0, vram_bump();)
@@ -816,6 +835,209 @@ REG_VRAM_DATA(reg2119inc8, vram_inc8_off(), 1, )
 REG_VRAM_DATA(reg2119inc8inc, vram_inc8_off(), 1, vram_bump();)
 
 #undef REG_VRAM_DATA
+
+/* VRAM increment control. Bits 0-1 pick the step, bits 2-3 the address
+   remapping, and bit 7 whether $2118 or $2119 is the one that increments -
+   which is done by swapping the table entries rather than branching. */
+REGABI_REG_WRITE8(reg2115w);
+void c_reg2115w(u1 const al)
+{
+    static u2 const step[4] = { 2, 64, 256, 256 };
+    u1 const remap = (u1)(al & 0x0Cu);
+
+    vraminctype = al;
+    addrincr = step[al & 3u];
+
+    vramincby8on = (u1)(remap ? 1 : 0);
+    if (remap == 4) {
+        vramincby8left = 64 - 1;
+        vramincby8totl = 5;
+        vramincby8ptri = 65535 - 511;
+        vramincby8var = 256 + 128 + 64;
+    } else if (remap == 8) {
+        vramincby8left = 128 - 1;
+        vramincby8totl = 6;
+        vramincby8ptri = 65535 - 1023;
+        vramincby8var = 512 + 256 + 128;
+    } else if (remap == 12) {
+        vramincby8left = 256 - 1;
+        vramincby8totl = 7;
+        vramincby8ptri = 65535 - 2047;
+        vramincby8var = 1024 + 512 + 256;
+    }
+
+    vramincr = (u1)((al & 0x80u) ? 0 : 1);
+    if (remap) {
+        regptwa[0x118] = (al & 0x80u) ? reg2118inc8 : reg2118inc8inc;
+        regptwa[0x119] = (al & 0x80u) ? reg2119inc8inc : reg2119inc8;
+    } else {
+        regptwa[0x118] = (al & 0x80u) ? reg2118 : reg2118inc;
+        regptwa[0x119] = (al & 0x80u) ? reg2119inc : reg2119;
+    }
+}
+
+/* Joypad strobe. The low 16 bits are forced high - the shift register reads
+   as all ones once the real data has been clocked out. */
+static void joy_latch_ports(void)
+{
+    JoyANow = JoyAOrig | 0xFFFFu;
+    JoyBNow = JoyBOrig | 0xFFFFu;
+    JoyCNow = JoyCOrig | 0xFFFFu;
+    JoyDNow = JoyDOrig | 0xFFFFu;
+    JoyENow = JoyEOrig | 0xFFFFu;
+}
+
+/* With auto-read off the strobe latches immediately; with it on the ports are
+   only re-latched once both halves of the 1-then-0 sequence have been seen. */
+REGABI_REG_WRITE8(reg4016w);
+void c_reg4016w(u1 const al)
+{
+    if (!(INTEnab & 1u)) {
+        joy_latch_ports();
+        MultiTapStat = (u1)(al == 1 ? (MultiTapStat | 1u) : (MultiTapStat & 0xFEu));
+        return;
+    }
+    if (al == 1) {
+        MultiTapStat |= 1u;
+        JoyCRead |= 2u;
+        return;
+    }
+    MultiTapStat &= 0xFEu;
+    if (al == 0) {
+        JoyCRead |= 1u;
+        if (JoyCRead == 3) {
+            joy_latch_ports();
+        }
+    }
+}
+
+/* $2139/$213A hand back the latched byte, prefetch the next, then advance -
+   but only on the port that owns the increment ($2115 bit 7). */
+static void vram_addr_add(u2 const d)
+{
+    vramaddr = (vramaddr & ~0xFFFFu) | (u2)((u2)vramaddr + d);
+}
+
+static void vram_read_advance(void)
+{
+    vram_addr_add(addrincr);
+    if (vramincby8on != 1 || --vramincby8left != 0) {
+        return;
+    }
+    vram_addr_add(2);
+    vramincby8left = vramincby8totl;
+    if (--vramincby8rowl == 0) {
+        vramincby8rowl = 8;
+        vram_addr_add((u2)-16);
+    } else {
+        vram_addr_add((u2)-vramincby8ptri);
+    }
+}
+
+REGABI_REG_READ8(reg2139r);
+u1 c_reg2139r(void)
+{
+    u1 const al = vramread;
+
+    vramread = vram[(u2)vramaddr];
+    if (vramincr != 0) {
+        vram_read_advance();
+    }
+    return al;
+}
+
+REGABI_REG_READ8(reg213Ar);
+u1 c_reg213Ar(void)
+{
+    u1 const al = vramread2;
+
+    vramread2 = vram[(u2)vramaddr + 1u];
+    if (vramincr != 1) {
+        vram_read_advance();
+    }
+    return al;
+}
+
+/* NSS DIP switches: each contributes its bit only when set to exactly 1. */
+REGABI_REG_READ8(reg4100r);
+u1 c_reg4100r(void)
+{
+    return (u1)((nssdip1 == 1 ? 0x01u : 0u) | (nssdip2 == 1 ? 0x02u : 0u)
+        | (nssdip3 == 1 ? 0x04u : 0u) | (nssdip4 == 1 ? 0x08u : 0u)
+        | (nssdip5 == 1 ? 0x10u : 0u) | (nssdip6 == 1 ? 0x20u : 0u));
+}
+
+/* Joypad serial read: one bit per read out of the top of JoyANow, which
+   rotates so 16 reads return the shift register and leave it as it was. The
+   rumble sentry 0x72 in the high byte freezes the pattern. */
+REGABI_REG_READ8(reg4016r);
+u1 c_reg4016r(void)
+{
+    u1 const al = (u1)((JoyANow & 0x80000000u) ? 1u : 0u);
+
+    if (ioportval != 0xFFu) {
+        RumbleData = (u2)((RumbleData & 0xFF00u)
+            | (u1)((u1)RumbleData | (u1)((ioportval & 0x40u) >> 6)));
+        if ((u1)(RumbleData >> 8) != 0x72u) {
+            RumbleData = (u2)((RumbleData << 1) | (RumbleData >> 15));
+        }
+    }
+    JoyANow = (JoyANow << 1) | (JoyANow >> 31);
+    return al;
+}
+
+/* Port 2 serial read. Bit 0 is the pad; with a multitap, MultiTapStat bit 7
+   selects which pair of the four is being clocked out, and bit 0 means the tap
+   is idle. The base 28 is the open-bus pattern the port reads back. */
+REGABI_REG_READ8(reg4017r);
+u1 c_reg4017r(void)
+{
+    u1 al = 28;
+
+    if (device2 != 0 || MultiTap != 1) {
+        al |= (u1)((JoyBNow & 0x80000000u) ? 1u : 0u);
+        JoyBNow = (JoyBNow << 1) | (JoyBNow >> 31);
+        return al;
+    }
+    if (MultiTapStat & 1u) {
+        return (u1)(al | 3u);
+    }
+    if (MultiTapStat & 0x80u) {
+        al |= (u1)((JoyBNow & 0x80000000u) ? 1u : 0u);
+        al |= (u1)((JoyCNow & 0x80000000u) ? 2u : 0u);
+        JoyBNow = (JoyBNow << 1) | (JoyBNow >> 31);
+        JoyCNow = (JoyCNow << 1) | (JoyCNow >> 31);
+    } else {
+        al |= (u1)((JoyDNow & 0x80000000u) ? 1u : 0u);
+        al |= (u1)((JoyENow & 0x80000000u) ? 2u : 0u);
+        JoyDNow = (JoyDNow << 1) | (JoyDNow >> 31);
+        JoyENow = (JoyENow << 1) | (JoyENow >> 31);
+    }
+    return al;
+}
+
+/* Bit 0 is the auto-joypad poll, busy for three lines from the first vblank
+   line; bit 7 is vblank; bit 6 is hblank, which needs the caller's DH. */
+REGABI_REG_READ8_DX(reg4212r);
+u1 c_reg4212r(u4 const edx)
+{
+    u2 const first = (u2)(resolutn + 1u);
+    u1 al = 0;
+
+    if ((INTEnab & 1u) && curypos >= first && curypos < (u2)(first + 3u)) {
+        al |= 0x01u;
+    }
+    if ((curypos == resolutn && (u1)nmistatus == 2)
+        || (curypos >= first && curypos < (u2)(totlines - 1u))) {
+        al |= 0x80u;
+    }
+    hblank = 0;
+    if ((u1)(edx >> 8) < cycphb) {
+        hblank = 1;
+        al |= 0x40u;
+    }
+    return al;
+}
 
 /* --- the IRQ beam-position registers -------------------------------------- *
  *
@@ -910,17 +1132,16 @@ u4 c_reg420Aw(u1 const al, u4 const edx)
 
 /* --- the $43xx DMA registers --------------------------------------------- *
  *
- * These need the address, so they use the BANK trampolines (address in ecx,
- * value in al) rather than the REG ones. The index is a 16-bit subtract, so
- * it wraps inside cx before being zero-extended.
- */
+ * These need the address, so they take the BANK trampolines (address in ecx,
+ * value in al). The index is a 16-bit subtract, wrapping inside cx before the
+ * zero-extend. */
 static u4 dma_index(u4 const addr)
 {
     return (u2)(addr - 0x4300u);
 }
 
-#define REG_DMA_STORE(reg)                                                    \
-    REGABI_BANK_WRITE8(reg);                                                  \
+#define REG_DMA_STORE(reg)   \
+    REGABI_BANK_WRITE8(reg); \
     void c_##reg(u4 const addr, u1 const al) { dmadata[dma_index(addr)] = al; }
 
 REG_DMA_STORE(reg43x2w) /* source address, low */
@@ -977,3 +1198,168 @@ u1 c_regINVALID(u4 const addr)
 
 REGABI_REG_WRITE8(regINVALIDw);
 void c_regINVALIDw(u1 const al) { (void)al; }
+
+/* --- the H/V latch and the APU I/O ports ---------------------------------- */
+
+extern u1 spcon, spcnumread, sndrot, sndrot2;
+extern u1 reg1read, reg2read, reg3read, reg4read;
+extern u1 SPCRAM[];
+extern u4 SPC700read, SPC700write, h_dot_counter, xa;
+extern u4 nmirept, cycpbl, curexecstate;
+
+/* $2137: software H/V counter latch. zsnes has no dot-level H counter, so
+   latchx is synthesised by stepping a 0-339 dot value on every read; games
+   that poll $213C for a particular hdot (Star Fox and other Super FX titles)
+   then make progress instead of looping forever. DH carries the cycle count. */
+REGABI_REG_READ8_DX(reg2137r);
+u1 c_reg2137r(u4 const edx)
+{
+    h_dot_counter++;
+    if (iohvlatch == 1 || (ioportval & 0x80u)) {
+        latchx = (u2)(h_dot_counter % 340u);
+        latchy = curypos;
+        /* With both beam IRQs armed the latched line is the next one, unless
+           the H-IRQ sits early in the line and this read is late in it. */
+        if ((INTEnab & 0x30u) == 0x30u
+            && (HIRQLoc > 0xF0u || (u1)(edx >> 8) < 30u)) {
+            latchy++;
+        }
+    }
+    extlatch = 0;
+    return 0;
+}
+
+/* With SPC emulation off the $2140-$2143 reads answer out of the 65816's own
+   accumulator, and patch the wait loop the game is sitting in out of its
+   instruction stream: the first BNE in the next few bytes becomes two NOPs.
+   The assembly took the program counter straight out of esi, which stopped
+   holding it when the opcode core became C; the seam carries it now. */
+static void spc_skip_wait(int const scan)
+{
+    u1* const pc = (u1*)(uintptr_t)MemSeamS;
+    int i;
+
+    for (i = 0; i < scan; i++) {
+        if (pc[i] == 0xD0) {
+            pc[i] = 0xEA;
+            pc[i + 1] = 0xEA;
+            return;
+        }
+    }
+}
+
+REGABI_REG_READ8(reg2140r);
+u1 c_reg2140r(void)
+{
+    u1* pc;
+
+    if (spcon) {
+        SPC700read++;
+        spcnumread = 0;
+        return reg1read;
+    }
+    /* A BPL back over itself is the other shape of the same wait loop. */
+    pc = (u1*)(uintptr_t)MemSeamS;
+    if (pc[0] == 0x10 && pc[1] == 0xFB) {
+        pc[0] = 0xEA;
+        pc[1] = 0xEA;
+    }
+    spc_skip_wait(5);
+    if (++sndrot2 == 3)
+        sndrot2 = 0;
+    return sndrot2 & 1u ? (u1)xa : 0;
+}
+
+REGABI_REG_READ8(reg2141r);
+u1 c_reg2141r(void)
+{
+    if (spcon) {
+        SPC700read++;
+        spcnumread = 0;
+        return reg2read;
+    }
+    spc_skip_wait(3);
+    sndrot ^= 1u;
+    return sndrot & 1u ? (u1)xa : (u1)(xa >> 8);
+}
+
+REGABI_REG_READ8(reg2142r);
+u1 c_reg2142r(void)
+{
+    if (spcon) {
+        SPC700read++;
+        spcnumread = 0;
+        return reg3read;
+    }
+    spc_skip_wait(3);
+    return sndrot & 1u ? (u1)(xa >> 8) : (u1)xa;
+}
+
+REGABI_REG_READ8(reg2143r);
+u1 c_reg2143r(void)
+{
+    if (spcon) {
+        SPC700read++;
+        spcnumread = 0;
+        return reg4read;
+    }
+    spc_skip_wait(3);
+    return (u1)(xa >> 8);
+}
+
+/* The `reenablespc` macro: once the SPC budget has run away, zero it and mark
+   the 65816 as running again. The assembly also reloaded edi, the opcode table
+   pointer, from tableadc[dl] - but every caller of a register handler restores
+   edi around the call, so that write never reached the core. cpu/c_spc700.c
+   does the table switch on the path that can. */
+static void reenable_spc(void)
+{
+    if (cycpbl < 0x1000000u)
+        return;
+    cycpbl = 0;
+    if (curexecstate & 0x02u)
+        return;
+    curexecstate |= 0x02u;
+    /* The asm tail: back to the opcode table its flags select. */
+    {
+        extern opfn** tableadc[256]; /* endmem.h, which clashes here */
+
+        MemSeamDI = (uintptr_t)tableadc[(u1)MemSeamD];
+    }
+}
+
+/* $2140-$2143: the CPU side of the APU I/O ports, mirrored every four bytes
+   up to $217F. The assembly writes only the low byte of nmirept. */
+REGABI_REG_WRITE8(reg2140w);
+void c_reg2140w(u1 const al)
+{
+    if ((u1)nmistatus == 2)
+        nmirept &= ~0xFFu;
+    SPCRAM[0xF4] = al;
+    SPC700write++;
+    reenable_spc();
+}
+
+REGABI_REG_WRITE8(reg2141w);
+void c_reg2141w(u1 const al)
+{
+    SPCRAM[0xF5] = al;
+    SPC700write++;
+    reenable_spc();
+}
+
+REGABI_REG_WRITE8(reg2142w);
+void c_reg2142w(u1 const al)
+{
+    SPCRAM[0xF6] = al;
+    SPC700write++;
+    reenable_spc();
+}
+
+REGABI_REG_WRITE8(reg2143w);
+void c_reg2143w(u1 const al)
+{
+    SPCRAM[0xF7] = al;
+    SPC700write++;
+    reenable_spc();
+}
