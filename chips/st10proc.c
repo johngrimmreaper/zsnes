@@ -1,31 +1,20 @@
 /*
- * ST010 / ST011 coprocessor bank-access functions
+ * ST010 / ST011 coprocessor bank access, from chips/st10proc.asm. Two regions:
  *
- * Ported from chips/st10proc.asm.  Two memory regions are exposed:
+ *   setaaccessbank*    the 4 KiB setaramdata buffer; a write runs
+ *                      ST010DoCommand when setaramdata[0x21] == 0x80
+ *   setaaccessbank*a   the 4-byte SetaCmdEnable register, 2-bit address mask
+ *                      with a 0x4000 guard
  *
- *   Region A (setaaccessbankr8/w8/r16/w16):
- *     Accesses the 4 KiB setaramdata buffer.  Writes trigger ST010DoCommand
- *     when setaramdata[0x21] == 0x80 (except for the two special-case paths
- *     noted below).
- *
- *   Region B (setaaccessbankr8a/w8a/r16a/w16a):
- *     Accesses the 4-byte SetaCmdEnable command-enable register via a 2-bit
- *     address mask, with a 0x4000 out-of-bounds guard.
- *
- * Asm note — setaaccessbankw16 at addr 0x7FFF:
- *   The original assembly used `mov [setaramdata+0fffh], al`, which in NASM
- *   addresses &setaramdata_variable + 0xFFF rather than the buffer it points
- *   to.  The evident intent is to write the low byte at buffer[0xFFF], which
- *   is what this C port implements.
- *
- * Asm bug fixed — setaaccessbankw16a vs setaaccessbankr16a:
- *   The original asm write-16 function wrote to setaramdata instead of
- *   SetaCmdEnable, making read and write asymmetric.  Fixed to write the
- *   big-endian pair into SetaCmdEnable, matching setaaccessbankr16a.
+ * Two departures from the assembly, both bugs in it: at 0x7FFF NASM's
+ * `mov [setaramdata+0fffh], al` addressed the *pointer* plus 0xFFF rather than
+ * the buffer, and setaaccessbankw16a wrote setaramdata instead of
+ * SetaCmdEnable, making read and write asymmetric.
  */
 
 #include <stdint.h>
 
+#include "../cpu/memseam.h"
 #include "regabi.h"
 
 extern uint8_t* setaramdata;
@@ -118,11 +107,11 @@ void c_setaaccessbankw16a(uint32_t addr, uint16_t val)
     SetaCmdEnable[(a + 1) & 3] = (uint8_t)val;
 }
 
-REGABI_BANK_READ8(setaaccessbankr8);
-REGABI_BANK_WRITE8(setaaccessbankw8);
-REGABI_BANK_READ16(setaaccessbankr16);
-REGABI_BANK_WRITE16(setaaccessbankw16);
-REGABI_BANK_READ8(setaaccessbankr8a);
-REGABI_BANK_WRITE8(setaaccessbankw8a);
-REGABI_BANK_READ16(setaaccessbankr16a);
-REGABI_BANK_WRITE16(setaaccessbankw16a);
+MEMBANK_READ8(setaaccessbankr8);
+MEMBANK_WRITE8(setaaccessbankw8);
+MEMBANK_READ16(setaaccessbankr16);
+MEMBANK_WRITE16(setaaccessbankw16);
+MEMBANK_READ8(setaaccessbankr8a);
+MEMBANK_WRITE8(setaaccessbankw8a);
+MEMBANK_READ16(setaaccessbankr16a);
+MEMBANK_WRITE16(setaaccessbankw16a);

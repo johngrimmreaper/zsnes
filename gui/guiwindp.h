@@ -49,4 +49,190 @@ extern u4 curaddrvalcs;
 extern u4 curentryval;
 extern u4 curvaluecs;
 
+/* Panel layout. A panel describes itself as a list of rows and asks where they
+ * go; drawing and click handling ask the same question, so they cannot drift
+ * apart the way duplicated pixel numbers did - twice leaving a control that
+ * drew correctly and ignored the mouse.
+ *
+ * A row is an item with a height, a fixed gap, or a gap that expands; the
+ * expanding ones share out what the fixed rows leave, which keeps a panel
+ * balanced when a section appears with the video mode.
+ */
+enum { GUI_ITEM,
+    GUI_GAP,
+    GUI_EXPAND };
+
+typedef struct {
+    s4 h; /* an item's height, or a gap's minimum */
+    u1 kind;
+} GUIRow;
+
+/* Place `n` rows between `top` and `bottom`, writing every row's y into out. */
+void GUIStackLayout(GUIRow const* rows, u4 n, s4 top, s4 bottom, s4* out);
+
+/* The Retro panel's rows, in the order they are stacked. Both DisplayGUIVideo
+   and DisplayGUIVideoClick lay this out and read the same answers. */
+enum {
+    CRT_ROW_SCANLABEL,
+    CRT_ROW_SCAN,
+    CRT_GAP1,
+    CRT_ROW_VIBLABEL,
+    CRT_ROW_VIB,
+    CRT_GAP2,
+    CRT_ROW_BLOOMLABEL,
+    CRT_ROW_BLOOM,
+    CRT_GAP3,
+    CRT_ROW_COUNT
+};
+
+void GUICrtRows(s4 out[CRT_ROW_COUNT]);
+
+/* The Filters panel. Heights are the gaps between the rows as they stand, so
+   the layout comes out where it already was; what changes is that the numbers
+   live here instead of being repeated in the click handling. */
+enum {
+    FILT_ROW_LABEL,
+    FILT_ROW_TOP, /* bilinear or interpolation, and the NTSC box */
+    FILT_ROW_SAI1,
+    FILT_ROW_SAI2,
+    FILT_ROW_HQLEVEL,
+    FILT_ROW_MISCLABEL,
+    FILT_ROW_MISC,
+    FILT_ROW_SYNC, /* triple buffering; vsync lives on the Monitors panel */
+    FILT_ROW_DISPLABEL,
+    FILT_ROW_DISP,
+    FILT_ROW_COUNT
+};
+
+void GUIFilterRows(s4 out[FILT_ROW_COUNT]);
+
+/* The Monitors panel. The list is one row of the stack, six entries deep. */
+enum { MON_PITCH = 12,
+    MON_MAX = 6 };
+enum { MON_ROW_LABEL,
+    MON_ROW_LIST,
+    MON_ROW_NOTE,
+    MON_GAP,
+    MON_ROW_SYNCLABEL,
+    MON_ROW_SYNC,
+    MON_GAP2,
+    MON_ROW_COUNT };
+
+void GUIMonitorRows(s4 out[MON_ROW_COUNT]);
+
+/* The Modes panel's right-hand column: the Set button, the legend, and the
+   custom resolution boxes under it. */
+enum {
+    MODE_ROW_SET,
+    MODE_ROW_LEGEND,
+    MODE_ROW_LEGEND1,
+    MODE_ROW_LEGEND2,
+    MODE_ROW_LEGEND3,
+    MODE_ROW_LEGEND4,
+    MODE_ROW_LEGEND5,
+    MODE_ROW_LEGEND6,
+    MODE_ROW_CUSTOM,
+    MODE_ROW_CUSTOMBOX,
+    MODE_ROW_COUNT
+};
+
+void GUIModeRows(s4 out[MODE_ROW_COUNT]);
+
+/* The Sound panel. Two of its rows are groups of evenly spaced entries, so the
+   stack holds the whole group and the entries step through it by SND_PITCH. */
+enum { SND_PITCH = 10,
+    SND_OPTS = 6,
+    SND_LIST = 4 };
+enum {
+    SND_ROW_LABEL,
+    SND_ROW_OPTS, /* the six on/off boxes */
+    SND_ROW_RATELABEL,
+    SND_ROW_RATEBOX,
+    SND_ROW_VOLLABEL,
+    SND_ROW_VOL,
+    SND_ROW_LISTLABEL, /* INTERPOLATION: and LOWPASS: share the row */
+    SND_ROW_LIST,
+    SND_ROW_COUNT
+};
+
+void GUISoundRows(s4 out[SND_ROW_COUNT]);
+
+/* The Options panel's two tabs. The Windows-only group is part of the Basic
+   stack and takes no height elsewhere, so the rows under it close up rather
+   than leaving the hole they used to. */
+enum {
+    OPT_BAS_SYSLABEL,
+    OPT_BAS_224,
+    OPT_BAS_GAP1,
+    OPT_BAS_GFXLABEL,
+    OPT_BAS_NEWENG,
+    OPT_BAS_ALTENG,
+    OPT_BAS_GAP2,
+    OPT_BAS_ROMLABEL,
+    OPT_BAS_PATCH,
+    OPT_BAS_ROMINFODISP,
+    OPT_BAS_ROMLOG,
+    OPT_BAS_GAP3,
+    OPT_BAS_WINLABEL,
+    OPT_BAS_PAUSEBG,
+    OPT_BAS_PRIORITY,
+    OPT_BAS_SAVER,
+    OPT_BAS_COUNT
+};
+
+void GUIOptionBasicRows(s4 out[OPT_BAS_COUNT]);
+
+enum {
+    OPT_OVR_LABEL,
+    OPT_OVR_FPS,
+    OPT_OVR_CPU,
+    OPT_OVR_CLOCK, /* the 12 hour box shares the row, further right */
+    OPT_OVR_CLOCKBOX,
+    OPT_OVR_GAP1,
+    OPT_OVR_MSGLABEL,
+    OPT_OVR_SMALLTEXT,
+    OPT_OVR_TRANSP,
+    OPT_OVR_GAP2,
+    OPT_OVR_SHOTLABEL,
+    OPT_OVR_BMP,
+    OPT_OVR_PNG,
+    OPT_OVR_COUNT
+};
+
+void GUIOptionOverlayRows(s4 out[OPT_OVR_COUNT]);
+
+/* Every path panel is the same column of identical rows: a label, the box ten
+   pixels under it, and the green text inside that. Only the row index differs
+   between the three tabs, so both the drawing and the click handling ask for
+   the row rather than writing the same ladder of numbers out again. */
+enum { PATH_ROW_FIRST = 31,
+    PATH_ROW_PITCH = 35 };
+
+s4 GUIPathRow(u4 i);
+
+/* The Save panel: a column of checkboxes, then the grid of state shortcut
+   boxes under it. The clickable inside of a box sits one pixel in from the
+   border the drawing lays down, which is the +1 the click side carries. */
+enum { SAVE_ROW_FIRST = 38,
+    SAVE_ROW_PITCH = 10,
+    SAVE_SLOT_FIRST = 129,
+    SAVE_SLOT_PITCH = 9,
+    SAVE_SLOT_COL = 26,
+    SAVE_SLOT_COLPITCH = 45 };
+
+s4 GUISaveRow(u4 i);
+s4 GUISaveSlotY(u4 row);
+s4 GUISaveSlotX(u4 col);
+
+/* Which control in the open panel the keyboard is on. Up and down move it,
+   left and right work it. Shared so the panel can show which one is focused;
+   panels that have no focusable rows simply ignore it. */
+extern u1 GUIFocus;
+
+/* The Retro panel's focusable rows, in the order up and down walk them. */
+enum { CRT_FOCUS_SCANLINES,
+    CRT_FOCUS_VIBRANCY,
+    CRT_FOCUS_BLOOM,
+    CRT_FOCUS_COUNT };
+
 #endif

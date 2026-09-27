@@ -1,24 +1,3 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #ifdef __UNIXSDL__
 #include "gblhdr.h"
 #include "zdir.h"
@@ -33,19 +12,29 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "c_init.h"
 #include "c_intrf.h"
 #include "cfg.h"
+#include "chips/sa1regs.h"
 #include "cpu/c_dspproc.h"
+#include "cpu/dspproc.h" /* the DSP block, for the layout check in selftest() */
 #include "input.h"
 #include "mmlib/mm.h"
 #include "ui.h"
+#include "video/makevid.h"
 #include "video/procvid.h"
 #include "zpath.h"
+#include "zstate.h"
 
 #define BIT(x) (1 << (x))
 
 extern uint8_t* SA1RAMArea;
+/* Endpoints of a few of the inline-asm data blocks, for the layout check in
+   selftest() below. */
+extern u4 BRRTemp0, SA1Mode;
+extern u1 SA1Control;
+extern u2 mode7A, mode7B;
+extern u1 mode7A_dw[4];
 extern uint32_t xa, maxromspace;
 extern uint8_t spcon, device1, device2;
-extern char CSStatus[], CSStatus2[], CSStatus3[], CSStatus4[];
+extern char CSStatus[41], CSStatus2[41], CSStatus3[41], CSStatus4[41]; /* initc.h */
 
 u2 selcA000;
 
@@ -93,8 +82,8 @@ unsigned char finterleave = 0;
 u1 DSPDisable = 0;
 u1 MusicVol = 0;
 
-void init();
-void MultiMouseInit();
+void init(void);
+void MultiMouseInit(void);
 
 _Noreturn void zexit(void);
 _Noreturn void zexit_error(void);
@@ -106,61 +95,46 @@ extern bool input2mouse;
 extern bool input2scope;
 extern bool input2just;
 
+/* Two devices, so two tries. A cart can declare neither - the NSRT header's
+   Lasabirdie port type turns both off - and the search then never ended. */
 void cycleinputdevice1(void)
 {
-    for (;;) {
+    u1 const was = device1;
+    int tries;
+
+    for (tries = 0; tries < 2; tries++) {
         device1++;
         if (device1 >= 2) {
             device1 = 0;
         }
-        if (device1 == 0) {
-            if (input1gp) {
-                return;
-            }
-            device1++;
-        }
-        if (device1 == 1) {
-            if (input1mouse) {
-                return;
-            }
+        if (device1 == 0 ? input1gp : input1mouse) {
+            return;
         }
     }
+    device1 = was;
 }
 
+/* Five devices, five tries, for the same reason. */
 bool cycleinputdevice2(void)
 {
+    u1 const was = device2;
     bool wrap = false;
-    for (;;) {
+    int tries;
+
+    for (tries = 0; tries < 5; tries++) {
         device2++;
         if (device2 >= 5) {
             wrap = true;
             device2 = 0;
         }
-        if (device2 == 0) {
-            if (input2gp)
-                break;
-            device2++;
-        }
-        if (device2 == 1) {
-            if (input2mouse)
-                break;
-            device2++;
-        }
-        if (device2 == 2) {
-            if (input2scope)
-                break;
-            device2++;
-        }
-        if (device2 == 3) {
-            if (input2just)
-                break;
-            device2++;
-        }
-        if (device2 == 4) {
-            if (input2just)
-                break;
+        if (device2 == 0       ? input2gp
+                : device2 == 1 ? input2mouse
+                : device2 == 2 ? input2scope
+                               : input2just) {
+            return wrap;
         }
     }
+    device2 = was;
     return wrap;
 }
 
@@ -176,7 +150,7 @@ const unsigned char samplenoise[128] = {
     110, 123, 106, 133, 183, 209, 48, 230, 157, 205, 27, 21, 107, 63, 85, 164
 };
 
-void setnoise()
+void setnoise(void)
 {
     unsigned short ctr1, ctr2, ptr1 = 0;
     unsigned char ptr2 = 0, ptr3 = 0;
@@ -191,7 +165,7 @@ void setnoise()
     }
 }
 
-static void outofmemory()
+static void outofmemory(void)
 {
     puts("You don't have enough memory to run this program!");
     DosExit();
@@ -217,15 +191,20 @@ unsigned char vrama[65536];
 
 u1 mode7tab[65536];
 
-u2 fulladdtab[65536];
+/* One entry past 64K: the colour-math writers load a dword from the
+   last word, so the table has to own the two bytes that follow. */
+u2 fulladdtab[65537];
 u2 VolumeConvTable[32768];
 
+/* Cleared as well as freed: ZCleanup is the only caller today, and a second
+   call would otherwise hand the allocator the same pointer twice. */
 #define deallocmemhelp(p) \
     if (p) {              \
         free(p);          \
+        (p) = NULL;       \
     }
 
-void deallocmem()
+void deallocmem(void)
 {
     deallocmemhelp(BitConv32Ptr);
     deallocmemhelp(RGBtoYUVPtr);
@@ -236,6 +215,8 @@ void deallocmem()
     deallocmemhelp(ngwinptrb);
     deallocmemhelp(vbufdptr);
     deallocmemhelp(romaptr);
+    deallocmemhelp(sfxramdata);
+    deallocmemhelp(setaramdata);
     deallocmemhelp(vcache2bs);
     deallocmemhelp(vcache4bs);
     deallocmemhelp(vcache8bs);
@@ -243,35 +224,148 @@ void deallocmem()
     deallocmemhelp(vcache4b);
     deallocmemhelp(vcache8b);
     deallocmemhelp(sram);
+    deallocmemhelp(SA1RAMArea);
 }
+
+/* The ROM buffer used to run to 16MB because the SuperFX and Seta work RAM
+   were parked inside it at 14MB, well past any cart. They are their own
+   allocations now, so the buffer only has to hold the cart and one spare bank
+   past it: a fetch that runs off the end lands on the three byte stub written
+   at maxromspace, and the fetch after that still has to be inside. */
+enum { ROM_SPACE_BYTES = 0xC00000,
+    ROM_BUFFER_BYTES = ROM_SPACE_BYTES + 0x10000,
+    /* Four 64K banks of SuperFX work RAM, then the line address tables the
+       chip's setup builds at the 1MB mark: the same two megabytes the area
+       spanned when it sat inside the ROM buffer. */
+    SFX_RAM_BYTES = 0x200000,
+    /* The chips mask their addresses to 4K, but seta11 also indexes at
+       index + 0x419 with an index this code does not bound, and there is no
+       Seta cart here to try it on, so keep a bank of room as the old shared
+       region did. */
+    SETA_RAM_BYTES = 0x10000 };
 
 #define AllocmemFail(ptr, size)  \
     if (!(ptr = malloc(size))) { \
         outofmemory();           \
     }
 
-static void allocmem()
+/* ZSNES_SELFTEST=1 checks the runtime this platform produced, then exits.
+   Every buffer here is reached through a pointer that crosses a translation
+   unit, and a slot narrower than a pointer truncates it - the fault this looks
+   for. Needs no ROM and no display. */
+static int selftest_buf(const char* name, void* p, size_t n)
 {
-    AllocmemFail(BitConv32Ptr, 4096 + 65536 * 16);
-    AllocmemFail(RGBtoYUVPtr, 65536 * 4 + 4096);
-    AllocmemFail(spcBuffera, 65536 * 4 + 4096);
-    AllocmemFail(spritetablea, 256 * 512 + 4096);
-    AllocmemFail(vbufaptr, 512 * 296 * 4 + 4096 + 512 * 296);
-    AllocmemFail(vbufeptr, 288 * 2 * 256 + 4096);
-    AllocmemFail(ngwinptrb, 256 * 224 + 4096);
-    AllocmemFail(vbufdptr, 1024 * 296);
-    AllocmemFail(vcache2bs, 65536 * 4 * 4 + 4096);
-    AllocmemFail(vcache4bs, 65536 * 4 * 2 + 4096);
-    AllocmemFail(vcache8bs, 65536 * 4 + 4096);
+    volatile unsigned char* b = p;
+    if (!b) {
+        printf("SELFTEST: FAIL %s not allocated\n", name);
+        return (1);
+    }
+    b[0] = 0x5A;
+    b[n - 1] = 0xA5;
+    if (b[0] != 0x5A || b[n - 1] != 0xA5) {
+        printf("SELFTEST: FAIL %s did not read back\n", name);
+        return (1);
+    }
+    return (0);
+}
+
+/* The inline-asm data blocks only work if the linker leaves them whole - ld64
+   splits a section at every symbol and -dead_strip then repacks it. These are
+   a few of the distances the emulator and the save-state code rely on, checked
+   in the binary that ships rather than in the differently-linked tests. */
+static int selftest_gap(const char* name, const void* a, const void* b,
+    ptrdiff_t want)
+{
+    /* Through uintptr_t on purpose: these point into different objects, and
+       subtracting such pointers directly is undefined even though the distance
+       is exactly what this checks. */
+    ptrdiff_t got = (ptrdiff_t)((uintptr_t)b - (uintptr_t)a);
+
+    if (got == want) {
+        return (0);
+    }
+    printf("SELFTEST: FAIL %s is %td bytes, want %td\n", name, got, want);
+    return (1);
+}
+
+static _Noreturn void selftest(void)
+{
+    int bad = 0;
+
+    printf("SELFTEST: pointer %u bytes, zreg %u bytes\n",
+        (unsigned)sizeof(void*), (unsigned)sizeof(zreg));
+    if (sizeof(zreg) != sizeof(void*)) {
+        puts("SELFTEST: FAIL zreg cannot hold a pointer");
+        bad = 1;
+    }
+
+    bad |= selftest_buf("BitConv32Ptr", BitConv32Ptr, BITCONV32_BYTES);
+    bad |= selftest_buf("RGBtoYUVPtr", RGBtoYUVPtr, RGBTOYUV_BYTES);
+    bad |= selftest_buf("spcBuffera", spcBuffera, SPCBUFFER_BYTES);
+    bad |= selftest_buf("vbufaptr", vbufaptr, VIDBUFFER_BYTES);
+    bad |= selftest_buf("vbufeptr", vbufeptr, VIDBUFFER2_BYTES);
+    bad |= selftest_buf("ngwinptrb", ngwinptrb, NGWIN_BYTES);
+    bad |= selftest_buf("vbufdptr", vbufdptr, VIDBUFFERD_BYTES);
+    bad |= selftest_buf("romaptr", romaptr, ROM_BUFFER_BYTES);
+    bad |= selftest_buf("sfxramdata", sfxramdata, SFX_RAM_BYTES);
+    bad |= selftest_buf("setaramdata", setaramdata, SETA_RAM_BYTES);
+    bad |= selftest_buf("SA1RAMArea", SA1RAMArea, SA1_BWRAM_BYTES);
+    bad |= selftest_buf("sram", sram, 65536 * 2);
+
+    /* The emulator hands these on to other units; a narrower declaration on
+       the far side shows up as a mismatch here. */
+    if (vidbuffer != vbufaptr || romdata != romaptr || ngwinptr != ngwinptrb) {
+        puts("SELFTEST: FAIL a derived pointer does not match its allocation");
+        bad = 1;
+    }
+
+    bad |= selftest_gap("BRRPlace0..BRRTemp0", &BRRPlace0[0][0], &BRRTemp0, 4);
+    bad |= selftest_gap("BRRPlace0..Voice0Freq", &BRRPlace0[0][0], Voice0Freq, 64);
+    bad |= selftest_gap("DSPInterP..PSampleBuf", DSPInterP, &PSampleBuf[0][0], 0x800);
+    bad |= selftest_gap("mode7A..mode7B", &mode7A, &mode7B, 2);
+    bad |= selftest_gap("mode7A_dw..mode7A", mode7A_dw, &mode7A, 0);
+    bad |= selftest_gap("SA1Mode..SA1Control", &SA1Mode, &SA1Control, 4);
+
+    /* Whether any cartridge would make two save-state formats the same
+       length, which is all the loader has to tell them apart by. */
+    bad |= zst_format_check() != 0;
+
+    puts(bad ? "SELFTEST: FAIL" : "SELFTEST: PASS");
+    exit(bad ? 1 : 0);
+}
+
+_Static_assert(256 * 64 * sizeof(SpriteInfo) <= SPRITETABLE_BYTES, "sprite table too small");
+
+static void allocmem(void)
+{
+    AllocmemFail(BitConv32Ptr, BITCONV32_BYTES);
+    AllocmemFail(RGBtoYUVPtr, RGBTOYUV_BYTES);
+    AllocmemFail(spcBuffera, SPCBUFFER_BYTES);
+    AllocmemFail(spritetablea, SPRITETABLE_BYTES);
+    AllocmemFail(vbufaptr, VIDBUFFER_BYTES);
+    AllocmemFail(vbufeptr, VIDBUFFER2_BYTES);
+    AllocmemFail(ngwinptrb, NGWIN_BYTES);
+    AllocmemFail(vbufdptr, VIDBUFFERD_BYTES);
+    AllocmemFail(vcache2bs, VCACHE2S_BYTES);
+    AllocmemFail(vcache4bs, VCACHE4S_BYTES);
+    AllocmemFail(vcache8bs, VCACHE8S_BYTES);
     AllocmemFail(sram, 65536 * 2);
-    AllocmemFail(vcache2b, 262144 + 256);
-    AllocmemFail(vcache4b, 131072 + 256);
-    AllocmemFail(vcache8b, 65536 + 256);
-    AllocmemFail(SA1RAMArea, 131072);
-    AllocmemFail(romaptr, 0x1000000);
+    AllocmemFail(vcache2b, VCACHE2_BYTES);
+    AllocmemFail(vcache4b, VCACHE4_BYTES);
+    AllocmemFail(vcache8b, VCACHE8_BYTES);
+    AllocmemFail(SA1RAMArea, SA1_BWRAM_BYTES);
+    AllocmemFail(romaptr, ROM_BUFFER_BYTES);
+
+    /* Zeroed, unlike the ROM buffer: the Seta chip runs a command when byte
+       0x21 of its RAM reads 0x80, so it must not start out as whatever the
+       allocator handed back. */
+    if (!(sfxramdata = calloc(SFX_RAM_BYTES, 1))
+        || !(setaramdata = calloc(SETA_RAM_BYTES, 1))) {
+        outofmemory();
+    }
 
     newgfx16b = 1;
-    maxromspace = 0xC00000;
+    maxromspace = ROM_SPACE_BYTES;
 
     // Set up memory values
     vidbuffer = vbufaptr;
@@ -281,8 +375,6 @@ static void allocmem()
 
     headdata = romaptr;
     romdata = romaptr;
-    sfxramdata = romaptr + 0xE00000;
-    setaramdata = romaptr + 0xE00000;
 
     // Puts this ASM after the end of the ROM:
     //         CLI
@@ -300,9 +392,9 @@ static void allocmem()
 unsigned char txtfailedalignd[] = "Data Alignment Failure : ";
 unsigned char txtfailedalignc[] = "Code Alignment Failure : ";
 
-void zstart()
+void zstart(void)
 {
-    unsigned int ptr;
+    uintptr_t ptr;
 
     CPUFeatureCheck();
     StartUp();
@@ -326,6 +418,10 @@ void zstart()
 
     allocmem();
 
+    if (getenv("ZSNES_SELFTEST")) {
+        selftest();
+    }
+
     spcon = !SPCDisable;
     DSPDisable = !soundon || !spcon;
 
@@ -336,9 +432,9 @@ void zstart()
 
     gammalevel16b = gammalevel >> 1;
 
-    ptr = (unsigned int)&xa;
+    ptr = (uintptr_t)&xa;
     if ((ptr & 3)) {
-        printf("%s%d", txtfailedalignd, (ptr & 0x1F));
+        printf("%s%d", txtfailedalignd, (unsigned)(ptr & 0x1F));
         WaitForKey();
     }
 
@@ -377,9 +473,9 @@ static char* seconds_to_asc(unsigned int seconds)
 
 void DisplayBatteryStatus(void)
 {
-    int CheckBattery();
-    int CheckBatteryTime();
-    int CheckBatteryPercent();
+    int CheckBattery(void);
+    int CheckBatteryTime(void);
+    int CheckBatteryPercent(void);
 
     *CSStatus2 = 0;
     *CSStatus3 = 0;
@@ -396,7 +492,7 @@ void DisplayBatteryStatus(void)
 
         strcpy(CSStatus, "PC is plugged in");
         if (percent > 0) {
-            sprintf(CSStatus2, "%d%% charged", percent);
+            snprintf(CSStatus2, sizeof(CSStatus2), "%d%% charged", percent);
         }
     } break;
 
@@ -407,10 +503,14 @@ void DisplayBatteryStatus(void)
 
         strcpy(CSStatus, "PC is running off of battery");
         if (battery_time > 0) {
-            sprintf(CSStatus2, "Time remaining: %s", seconds_to_asc(battery_time));
+            /* The estimate divides by the discharge rate, so a battery
+               reporting next to none makes this line far longer than it
+               looks. */
+            snprintf(CSStatus2, sizeof(CSStatus2), "Time remaining: %s",
+                seconds_to_asc(battery_time));
         }
         if (percent > 0) {
-            sprintf(CSStatus3, "%d%% remaining", percent);
+            snprintf(CSStatus3, sizeof(CSStatus3), "%d%% remaining", percent);
         }
     } break;
     }
@@ -429,13 +529,13 @@ u2 MouseButtons[2];
 
 static bool MouseWaiting[2];
 
-void MultiMouseShutdown()
+void MultiMouseShutdown(void)
 {
     MouseCount = 0;
     ManyMouse_Quit();
 }
 
-void MultiMouseInit()
+void MultiMouseInit(void)
 {
 #ifdef __linux__
     DIR* input_dir;

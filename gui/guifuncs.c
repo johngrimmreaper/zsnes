@@ -1,27 +1,8 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
+#include "../types.h" /* IGNORE_RESULT */
 
 #ifdef __UNIXSDL__
 #include "../gblhdr.h"
-#include "../linux/sdllink.h"
+#include "../unix/sdllink.h"
 #define fnamecmp strcmp
 #define fnamencmp strncmp
 #else
@@ -45,24 +26,26 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include <unistd.h>
 #endif
 
-#include "../asm_call.h"
-#include "../cfg.h"
+#include "../cpu/execute.h" /* pressed[] */
 #include "../initc.h"
-#include "../input.h"
+#include "cfg.h"
+#include "input.h"
 #ifndef lengthof
 #define lengthof(x) (sizeof(x) / sizeof *(x))
 #endif
-#include "../md.h"
 #include "../ui.h"
+#include "../video/filter.h"
 #include "../zdir.h"
 #include "../zloader.h"
 #include "../zpath.h"
 #include "c_gui.h"
 #include "c_guiwindp.h"
 #include "gui.h"
+#include "guiarena.h"
 #include "guicheat.h"
 #include "guifuncs.h"
 #include "guiwindp.h"
+#include "md.h"
 
 #define BIT(X) (1 << (X))
 
@@ -92,7 +75,7 @@ static void InsertFontChar(char data[], u4 const glyph, u4 const y)
     GUIFontData1[glyph][y] = ConvertBinaryToInt(data);
 }
 
-void LoadCustomFont()
+void LoadCustomFont(void)
 {
     FILE* fp;
     char data[100];
@@ -101,19 +84,19 @@ void LoadCustomFont()
     fp = fopen_dir(ZCfgPath, "zfont.txt", "r");
     if (fp) {
         while (fgets(data, 100, fp) && strcmp(data, "EOF\n") && x < 141) {
-            fgets(data, 10, fp); // get first line
+            IGNORE_RESULT(fgets(data, 10, fp)); // get first line
             InsertFontChar(data, x, 0);
 
-            fgets(data, 10, fp); // get second line
+            IGNORE_RESULT(fgets(data, 10, fp)); // get second line
             InsertFontChar(data, x, 1);
 
-            fgets(data, 10, fp); // get third line
+            IGNORE_RESULT(fgets(data, 10, fp)); // get third line
             InsertFontChar(data, x, 2);
 
-            fgets(data, 10, fp); // get fourth line
+            IGNORE_RESULT(fgets(data, 10, fp)); // get fourth line
             InsertFontChar(data, x, 3);
 
-            fgets(data, 10, fp); // get fifth line
+            IGNORE_RESULT(fgets(data, 10, fp)); // get fifth line
             InsertFontChar(data, x, 4);
         }
     } else {
@@ -266,6 +249,163 @@ void LoadCustomFont()
     fclose(fp);
 }
 
+/* 0 = off, 1 = full, 2 = 25%, 3 = 50%, as the scanlines setting and the -n
+   flag have always been documented, on the 0..100 scale the renderers use. */
+u1 GUIScanlineIntensity(u1 const level)
+{
+    switch (level) {
+    case 1:
+        return 100;
+    case 2:
+        return 25;
+    case 3:
+        return 50;
+    default:
+        return 0;
+    }
+}
+
+/* Turn off a filter this video mode's panel does not offer: one picked in
+   another mode used to stay on with no box to switch it off. */
+void GUIFilterForMode(void)
+{
+    if (newgfx16b == 0 || GUIDSIZE[cvidmode] == 0) {
+        En2xSaI = 0;
+    }
+    if (newgfx16b == 0
+        || (GUIHQ2X[cvidmode] == 0 && GUIHQ3X[cvidmode] == 0
+            && GUIHQ4X[cvidmode] == 0)) {
+        hqFilter = 0;
+    }
+    if (GUINTVID[cvidmode] == 0) {
+        NTSCFilter = 0;
+    }
+    VideoFilterNormalise();
+}
+
+/* Whether the Retro panel offers the 0..100 slider or the four old steps.
+   Everything the SDL ports draw runs the shared tube pass (video/crt.c) and
+   takes the slider; the DirectDraw blitter only understands the steps. */
+int GUIScanlineSlider(void)
+{
+#ifdef __UNIXSDL__
+    return 1;
+#else
+    return GUIBIFIL[cvidmode] != 0;
+#endif
+}
+
+/* Scanline depth in both spellings: the renderers read the slider, the config
+   file and -n hold `scanlines`. Letting them disagree is what made the setting
+   appear to change with the video mode. */
+void GUISetScanlines(u1 const intensity)
+{
+    sl_intensity = intensity > 100 ? 100 : intensity;
+    scanlines = sl_intensity == 0 ? 0
+        : sl_intensity <= 37      ? 2 /* 25% */
+        : sl_intensity <= 75      ? 3 /* 50% */
+                                  : 1; /* full */
+}
+
+void GUISetScanlineStep(u1 const level)
+{
+    scanlines = level;
+    sl_intensity = GUIScanlineIntensity(level);
+}
+
+/* Every key binding the two config files carry. A binding indexes pressed[],
+   and neither file is checked as it is read, so one that was edited by hand
+   or damaged put the index anywhere. */
+#define PLAYER_KEYS(p)                                                       \
+    &p##selk, &p##startk, &p##upk, &p##downk, &p##leftk, &p##rightk, &p##Xk, \
+        &p##Ak, &p##Lk, &p##Yk, &p##Bk, &p##Rk, &p##Atk, &p##Btk, &p##Xtk,   \
+        &p##Ytk, &p##Ltk, &p##Rtk, &p##ULk, &p##URk, &p##DLk, &p##DRk
+static u4* const key_bindings[] = {
+    PLAYER_KEYS(pl1),
+    PLAYER_KEYS(pl2),
+    PLAYER_KEYS(pl3),
+    PLAYER_KEYS(pl4),
+    PLAYER_KEYS(pl5),
+    &SSAutoFire,
+    &SSPause,
+    &KeyExtraEnab1,
+    &KeyExtraEnab2,
+    &KeyExtraRotate,
+    &KeySaveState,
+    &KeyStateSelct,
+    &KeyLoadState,
+    &KeyIncStateSlot,
+    &KeyDecStateSlot,
+    &KeyStateSlc0,
+    &KeyStateSlc1,
+    &KeyStateSlc2,
+    &KeyStateSlc3,
+    &KeyStateSlc4,
+    &KeyStateSlc5,
+    &KeyStateSlc6,
+    &KeyStateSlc7,
+    &KeyStateSlc8,
+    &KeyStateSlc9,
+    &KeyRewind,
+    &KeyFastFrwrd,
+    &KeySlowDown,
+    &KeyFRateUp,
+    &KeyFRateDown,
+    &KeyEmuSpeedUp,
+    &KeyEmuSpeedDown,
+    &KeyResetSpeed,
+    &EMUPauseKey,
+    &INCRFrameKey,
+    &KeyBGDisble0,
+    &KeyBGDisble1,
+    &KeyBGDisble2,
+    &KeyBGDisble3,
+    &KeySprDisble,
+    &KeyDisableSC0,
+    &KeyDisableSC1,
+    &KeyDisableSC2,
+    &KeyDisableSC3,
+    &KeyDisableSC4,
+    &KeyDisableSC5,
+    &KeyDisableSC6,
+    &KeyDisableSC7,
+    &KeyVolUp,
+    &KeyVolDown,
+    &KeyQuickExit,
+    &KeyQuickLoad,
+    &KeyQuickRst,
+    &KeyResetAll,
+    &KeyQuickClock,
+    &KeyQuickChat,
+    &KeyQuickSnapShot,
+    &KeyQuickSaveSPC,
+    &KeyUsePlayer1234,
+    &KeyDisplayFPS,
+    &KeyDisplayCPU,
+    &KeyDisplayBatt,
+    &KeyNewGfxSwt,
+    &KeyWinDisble,
+    &KeyOffsetMSw,
+    &KeyIncreaseGamma,
+    &KeyDecreaseGamma,
+    &KeyInsrtChap,
+    &KeyPrevChap,
+    &KeyNextChap,
+    &KeyRTRCycle,
+};
+#undef PLAYER_KEYS
+
+void ClampKeyBindings(void)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(key_bindings) / sizeof(*key_bindings); i++) {
+        if (*key_bindings[i] >= sizeof(pressed) / sizeof(*pressed)) {
+            *key_bindings[i] = 0;
+        }
+    }
+}
+
 static void CheckValueBounds(void* ptr, int min, int max, int val, enum vtype type)
 {
     switch (type) {
@@ -304,13 +444,18 @@ static void CheckValueBounds(void* ptr, int min, int max, int val, enum vtype ty
     }
 }
 
-unsigned char CalcCfgChecksum()
+unsigned char CalcCfgChecksum(void)
 {
-    unsigned char *ptr = &GUIRAdd, i = 0;
+    /* gui.asm summed 100 bytes from GUIRAdd, which headed one contiguous block
+       of GUI settings; those are separate objects now and half the block is
+       gone. TimeChecker is written to the config and never read back, so
+       summing the settings that survive keeps it in bounds. */
+    unsigned char const cfg[] = { GUIRAdd, GUIGAdd, GUIBAdd, mouseshad, mousewrap };
+    unsigned char i = 0;
     unsigned short chksum = 0;
 
-    for (; i < 100; i++, ptr++) {
-        chksum += *ptr;
+    for (; i < sizeof(cfg); i++) {
+        chksum += cfg[i];
     }
 
     chksum ^= 0xB2ED; // xor bx,1011001011101101b
@@ -330,14 +475,22 @@ unsigned char CalcCfgChecksum()
     return (((chksum & 0xFF) ^ i) | 0x80);
 }
 
-void GUIRestoreVars()
+void GUIRestoreVars(void)
 {
     int i;
     FILE* cfg_fp;
+    /* A first run has no config file yet. Stamp new installs to physical key
+       positions; an existing config keeps its stored (layout-key) bindings. */
+    bool const fresh_install = access_dir(ZCfgPath, ZCfgFile, F_OK) != 0;
 
     psr_cfg_run(read_cfg_vars, ZCfgPath, ZCfgFile);
     psr_cfg_run(read_md_vars, ZCfgPath, "zmovie.cfg");
     psr_cfg_run(read_input_vars, ZCfgPath, "zinput.cfg");
+    ClampKeyBindings();
+
+    if (fresh_install) {
+        InputPhysicalKeys = 1;
+    }
 
     CheckValueBounds(&pl1contrl, 0, 1, 1, UB);
     CheckValueBounds(&pl2contrl, 0, 1, 0, UB);
@@ -384,8 +537,8 @@ void GUIRestoreVars()
     CheckValueBounds(&GUIEnableTransp, 0, 1, 0, UB);
 
 #ifdef __WIN32__
-    CheckValueBounds(&cvidmode, 0, 59, 2, UB);
-    CheckValueBounds(&PrevWinMode, 0, 59, 2, UB);
+    CheckValueBounds(&cvidmode, 0, 59, 3, UB);
+    CheckValueBounds(&PrevWinMode, 0, 59, 3, UB);
     CheckValueBounds(&PrevFSMode, 0, 59, 6, UB);
 #endif
 #ifdef __UNIXSDL__
@@ -423,7 +576,17 @@ void GUIRestoreVars()
     CheckValueBounds(&En2xSaI, 0, 3, 0, UB);
     CheckValueBounds(&hqFilter, 0, 1, 0, UB);
     CheckValueBounds(&hqFilterlevel, 2, 4, 2, UB);
+    CheckValueBounds(&sl_intensity, 0, 100, 50, UB);
+    CheckValueBounds(&sl_vibrancy, 0, 100, 45, UB);
+    CheckValueBounds(&BloomLevel, 0, 100, 25, UB);
     CheckValueBounds(&scanlines, 0, 3, 0, UB);
+    /* Two spellings of one setting, kept agreeing by GUISetScanlines. Only a
+       configuration older than the slider has the step set and the slider at
+       zero; convert that and leave the slider alone otherwise, or a chosen
+       value would be rounded to one of four steps on every start. */
+    if (scanlines != 0 && sl_intensity == 0) {
+        sl_intensity = GUIScanlineIntensity(scanlines);
+    }
     CheckValueBounds(&GrayscaleMode, 0, 1, 0, UB);
     CheckValueBounds(&Mode7HiRes16b, 0, 1, 0, UB);
 #ifndef __UNIXSDL__
@@ -545,11 +708,15 @@ void GUIRestoreVars()
 
     if ((cfg_fp = fopen_dir(ZCfgPath, "data.cmb", "rb"))) {
         u1 ComboBlHeader[23];
-        fread(ComboBlHeader, 1, 23, cfg_fp);
+        IGNORE_RESULT(fread(ComboBlHeader, 1, 23, cfg_fp));
 
         if (ComboBlHeader[22]) {
             NumComboGlob = ComboBlHeader[22];
-            fread(CombinDataGlob, sizeof(*CombinDataGlob), NumComboGlob, cfg_fp);
+
+            if (NumComboGlob > lengthof(CombinDataGlob))
+                NumComboGlob = lengthof(CombinDataGlob);
+
+            IGNORE_RESULT(fread(CombinDataGlob, sizeof(*CombinDataGlob), NumComboGlob, cfg_fp));
         }
 
         fclose(cfg_fp);
@@ -656,17 +823,24 @@ void CheatCodeLoad(void)
             NumCheats = cheat_file_size / 28;
         else {
             NumCheats = cheat_file_size / 18;
-            i = 28 * NumCheats;
-            j = cheat_file_size - (cheat_file_size % 18);
+            if (NumCheats > 255) {
+                NumCheats = 0;
+            } else {
+                i = 28 * NumCheats;
+                j = cheat_file_size - (cheat_file_size % 18);
 
-            do {
-                i -= 28;
-                j -= 18;
+                /* A while, not a do-while: a file too short to hold one entry
+                   leaves nothing to convert, and both counters are unsigned,
+                   so the first decrement wrapped and wrote off the array. */
+                while (i > 0) {
+                    i -= 28;
+                    j -= 18;
 
-                memset(&cheatdata[i + 20], 0, 8);
-                memmove(&cheatdata[i + 8], &cheatdata[j + 6], 12);
-                memmove(&cheatdata[i], &cheatdata[j], 6);
-            } while (i > 0);
+                    memset(&cheatdata[i + 20], 0, 8);
+                    memmove(&cheatdata[i + 8], &cheatdata[j + 6], 12);
+                    memmove(&cheatdata[i], &cheatdata[j], 6);
+                }
+            }
         }
 
         EnableCheatsOnLoad();
@@ -695,7 +869,7 @@ void LoadCheatSearchFile(void)
     FILE* fp = 0;
 
     if ((fp = fopen_dir(ZCfgPath, "tmpchtsr.___", "rb"))) {
-        fread(vidbuffer + 129600, 1, 65536 * 2 + 32768, fp);
+        IGNORE_RESULT(fread(vidbuffer + 129600, 1, 65536 * 2 + 32768, fp));
         fclose(fp);
     }
 }
@@ -704,7 +878,7 @@ void dumpsound(void)
 {
     FILE* fp = fopen_dir(ZSpcPath, "sounddmp.raw", "wb");
     if (fp) {
-        fwrite(spcBuffera, 1, 65536 * 4 + 4096, fp);
+        fwrite(spcBuffera, 1, SPCBUFFER_BYTES, fp);
         fclose(fp);
     }
 }
@@ -715,10 +889,10 @@ static bool snes_extension_match(const char* filename)
     if (dot) {
         dot++;
         if (!strcasecmp(dot, "sfc") || !strcasecmp(dot, "zip") || !strcasecmp(dot, "gz") || !strcasecmp(dot, "st") || !strcasecmp(dot, "bs") || !strcasecmp(dot, "smc") || !strcasecmp(dot, "swc") || !strcasecmp(dot, "fig") || !strcasecmp(dot, "dx2") || !strcasecmp(dot, "ufo") || !strcasecmp(dot, "gd3") || !strcasecmp(dot, "gd7") || !strcasecmp(dot, "mgd") || !strcasecmp(dot, "mgh") || !strcasecmp(dot, "048") || !strcasecmp(dot, "058") || !strcasecmp(dot, "078") || !strcasecmp(dot, "bin") || !strcasecmp(dot, "usa") || !strcasecmp(dot, "eur") || !strcasecmp(dot, "jap") || !strcasecmp(dot, "aus") || !strcasecmp(dot, "1") || !strcasecmp(dot, "a")) {
-            return (true);
+            return true;
         }
     }
-    return (false);
+    return false;
 }
 
 #define HEADER_SIZE 512
@@ -749,7 +923,7 @@ static const char* get_rom_name(struct dirent_info* entry, char* namebuffer)
                     break;
                 }
 
-                fread(HeaderBuffer, 1, HEADER_SIZE, fp);
+                IGNORE_RESULT(fread(HeaderBuffer, 1, HEADER_SIZE, fp));
 
                 if (sum(HeaderBuffer, HEADER_SIZE) < 2500) {
                     HasHeadScore += 2;
@@ -770,7 +944,7 @@ static const char* get_rom_name(struct dirent_info* entry, char* namebuffer)
 
                 if (entry->size - HeaderSize >= 0x500000) {
                     fseek(fp, 0x40FFC0 + HeaderSize, SEEK_SET);
-                    fread(HeaderBuffer, 1, INFO_LEN, fp);
+                    IGNORE_RESULT(fread(HeaderBuffer, 1, INFO_LEN, fp));
                     if (InfoScore((char*)HeaderBuffer) > 1) {
                         EHi = true;
                         memcpy(namebuffer, HeaderBuffer, INAME_LEN);
@@ -783,11 +957,11 @@ static const char* get_rom_name(struct dirent_info* entry, char* namebuffer)
                         int LoScore, HiScore;
 
                         fseek(fp, 0x7FC0 + HeaderSize, SEEK_SET);
-                        fread(LoHead, 1, INFO_LEN, fp);
+                        IGNORE_RESULT(fread(LoHead, 1, INFO_LEN, fp));
                         LoScore = InfoScore(LoHead);
 
                         fseek(fp, 0xFFC0 + HeaderSize, SEEK_SET);
-                        fread(HiHead, 1, INFO_LEN, fp);
+                        IGNORE_RESULT(fread(HiHead, 1, INFO_LEN, fp));
                         HiScore = InfoScore(HiHead);
 
                         memcpy(namebuffer, LoScore > HiScore ? LoHead : HiHead, INAME_LEN);
@@ -795,7 +969,7 @@ static const char* get_rom_name(struct dirent_info* entry, char* namebuffer)
                         if (entry->size - HeaderSize >= 0x20000) {
                             int IntLScore;
                             fseek(fp, (entry->size - HeaderSize) / 2 + 0x7FC0 + HeaderSize, SEEK_SET);
-                            fread(LoHead, 1, INFO_LEN, fp);
+                            IGNORE_RESULT(fread(LoHead, 1, INFO_LEN, fp));
                             IntLScore = InfoScore(LoHead) / 2;
 
                             if (IntLScore > LoScore && IntLScore > HiScore) {
@@ -805,7 +979,7 @@ static const char* get_rom_name(struct dirent_info* entry, char* namebuffer)
                     } else // ROM only has one block
                     {
                         fseek(fp, 0x7FC0 + HeaderSize, SEEK_SET);
-                        fread(namebuffer, INAME_LEN, 1, fp);
+                        IGNORE_RESULT(fread(namebuffer, INAME_LEN, 1, fp));
                     }
                 }
                 fclose(fp);
@@ -887,46 +1061,47 @@ static void sort(intptr_t* array, int begin, int end, void (*swapfunc)(size_t, s
     }
 }
 
-void free_list(char*** list)
+/* The lists come out of the GUI arena, so a list is dropped by forgetting it:
+   free_all_file_lists resets the arena and every string in every list goes at
+   once. Element 0 is the count and element 1 the number of slots, both kept in
+   the pointer slots the original did, with the names from element 2 on and a
+   NULL after the last one - so a list of n names needs n + 3 slots. */
+enum { LIST_HEAD = 2,
+    LIST_GROW = 1000 };
+
+static char** grow_list(char** const list, size_t const count, size_t const slots)
 {
-    char** p = *list;
-    if (p) {
-        p += 2;
-        while (*p) {
-            free(*p++);
-        }
-        free(*list);
-        *list = 0;
+    char** const grown = (char**)GUIAlloc((slots + LIST_GROW) * sizeof(void*));
+
+    if (!grown) {
+        return NULL;
     }
+    if (list) {
+        memcpy(grown, list, (count + 1) * sizeof(void*));
+    } else {
+        grown[0] = (char*)LIST_HEAD;
+    }
+    grown[1] = (char*)(slots + LIST_GROW);
+    return grown;
 }
 
-// A possible problem here would be if one of the list arrays got enlarged but a corosponding one ran out of memory
 static void add_list(char*** reallist, const char* p)
 {
     char** list = *reallist;
-    if (!list) {
-        if (!(list = malloc(1003 * sizeof(void*)))) {
-            return;
-        }
-        list[0] = (char*)2;
-        list[1] = (char*)1002;
-        list[2] = 0;
-    }
+    size_t count = list ? (size_t)list[0] : (size_t)LIST_HEAD;
+    size_t const slots = list ? (size_t)list[1] : (size_t)LIST_HEAD + 1;
 
-    if (list[0] == list[1] - 1) {
-        char** p = realloc(list, ((size_t)list[1] + 1000) * sizeof(void*));
-        if (p) {
-            list = p;
-            list[1] += 1000;
-        } else {
+    /* Room for the name and for the NULL after it. */
+    if (count + 1 >= slots) {
+        list = grow_list(list, count, slots);
+        if (!list) {
             return;
         }
     }
 
-    if ((list[(size_t)*list] = malloc(strlen(p) + 1))) {
-        strcpy(list[(size_t)*list], p);
-        list[0]++;
-        list[(size_t)*list] = 0;
+    if ((list[count] = GUIStrdup(p))) {
+        list[0] = (char*)(count + 1);
+        list[count + 1] = 0;
     }
     *reallist = list;
 }
@@ -969,8 +1144,8 @@ void populate_lists(unsigned int lists, bool snes_ext_match)
         unsigned int drives = GetLogicalDrives(), i = 0;
 #endif
 
-        if (d_names) {
-            unsigned int offset = (d_names[2][0] == '.') ? 3 : 2;
+        if (d_names && d_names[LIST_HEAD]) {
+            unsigned int offset = (d_names[LIST_HEAD][0] == '.') ? 3 : 2;
             sort((intptr_t*)d_names, offset, (size_t)(*d_names), swapdirs);
         }
 
@@ -1025,13 +1200,23 @@ void GUIloadfilename(char* filename)
     }
 }
 
+/* The recent-games list as cfg.psr lays it out and the config file stores it:
+   ten fixed slots, with the directory one byte into its own. Nothing promises
+   a slot is terminated - the config is a file like any other - so every copy
+   in or out is bounded. */
+enum { QUICK_SLOT_BYTES = 512,
+    QUICK_DIR_BYTES = QUICK_SLOT_BYTES - 1,
+    QUICK_LAST_SLOT = 9 };
+
 void loadquickfname(u1 const slot)
 {
     if (prevloaddnamel[1 + slot * 512]) // replace with better test
     {
-        strcpy(ZRomPath, (char*)prevloaddnamel + 1 + slot * 512);
+        snprintf(ZRomPath, PATH_SIZE, "%.*s", QUICK_DIR_BYTES,
+            (char*)prevloaddnamel + 1 + slot * QUICK_SLOT_BYTES);
         strcatslash(ZRomPath);
-        strcpy(ZCartName, (char*)prevloadfnamel + slot * 512);
+        snprintf(ZCartName, NAME_SIZE, "%.*s", NAME_SIZE - 1,
+            (char*)prevloadfnamel + slot * QUICK_SLOT_BYTES);
 
         if (!access_dir(ZRomPath, ZCartName, R_OK)) {
             if (slot || !prevlfreeze) {
@@ -1081,12 +1266,10 @@ s4 GUIcurrentdircursloc;
 s4 GUIdirentries;
 s4 GUIfileentries;
 
-void free_all_file_lists()
+void free_all_file_lists(void)
 {
-    free_list(&d_names);
-    free_list(&i_names);
-    free_list(&lf_names);
-    free_list(&et_names);
+    d_names = i_names = lf_names = et_names = selected_names = 0;
+    GUIArenaReset();
 }
 
 void GetLoadData(void)
@@ -1109,9 +1292,12 @@ void GetLoadData(void)
         selected_names = main_names;
         break;
     }
-    selected_names += 2;
-    GUIfileentries = main_names ? ((unsigned int)(uintptr_t)(*main_names)) - 2 : 0;
-    GUIdirentries = d_names ? ((unsigned int)(uintptr_t)(*d_names)) - 2 : 0;
+    /* An empty listing leaves the pointer NULL; do not walk two past it. */
+    if (selected_names) {
+        selected_names += LIST_HEAD;
+    }
+    GUIfileentries = main_names ? (s4)((uintptr_t)(*main_names)) - LIST_HEAD : 0;
+    GUIdirentries = d_names ? (s4)((uintptr_t)(*d_names)) - LIST_HEAD : 0;
 }
 
 u4 GUIcurrentfilewin;
@@ -1121,6 +1307,10 @@ void GUILoadData(void)
     char* nameptr;
 
     GUICBHold = 0;
+    /* An empty listing has no list at all, and LOAD is a button. */
+    if (GUIcurrentfilewin ? (!d_names || GUIcurrentdircursloc >= GUIdirentries)
+                          : (!main_names || GUIcurrentcursloc >= GUIfileentries))
+        return;
     if (GUIcurrentfilewin) // directories
     {
         nameptr = d_names[GUIcurrentdircursloc + 2];
@@ -1137,7 +1327,7 @@ void GUILoadData(void)
         {
             if (!strcmp(nameptr, "..")) {
                 strdirname(ZRomPath);
-            } else {
+            } else if (strlen(ZRomPath) + strlen(nameptr) + 2 <= PATH_SIZE) {
                 strcat(ZRomPath, nameptr);
             }
             strcatslash(ZRomPath);
@@ -1169,8 +1359,13 @@ void GUILoadData(void)
             if (!dupfound) {
                 strncpy((char*)prevloadiname + 9 * 28, selected_names[GUIcurrentcursloc], 28);
                 prevloadiname[9 * 28 + 27] = 0;
-                strcpy((char*)prevloaddnamel + 9 * 512 + 1, ZRomPath);
-                strcpy((char*)prevloadfnamel + 9 * 512, ZCartName);
+                /* A directory longer than a slot wrote 3.5KB past this
+                   array; recording it truncated means the entry simply never
+                   matches again. */
+                snprintf((char*)prevloaddnamel + QUICK_LAST_SLOT * QUICK_SLOT_BYTES + 1,
+                    QUICK_DIR_BYTES, "%s", ZRomPath);
+                snprintf((char*)prevloadfnamel + QUICK_LAST_SLOT * QUICK_SLOT_BYTES,
+                    QUICK_SLOT_BYTES, "%s", ZCartName);
             }
 
             loadquickfname(i);
@@ -1183,7 +1378,7 @@ void GUILoadData(void)
     }
 }
 
-void GUILoadManualDir()
+void GUILoadManualDir(void)
 {
 
     if (*GUILoadTextA) {
@@ -1514,7 +1709,7 @@ bool Keep43Check(void)
     return CustomResX * 3 != CustomResY * 4;
 }
 
-char CheckOGLMode()
+char CheckOGLMode(void)
 {
     return (GUIBIFIL[cvidmode]);
 }

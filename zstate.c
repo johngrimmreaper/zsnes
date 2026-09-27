@@ -1,23 +1,4 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
+#include "types.h" /* IGNORE_RESULT */
 
 #ifdef __UNIXSDL__
 #include "gblhdr.h"
@@ -33,7 +14,6 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include <unistd.h>
 #endif
 #endif
-#include "asm_call.h"
 #include "c_vcache.h"
 #include "cfg.h"
 #include "chips/c4proc.h"
@@ -47,9 +27,11 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "endmem.h"
 #include "gblvars.h"
 #include "gui/c_guiwindp.h"
+#include "gui/guifuncs.h"
 #include "init.h"
 #include "initc.h"
 #include "input.h"
+#include "saveload.h"
 #include "ui.h"
 #include "video/procvid.h"
 #include "zmovie.h"
@@ -64,9 +46,9 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #define clim()
 #define stim()
 
-void SA1UpdateDPageC(), unpackfunct(), repackfunct();
-void PrepareOffset(), ResetOffset(), initpitch(), UpdateBanksSDD1();
-void procexecloop();
+void SA1UpdateDPageC(void), unpackfunct(void), repackfunct(void);
+void PrepareOffset(void), ResetOffset(void), initpitch(void), UpdateBanksSDD1(void);
+void procexecloop(void);
 
 void copy_spc7110_state_data(uint8_t**, void (*)(unsigned char**, void*, size_t), bool);
 
@@ -75,6 +57,29 @@ extern uint8_t xirqb, curnmi;
 extern uint16_t stackand, stackor, xat, xst, xdt, xxt, xyt;
 
 u4 Totalbyteloaded;
+
+/* ZSNES 1.51 heads its states "V143" exactly as we do, so only the length
+   separates them: its PPU register block and DSP block are shorter, and the
+   162 added register bytes are interleaved rather than appended. */
+#define ZST_151_PPUREG 3019
+#define ZST_151_DSPSAVE 1068
+
+/* 1.51's 3019-byte sndrot block matches this build's register file except at two
+   gaps: hdmadata (152 data bytes there, host pointers here - 280 at 64-bit, 152
+   at 32-bit) and this build's extra h_dot_counter before tempdat. copy_snes_data
+   derives the copy runs from live offsets, so it is right at either width. */
+extern u4 h_dot_counter;
+
+/* Zero means "this build's own layout". */
+static size_t zst_ppureg_run;
+static size_t zst_dspsave_run;
+
+enum { HDMA_SAVED_BYTES = 8 * (4 * 4 + 3) }; /* hdmadata at 32-bit width */
+/* The 64-bit 2.3.0/2.3.1 releases wrote hdmadata and Voice0BufPtr at pointer
+   width, ZST_WIDE_EXTRA (zstate.h) bytes wider. Set while loading one. */
+_Static_assert(ZST_WIDE_EXTRA == 8 * (4 * 8 + 3) - HDMA_SAVED_BYTES + 8 * (8 - 4),
+    "ZST_WIDE_EXTRA");
+static int zst_wide_ptrs;
 
 static void copy_snes_data(uint8_t** buffer, void (*copy_func)(uint8_t**, void*, size_t))
 {
@@ -107,36 +112,149 @@ static void copy_snes_data(uint8_t** buffer, void (*copy_func)(uint8_t**, void*,
     copy_func(buffer, &cycpbl, 4);
     copy_func(buffer, &cycpblt, 4);
     // SNES PPU register block (sndrot is start; size is exported from asm).
-    copy_func(buffer, &sndrot, PHnum2writeppureg);
+    if (zst_ppureg_run) {
+        static uint8_t old[ZST_151_PPUREG];
+        /* volatile: &sndrot names a one-byte object, but the register file runs
+           past it; without this the copy is bounds-checked against that byte. */
+        void* volatile block = &sndrot;
+        uint8_t* const dst = (uint8_t*)block;
+        /* Gap offsets in this build; HDMA_SAVED_BYTES is 1.51's on-disk hdmadata.
+           hdmadata keeps its own host pointers - a $420C write rebuilds it. */
+        size_t const hd_to = (size_t)((uint8_t*)hdmadata - dst);
+        size_t const hdc_to = (size_t)((uint8_t*)&h_dot_counter - dst);
+        /* .from tracks 1.51's shorter layout as each gap is skipped. */
+        struct {
+            size_t from, to, len;
+        } const run[3] = {
+            { 0, 0, hd_to },
+            { hd_to + HDMA_SAVED_BYTES, hd_to + sizeof(hdmadata),
+                hdc_to - (hd_to + sizeof(hdmadata)) },
+            { hd_to + HDMA_SAVED_BYTES + (hdc_to - (hd_to + sizeof(hdmadata))),
+                hdc_to + sizeof(h_dot_counter), 0 },
+        };
+        size_t i;
+
+        copy_func(buffer, old, sizeof(old));
+        for (i = 0; i < 3; i++) {
+            size_t const len = i == 2 ? ZST_151_PPUREG - run[2].from : run[i].len;
+            size_t j;
+
+            for (j = 0; j < len; j++) {
+                dst[run[i].to + j] = old[run[i].from + j];
+            }
+        }
+    } else {
+        /* Through a plain &sndrot, __builtin_object_size bounds the copy at
+           sizeof(sndrot) == 1 and _FORTIFY_SOURCE aborts the restore: the
+           block being copied is the whole register file that follows it, and
+           its length lives in the assembly. The 1.51 branch above hides the
+           address the same way.
+
+           hdmadata holds host pointers, so it is stepped over and the file
+           keeps the 32-bit width; a load clears nexthdma and setuphdma
+           rebuilds it on the next $420C write. */
+        static uint8_t hdma_slot[8 * (4 * 8 + 3)];
+        void* volatile block = &sndrot;
+        uint8_t* const base = (uint8_t*)block;
+        size_t const upto = (size_t)((uint8_t*)hdmadata - base);
+        size_t const live = sizeof(hdmadata);
+
+        copy_func(buffer, base, upto);
+        copy_func(buffer, hdma_slot, zst_wide_ptrs ? sizeof(hdma_slot) : HDMA_SAVED_BYTES);
+        copy_func(buffer, base + upto + live, PHnum2writeppureg - upto - live);
+    }
 }
+
+extern uint8_t oamram[1024] ASM_ALIGNED(1), pcgram[512] ASM_ALIGNED(1); /* inside the PPU register file */
+extern uint8_t spcram_run[0x10140]; /* SPCRAM and the blocks saved with it */
+static uint32_t nmiprevaddr_slot[2];
+
+/* Held the two SA-1 DMA host pointers; both are set before every transfer. */
+static uint8_t sa1dmaptr_slot[8];
+extern s2* Voice0BufPtr[8] ASM_ALIGNED(8);
+extern uint32_t Voice0BufPtrSt[8];
 
 static void copy_spc_data(uint8_t** buffer, void (*copy_func)(uint8_t**, void*, size_t))
 {
-    // SPC stuff, DSP stuff
-    copy_func(buffer, SPCRAM, PHspcsave);
-    copy_func(buffer, BRRBuffer, PHdspsave);
+    size_t const dsp = zst_dspsave_run ? zst_dspsave_run : (size_t)PHdspsave;
+    /* volatile: the run continues past Voice0BufPtr, and _FORTIFY_SOURCE
+       would otherwise bound the copy at that array. */
+    uint8_t* volatile after = (uint8_t*)Voice0BufPtr + sizeof(Voice0BufPtr);
+    size_t const upto = (size_t)((uint8_t*)Voice0BufPtr - (uint8_t*)BRRBuffer);
+
+    copy_func(buffer, spcram_run, PHspcsave);
+    /* Only Voice0BufPtr narrows between 1.51 and this build; BRRPlace0 and every
+       other field in the block have the same width, so the surrounding runs are
+       byte-identical and only the pointer array is converted. */
+    if (upto < dsp) {
+        static uint8_t wide_slot[8 * 8];
+
+        copy_func(buffer, BRRBuffer, upto);
+        if (zst_wide_ptrs) {
+            copy_func(buffer, wide_slot, sizeof(wide_slot));
+        } else {
+            copy_func(buffer, Voice0BufPtrSt, sizeof(Voice0BufPtrSt));
+        }
+        copy_func(buffer, after, (size_t)PHdspsave - upto - sizeof(Voice0BufPtr));
+    } else {
+        copy_func(buffer, BRRBuffer, dsp);
+    }
     copy_func(buffer, &DSPMem, sizeof(DSPMem));
 }
+
+/* Each of these names the whole run the savestate copies, so the copy stays
+   inside one object; the layout is pinned by the ASM_GSYM block that
+   defines it. */
+extern uint8_t spc700read_run[40] ASM_ALIGNED(1), opcd_run[24] ASM_ALIGNED(1), oamaddr_run[56];
+extern uint8_t DSP1_run[6 + 32 + 32 + 1 + 256];
+extern uint8_t DSP1COp, DSP1RLeft, DSP1WLeft, DSP1CPtrW, DSP1CPtrR;
+void DSP1_copy_state(uint8_t** buffer, void (*copy_func)(uint8_t**, void*, size_t));
+
+/* How much room the DSP1 section took in a V143 state, written the way the
+   old code spelled it so the two can be compared. Only somewhere to put the
+   bytes while parsing past them. */
+static uint8_t dsp1_v143_discard[(70 + 128)
+    + (3 * 4 + 128) + (4 * 4 + 128) + (4 * 4 + 128) + (5 * 4 + 128)
+    + (5 * 4 + 128) + (4 * 4 + 128) + (5 * 4 + 128)
+    + (11 * 4 + 3 * 4 + 28 * 8 + 128) + (5 * 4 + 14 * 8 + 128)
+    + (6 * 4 + 10 * 8 + 4 + 128) + (4 * 4 + 128) + (6 * 4 + 128)
+    + (6 * 4 + 128) + (9 * 4 + 128) + (4 * 4 + 128)];
 
 static void copy_extra_data(uint8_t** buffer, void (*copy_func)(uint8_t**, void*, size_t))
 {
     copy_func(buffer, &soundcycleft, 4);
     copy_func(buffer, &curexecstate, 4);
-    copy_func(buffer, &nmiprevaddrl, 4);
-    copy_func(buffer, &nmiprevaddrh, 4);
+    /* nmiprevaddrl/h are host addresses; the loader restarts the window. */
+    copy_func(buffer, nmiprevaddr_slot, sizeof(nmiprevaddr_slot));
     copy_func(buffer, &nmirept, 4);
     copy_func(buffer, &nmiprevline, 4);
     copy_func(buffer, &nmistatus, 4);
     copy_func(buffer, &joycontren, 4);
     copy_func(buffer, &NextLineCache, 1);
-    copy_func(buffer, &spc700read, 10 * 4);
+    copy_func(buffer, spc700read_run, 10 * 4);
     copy_func(buffer, &timer2upd, 4);
-    copy_func(buffer, &xa, 14 * 4);
+    /* The 65816 register block, one dword at a time: these are separate C
+       globals in initdata.c, so copying 56 bytes from &xa assumed a layout
+       nothing guarantees. Same bytes, same order. */
+    copy_func(buffer, &xa, 4);
+    copy_func(buffer, &xdb, 4);
+    copy_func(buffer, &xpb, 4);
+    copy_func(buffer, &xs, 4);
+    copy_func(buffer, &xd, 4);
+    copy_func(buffer, &xx, 4);
+    copy_func(buffer, &xy, 4);
+    copy_func(buffer, &flagnz, 4);
+    copy_func(buffer, &flago, 4);
+    copy_func(buffer, &flagc, 4);
+    copy_func(buffer, &bankkp, 4);
+    copy_func(buffer, &Sflagnz, 4);
+    copy_func(buffer, &Sflago, 4);
+    copy_func(buffer, &Sflagc, 4);
     copy_func(buffer, &spcnumread, 1);
-    copy_func(buffer, &opcd, 6 * 4);
+    copy_func(buffer, opcd_run, 6 * 4);
     copy_func(buffer, &HIRQCycNext, 4);
     copy_func(buffer, &HIRQNextExe, 1);
-    copy_func(buffer, &oamaddr, 14 * 4);
+    copy_func(buffer, oamaddr_run, 14 * 4);
     copy_func(buffer, &prevoamptr, 1);
 }
 
@@ -144,26 +262,37 @@ static size_t load_save_size;
 
 enum copy_state_method { csm_save_zst_new,
     csm_load_zst_new,
+    csm_load_zst_143,
     csm_load_zst_old,
     csm_save_rewind,
     csm_load_rewind };
 
+/* The section map is only wanted when the round-trip checker is running, and
+   these marks sit inside the copy loop, so a normal build compiles them out.
+   See WITH_DEBUG_HOOKS in the Makefile. */
+#ifdef ZSNES_DEBUG_HOOKS
+void zst_mark(char const* label);
+#else
+#define zst_mark(label) ((void)0)
+#endif
+
+extern uint8_t SetaCmdEnable[4];
+
 static void copy_state_data(uint8_t* buffer, void (*copy_func)(uint8_t**, void*, size_t), enum copy_state_method method)
 {
     copy_snes_data(&buffer, copy_func);
+    zst_mark("snes");
 
     // WRAM (128k), VRAM (64k)
     copy_func(&buffer, wramdata, 8192 * 16);
+    zst_mark("wram");
     copy_func(&buffer, vram, 4096 * 16);
+    zst_mark("vram");
 
     if (spcon) {
         copy_spc_data(&buffer, copy_func);
-        /*
-    if (buffer) //Rewind stuff
-    {
-      copy_func(&buffer, &echoon0, PHdspsave2);
-    }
-    */
+        zst_mark("spc");
+        /* The echo-on run after the DSP block is not part of the format. */
     }
 
     if (C4Enable) {
@@ -179,36 +308,37 @@ static void copy_state_data(uint8_t* buffer, void (*copy_func)(uint8_t**, void*,
         copy_func(&buffer, &SA1Mode, PHnum2writesa1reg);
         copy_func(&buffer, SA1RAMArea, 8192 * 16);
         if (method != csm_load_zst_old) {
-            copy_func(&buffer, &SA1Status, 3);
+            copy_func(&buffer, &SA1Status, 1);
+            copy_func(&buffer, &CurrentExecSA1, 1);
+            copy_func(&buffer, &CurrentCPU, 1);
             copy_func(&buffer, &SA1xpc, 1 * 4);
-            copy_func(&buffer, &sa1dmaptr, 2 * 4);
+            copy_func(&buffer, sa1dmaptr_slot, sizeof(sa1dmaptr_slot));
         }
     }
 
     if (DSP1Enable && (method != csm_load_zst_old)) {
-        copy_func(&buffer, &DSP1COp, 70 + 128);
-        copy_func(&buffer, &Op00Multiplicand, 3 * 4 + 128);
-        copy_func(&buffer, &Op10Coefficient, 4 * 4 + 128);
-        copy_func(&buffer, &Op04Angle, 4 * 4 + 128);
-        copy_func(&buffer, &Op08X, 5 * 4 + 128);
-        copy_func(&buffer, &Op18X, 5 * 4 + 128);
-        copy_func(&buffer, &Op28X, 4 * 4 + 128);
-        copy_func(&buffer, &Op0CA, 5 * 4 + 128);
-        copy_func(&buffer, &Op02FX, 11 * 4 + 3 * 4 + 28 * 8 + 128);
-        copy_func(&buffer, &Op0AVS, 5 * 4 + 14 * 8 + 128);
-        copy_func(&buffer, &Op06X, 6 * 4 + 10 * 8 + 4 + 128);
-        copy_func(&buffer, &Op01m, 4 * 4 + 128);
-        copy_func(&buffer, &Op0DX, 6 * 4 + 128);
-        copy_func(&buffer, &Op03F, 6 * 4 + 128);
-        copy_func(&buffer, &Op14Zr, 9 * 4 + 128);
-        copy_func(&buffer, &Op0EH, 4 * 4 + 128);
+        if (method == csm_load_zst_143) {
+            /* Replaying V143's runs would write hundreds of bytes over
+               two-byte objects, so read and drop them; the game reissues a
+               command, inputs and all, before using a result. */
+            copy_func(&buffer, dsp1_v143_discard, sizeof dsp1_v143_discard);
+            /* The dropped bytes include the command interface, which would
+               otherwise describe a transaction the restored CPU is not in. */
+            DSP1COp = DSP1RLeft = DSP1WLeft = DSP1CPtrW = DSP1CPtrR = 0;
+        } else {
+            copy_func(&buffer, DSP1_run, sizeof DSP1_run);
+            DSP1_copy_state(&buffer, copy_func);
+        }
     }
 
     if (SETAEnable) {
         copy_func(&buffer, setaramdata, 256 * 16);
 
-        // Todo: copy the SetaCmdEnable?  For completeness we should do it
-        // but currently we ignore it anyway.
+        /* The ST-010 command register the game drives through $60:0000; new
+           in V144, so the older formats stop short of it. */
+        if ((method != csm_load_zst_143) && (method != csm_load_zst_old)) {
+            copy_func(&buffer, SetaCmdEnable, sizeof(SetaCmdEnable));
+        }
     }
 
     if (SPC7110Enable) {
@@ -322,16 +452,26 @@ uint8_t* StateBackup = 0;
 uint8_t AllocatedRewindStates, LatestRewindPos, EarliestRewindPos;
 bool RewindPosPassed;
 
-size_t rewind_state_size, cur_zst_size, old_zst_size;
+size_t rewind_state_size, cur_zst_size, v143_zst_size, old_zst_size;
 
 void zmv_rewind_save(size_t, bool);
 void zmv_rewind_load(size_t, bool);
 
-void ClearCacheCheck()
+void ClearCacheCheck(void)
 {
     memset(vidmemch2, 1, sizeof(vidmemch2));
     memset(vidmemch4, 1, sizeof(vidmemch4));
     memset(vidmemch8, 1, sizeof(vidmemch8));
+    /* The palette is cached the same way the tiles are: video/c_newgfx16.c
+       keeps the previous cgram in prevpal2 and, for an entry it thinks is
+       unchanged, copies the already-converted colour out of the rotating
+       buffer instead of recomputing it. A state restores cgram but not that
+       cache, so after loading into a process with a different palette history
+       the untouched entries keep the old process's colours. An out-of-range
+       prevbright forces setpalallng(), which rebuilds every entry and
+       refreshes prevpal2 with it. Same idiom as the graphics-engine switch in
+       c_vcache.c. */
+    prevbright = 16;
 }
 
 // Code to handle special frames for pausing, and desync checking
@@ -345,7 +485,7 @@ Pause frame modes
 3 - pause frame ready for reload
 */
 
-void BackupPauseFrame()
+void BackupPauseFrame(void)
 {
     if (SpecialPauseBackup) {
         copy_state_data(SpecialPauseBackup, memcpyinc, csm_save_rewind);
@@ -353,7 +493,7 @@ void BackupPauseFrame()
     }
 }
 
-void RestorePauseFrame()
+void RestorePauseFrame(void)
 {
     if (SpecialPauseBackup) {
         copy_state_data(SpecialPauseBackup, memcpyrinc, csm_load_rewind);
@@ -362,16 +502,17 @@ void RestorePauseFrame()
     }
 }
 
-void DeallocPauseFrame()
+void DeallocPauseFrame(void)
 {
     if (SpecialPauseBackup) {
         free(SpecialPauseBackup);
+        SpecialPauseBackup = 0;
     }
 }
 
 #define ActualRewindFrames (uint32_t)(RewindFrames * (romispal ? 10 : 12))
 
-void BackupCVFrame()
+void BackupCVFrame(void)
 {
     uint8_t* RewindBufferPos = StateBackup + LatestRewindPos * rewind_state_size;
 
@@ -386,7 +527,6 @@ void BackupCVFrame()
         EarliestRewindPos = (EarliestRewindPos + 1) % AllocatedRewindStates;
         RewindPosPassed = false;
     }
-    //  printf("Backing up in #%u, earliest: #%u, allocated: %u\n", LatestRewindPos, EarliestRewindPos, AllocatedRewindStates);
 
     LatestRewindPos = (LatestRewindPos + 1) % AllocatedRewindStates;
 
@@ -399,7 +539,7 @@ void BackupCVFrame()
     //  printf("New backup slot: #%u, timer %u, check %u\n", LatestRewindPos, RewindTimer, DblRewTimer);
 }
 
-void RestoreCVFrame()
+void RestoreCVFrame(void)
 {
     uint8_t* RewindBufferPos;
 
@@ -440,7 +580,7 @@ void RestoreCVFrame()
     DblRewTimer = 2 * ActualRewindFrames;
 }
 
-void SetupRewindBuffer()
+void SetupRewindBuffer(void)
 {
     // For special rewind case to help out pauses
     DeallocPauseFrame();
@@ -460,10 +600,11 @@ void SetupRewindBuffer()
     AllocatedRewindStates = RewindStates;
 }
 
-void DeallocRewindBuffer()
+void DeallocRewindBuffer(void)
 {
     if (StateBackup) {
         free(StateBackup);
+        StateBackup = 0;
     }
 }
 
@@ -474,12 +615,139 @@ static void state_size_tally(uint8_t** dest, void* src, size_t len)
     state_size += len;
 }
 
-void InitRewindVars()
+/* FNV-1a over the same blocks the rewind snapshot saves, which is exactly the
+   state one frame of emulation may depend on. Netplay lives or dies on two
+   builds agreeing here, so it is worth being able to ask them. */
+static uint64_t state_hash_acc;
+
+static int state_hash_blocks;
+static unsigned state_hash_index;
+
+static void state_hash_tally(uint8_t** dest, void* src, size_t len)
+{
+    uint8_t const* p = (uint8_t const*)src;
+    uint64_t block = 0xCBF29CE484222325ull;
+    size_t i;
+
+    (void)dest;
+    for (i = 0; i < len; i++) {
+        state_hash_acc = (state_hash_acc ^ p[i]) * 0x100000001B3ull;
+        block = (block ^ p[i]) * 0x100000001B3ull;
+    }
+    if (state_hash_blocks) {
+        size_t const n = len <= 256 ? len : 16;
+        size_t j;
+
+        printf("BLOCK %3u len=%-8zu hash=%016llx  ", state_hash_index, len,
+            (unsigned long long)block);
+        for (j = 0; j < n; j++) {
+            printf("%02x", p[j]);
+        }
+        printf("\n");
+    }
+    state_hash_index++;
+}
+
+#ifdef ZSNES_DEBUG_HOOKS
+/* ZSNES_STATE_HASH=N: print the guest state hash at emulated frame N and stop.
+   Counted on the vblank NMI, which is emulation's own clock. */
+unsigned zsnes_emulated_frame; /* NMIs since reset; emulation's own clock */
+
+void zst_state_hash_tick(void)
+{
+    static int at = -2;
+    unsigned const frame = zsnes_emulated_frame;
+
+    if (at == -2) {
+        char const* const e = getenv("ZSNES_STATE_HASH");
+
+        at = e ? atoi(e) : -1;
+    }
+    if (at >= 0 && frame == (unsigned)at) {
+        printf("STATEHASH frame=%d hash=%016llx\n", at,
+            (unsigned long long)zst_state_hash());
+        fflush(stdout);
+        exit(0);
+    }
+    zsnes_emulated_frame++;
+}
+#endif
+
+/* Only what the guest can see. Deliberately not the rewind snapshot: that is
+   the emulator's own bookkeeping and carries host pointers, measured varying
+   between runs of one binary, so hashing it says nothing. */
+uint64_t zst_state_hash(void)
+{
+    uint8_t* dummy = 0;
+
+    state_hash_acc = 0xCBF29CE484222325ull;
+    state_hash_index = 0;
+    state_hash_blocks = getenv("ZSNES_STATE_HASH_BLOCKS") != 0;
+
+    state_hash_tally(&dummy, wramdata, 8192 * 16); /* 0 wram */
+    state_hash_tally(&dummy, vram, 4096 * 16); /* 1 vram */
+    state_hash_tally(&dummy, spcram_run, PHspcsave); /* 2 spc  */
+    state_hash_tally(&dummy, &DSPMem, sizeof(DSPMem)); /* 3 dsp */
+
+    /* The 65816's architectural registers. */
+    state_hash_tally(&dummy, &xa, 4);
+    state_hash_tally(&dummy, &xx, 4);
+    state_hash_tally(&dummy, &xy, 4);
+    state_hash_tally(&dummy, &xd, 4);
+    state_hash_tally(&dummy, &xs, 4);
+    state_hash_tally(&dummy, &xdb, 4);
+    state_hash_tally(&dummy, &xpb, 4);
+    state_hash_tally(&dummy, &xpc, 2);
+    state_hash_tally(&dummy, &xp, 1);
+    state_hash_tally(&dummy, &xe, 1);
+
+    /* Appended, so the block numbers above keep the meaning older runs
+       recorded. The PPU register file is also where OAM and CGRAM live, and it
+       is taken through a volatile pointer for the reason copy_snes_data does:
+       &sndrot is one byte to __builtin_object_size. OAM and CGRAM then get a
+       block each, so a block-by-block comparison says which it was. */
+    {
+        /* Minus hdmadata: its register-handler pointers are host addresses,
+           which made the hash differ between builds of the same emulator. */
+        void* volatile ppu = &sndrot;
+        uint8_t* const base = (uint8_t*)ppu;
+        size_t const upto = (size_t)((uint8_t*)hdmadata - base);
+        size_t const live = sizeof(hdmadata);
+
+        state_hash_tally(&dummy, base, upto); /* 14 ppu regs before hdmadata */
+        state_hash_tally(&dummy, base + upto + live, PHnum2writeppureg - upto - live); /* 15 after */
+    }
+    state_hash_tally(&dummy, oamram, 1024); /* 16 oam */
+    state_hash_tally(&dummy, cgram, sizeof(cgram)); /* 17 cgram */
+    state_hash_tally(&dummy, pcgram, 512); /* 18 pcgram */
+    state_hash_tally(&dummy, oamaddr_run, 14 * 4); /* 19 oam pointers */
+    state_hash_tally(&dummy, spc700read_run, 10 * 4); /* 20 spc700 regs */
+    state_hash_tally(&dummy, opcd_run, 6 * 4); /* 21 opcode state */
+
+    /* Where in the frame the two machines think they are. */
+    state_hash_tally(&dummy, &curcyc, 1);
+    state_hash_tally(&dummy, &curypos, 2);
+    state_hash_tally(&dummy, &cycpl, 1);
+    state_hash_tally(&dummy, &cycphb, 1);
+    state_hash_tally(&dummy, &intrset, 1);
+    state_hash_tally(&dummy, &curnmi, 1);
+    state_hash_tally(&dummy, &nmistatus, 4);
+    state_hash_tally(&dummy, &joycontren, 4);
+
+    return state_hash_acc;
+}
+
+void InitRewindVars(void)
 {
     uint8_t almost_useless_array[1]; // An array is needed for copy_state_data to give the correct size
     state_size = 0;
     copy_state_data(almost_useless_array, state_size_tally, csm_save_rewind);
     rewind_state_size = state_size;
+#ifdef ZSNES_DEBUG_HOOKS
+    if (getenv("ZSNES_STATE_SIZE")) {
+        fprintf(stderr, "rewind state: %zu bytes\n", rewind_state_size);
+    }
+#endif
 
     SetupRewindBuffer();
     LatestRewindPos = 0;
@@ -489,7 +757,7 @@ void InitRewindVars()
     DblRewTimer = 1;
 }
 
-void InitRewindVarsForMovie()
+void InitRewindVarsForMovie(void)
 {
     LatestRewindPos = 0;
     EarliestRewindPos = 0;
@@ -532,113 +800,200 @@ void RestoreSystemVars(void)
     }
 }
 
-void DeallocSystemVars()
+void DeallocSystemVars(void)
 {
     if (BackupSystemBuffer) {
         free(BackupSystemBuffer);
+        BackupSystemBuffer = 0;
     }
 }
 
-extern s2* Voice0BufPtr[8]; // Ptr to Buffer Block to be played
+enum { SPC_BUFFER_BYTES = 65536 * 4 };
+uint32_t Voice0BufPtrSt[8]; /* the cursors as offsets, as the file has them */
 
-void PrepareSaveState()
+void PrepareSaveState(void)
 {
     int i;
 
-    spcPCRam -= (uintptr_t)SPCRAM;
-    spcRamDP -= (uintptr_t)SPCRAM;
+    spcPCRamSt = (uint32_t)(spcPCRam - SPCRAM);
+    initaddrlSt = 0; /* a host pointer nothing reads back */
+    spcRamDPSt = (uint32_t)(spcRamDP - SPCRAM);
 
+    /* A cursor outside the buffer (a voice that never played) saves as 0. */
     for (i = 0; i < 8; i++) {
-        Voice0BufPtr[i] = (s2*)((uintptr_t)Voice0BufPtr[i] - (uintptr_t)spcBuffera);
+        uintptr_t const base = (uintptr_t)spcBuffera;
+        uintptr_t const p = (uintptr_t)Voice0BufPtr[i];
+
+        Voice0BufPtrSt[i] = (uint32_t)(p >= base && p < base + SPC_BUFFER_BYTES
+                ? p - base
+                : 0);
     }
 }
 
 extern uintptr_t SA1Stat;
-extern uint8_t IRAM[2049], *SA1Ptr, *SA1RegPCS, *CurBWPtr, *SA1BWPtr, *SNSBWPtr;
+extern uint8_t IRAM[2049] ASM_ALIGNED(4), *SA1Ptr, *SA1RegPCS, *CurBWPtr, *SA1BWPtr, *SNSBWPtr;
+extern uint8_t *SNSPtr, *SNSRegPCS;
+/* The save-state block carries a dword for each SA-1 pointer; the live ones are
+   pointer-wide and live outside it (chips/sa1regs.c). */
+extern uint32_t SA1PtrSt, SA1RegPCSSt, CurBWPtrSt, SA1BWPtrSt, SNSBWPtrSt;
+extern uint32_t SNSPtrSt, SNSRegPCSSt;
 
-void SaveSA1()
+void SaveSA1(void)
 {
     SA1Stat &= 0xFFFFFF00;
-    SA1Ptr -= (uintptr_t)SA1RegPCS;
+    SA1PtrSt = (uint32_t)(SA1Ptr - SA1RegPCS);
 
     if (SA1RegPCS == IRAM) {
         SA1Stat = (SA1Stat & 0xFFFFFF00) + 1;
     }
 
-    if (SA1RegPCS == IRAM - 0x3000) {
+    if (SA1RegPCS == (uint8_t*)((uintptr_t)IRAM - 0x3000u)) {
         SA1Stat = (SA1Stat & 0xFFFFFF00) + 2;
     }
 
-    SA1RegPCS -= (uintptr_t)romdata;
-    CurBWPtr -= (uintptr_t)romdata;
-    SA1BWPtr -= (uintptr_t)romdata;
-    SNSBWPtr -= (uintptr_t)romdata;
+    SA1RegPCSSt = (uint32_t)(SA1RegPCS - romdata);
+    /* The BW-RAM pointers are bank bases inside SA1RAMArea, so they are stored
+       against it. 1.51 stored them against romdata, which only ever worked
+       because the two allocations kept a fixed distance within one address
+       space; on 64-bit that distance does not fit a dword at all. */
+    CurBWPtrSt = (uint32_t)(CurBWPtr - SA1RAMArea);
+    SA1BWPtrSt = (uint32_t)(SA1BWPtr - SA1RAMArea);
+    SNSBWPtrSt = (uint32_t)(SNSBWPtr - SA1RAMArea);
+    SNSPtrSt = SNSRegPCS ? (uint32_t)(SNSPtr - SNSRegPCS) : 0; /* offsets, never read back */
+    SNSRegPCSSt = SNSRegPCS ? (uint32_t)(SNSRegPCS - romdata) : 0;
 }
 
-void RestoreSA1()
+/* Bank bases run from -0x6000 to the top of the 128K area. Anything else was
+   written by 1.51, where the dword held a difference between two unrelated
+   allocations; the reset bank is the best that can be made of it. */
+static uint8_t* sa1_bwptr(uint32_t const st)
 {
-    SA1RegPCS += (uintptr_t)romdata;
-    CurBWPtr += (uintptr_t)romdata;
-    SA1BWPtr += (uintptr_t)romdata;
-    SNSBWPtr += (uintptr_t)romdata;
+    int32_t const off = (int32_t)st;
+
+    if (off < -0x6000 || off > 0x20000) {
+        return SA1RAMArea - 0x6000;
+    }
+
+    return SA1RAMArea + off;
+}
+
+void RestoreSA1(void)
+{
+    /* Both offsets are signed: the SA-1 bank base is romdata - 0x8000, and the
+       PC can sit below its base. A 32-bit build wrapped around to the right
+       address; widening unsigned lands 4GB away. */
+    SA1RegPCS = romdata + (int32_t)SA1RegPCSSt;
+    CurBWPtr = sa1_bwptr(CurBWPtrSt);
+    SA1BWPtr = sa1_bwptr(SA1BWPtrSt);
+    SNSBWPtr = sa1_bwptr(SNSBWPtrSt);
+    /* SNSPtrSt and SNSRegPCSSt are rewritten on the next SA-1 swap-in. */
 
     if ((SA1Stat & 0xFF) == 1) {
         SA1RegPCS = IRAM;
     }
 
     if ((SA1Stat & 0xFF) == 2) {
-        SA1RegPCS = IRAM - 0x3000;
+        SA1RegPCS = (uint8_t*)((uintptr_t)IRAM - 0x3000u);
     }
 
-    SA1Ptr += (uintptr_t)SA1RegPCS;
+    SA1Ptr = SA1RegPCS + (int32_t)SA1PtrSt;
 }
 
-void ResetState()
+/* RAM, then the IPL ROM the asm data layout puts straight after it. */
+enum { SPC_ADDRESS_BYTES = 0x10000 };
+
+void ResetState(void)
 {
     int i;
 
-    spcPCRam += (uintptr_t)SPCRAM;
-    spcRamDP += (uintptr_t)SPCRAM;
+    /* Offsets from a file, so bound them: a state that puts the SPC700 outside
+       its own address space would leave these pointing anywhere. */
+    spcPCRam = SPCRAM + (spcPCRamSt < SPC_ADDRESS_BYTES ? spcPCRamSt : 0);
+    /* initaddrlSt is the same kind of raw pointer, and the exec loop works the
+       bank base out from xpb/xpc on entry, so there is nothing to restore. */
+    spcRamDP = SPCRAM + (spcRamDPSt < SPC_ADDRESS_BYTES ? spcRamDPSt : 0);
 
     for (i = 0; i < 8; i++) {
-        uintptr_t p = (uintptr_t)Voice0BufPtr[i] + (uintptr_t)spcBuffera;
-        if (p >= (uintptr_t)spcBuffera + 65536 * 4) {
-            p = (uintptr_t)spcBuffera;
-        }
-        Voice0BufPtr[i] = (s2*)p;
+        uint32_t const off = Voice0BufPtrSt[i];
+
+        Voice0BufPtr[i] = (s2*)((uintptr_t)spcBuffera
+            + (off < SPC_BUFFER_BYTES ? off : 0));
     }
 }
 
-extern uint32_t SfxRomBuffer, SfxCROM;
-extern uint32_t SfxLastRamAdr, SfxRAMMem;
+/* SfxRomBuffer and SfxLastRamAdr are host pointers, so they are pointer-wide.
+   The save-state block still carries the dword the file format expects, and
+   the two *St slots hold it: an offset from SfxCROM and SfxRAMMem. */
+extern zreg SfxRomBuffer, SfxCROM;
+extern zreg SfxLastRamAdr, SfxRAMMem;
+extern uint32_t SfxRomBufferSt, SfxLastRamAdrSt;
 
 static FILE* fhandle;
-void CapturePicture();
+void CapturePicture(void);
 
-static void write_save_state_data(uint8_t** dest, void* data, size_t len)
+#ifdef ZSNES_DEBUG_HOOKS
+/* Set while ZST_ROUNDTRIP is mapping which section a differing byte falls in. */
+size_t zst_dbg_off;
+int zst_dbg_on;
+#endif
+
+#ifdef ZSNES_DEBUG_HOOKS
+void zst_mark(char const* label);
+void zst_mark(char const* const label)
 {
-    fwrite(data, 1, len, fhandle);
+    if (zst_dbg_on)
+        fprintf(stderr, "ZST section %-16s ends at %zu\n", label, zst_dbg_off);
 }
+#endif
 
-static const char zst_header_old[] = "ZSNES Save State File V0.6\x1a\x3c";
-static const char zst_header_cur[] = "ZSNES Save State File V143\x1a\x8f";
+/* Which ZSNES wrote a state. 1.51 and ZSNES2 both head their files "V143",
+   so only the length separates them: ZSNES2's PPU register run is longer. */
+enum zst_origin { ZST_UNKNOWN,
+    ZST_ZSNES2,
+    ZST_ZSNES2_WIDE, /* the 64-bit 2.3.0/2.3.1 releases */
+    ZST_151,
+    ZST_V06 };
 
-void calculate_state_sizes()
+static size_t zst_body_size(enum zst_origin o);
+
+/* The magic strings live in saveload.h, the one registry of format identity;
+   these keep sizeof() working for the body-length arithmetic below. V143
+   described its DSP1 section by a memory layout no compiler guarantees, which
+   is why V144 exists; both older formats still load. */
+#define zst_header_old SL_HDR_V06
+#define zst_header_143 SL_HDR_V143
+#define zst_header_cur SL_HDR_V144
+
+void calculate_state_sizes(void)
 {
     state_size = 0;
     copy_state_data(0, state_size_tally, csm_save_zst_new);
     cur_zst_size = state_size + sizeof(zst_header_cur) - 1;
 
     state_size = 0;
+    copy_state_data(0, state_size_tally, csm_load_zst_143);
+    v143_zst_size = state_size + sizeof(zst_header_143) - 1;
+
+    state_size = 0;
     copy_state_data(0, state_size_tally, csm_load_zst_old);
     old_zst_size = state_size + sizeof(zst_header_old) - 1;
+#ifdef ZSNES_DEBUG_HOOKS
+    /* The four lengths zst_classify picks between, which is all it has to go
+       on: two that match would make it load a state as the wrong format. */
+    if (getenv("ZSNES_STATE_SIZE")) {
+        fprintf(stderr, "ZST BODIES cur=%zu wide=%zu v143=%zu old=%zu thumb=%zu\n",
+            zst_body_size(ZST_ZSNES2), zst_body_size(ZST_ZSNES2_WIDE),
+            zst_body_size(ZST_151), zst_body_size(ZST_V06),
+            sizeof(PrevPicture));
+    }
+#endif
 }
 
 uint32_t current_zst = 0;
 uint32_t newest_zst = 0;
 time_t newestfiledate;
 
-char* zst_name()
+char* zst_name(void)
 {
     static char buffer[7];
     if ((MovieProcessing == MOVIE_PLAYBACK) || (MovieProcessing == MOVIE_RECORD)) {
@@ -677,7 +1032,7 @@ void zst_determine_newest(void)
     }
 }
 
-void zst_init()
+void zst_init(void)
 {
     newestfiledate = 0;
 
@@ -741,6 +1096,46 @@ static bool zst_save_compressed(FILE* fp)
     return (worked);
 }
 
+/* Which coprocessors this cartridge uses, in the bit order zst_format_check
+   sweeps. Stamped into a V2 state and checked on load, so a state from another
+   game - whose body happens to be the same length - is refused rather than
+   restored over this one. */
+static u4 zst_feature_mask(void)
+{
+    return (u4)((DSP1Enable ? 1u : 0u)
+        | (C4Enable ? 2u : 0u)
+        | (SFXEnable ? 4u : 0u)
+        | (SA1Enable ? 8u : 0u)
+        | (SPC7110Enable ? 16u : 0u)
+        | (SETAEnable ? 32u : 0u)
+        | (DSP4Enable ? 64u : 0u)
+        | (MSUEnable ? 128u : 0u));
+}
+
+/* Write a standalone V2 (.zst) state: the self-describing envelope, then the
+   body, then an optional thumbnail. The body is buffered first so its length
+   and CRC can head the file. */
+static bool zst_write_v2(FILE* fp, bool thumbnail)
+{
+    size_t const body_len = cur_zst_size - (sizeof(zst_header_cur) - 1);
+    uint8_t* const buffer = (uint8_t*)malloc(body_len ? body_len : 1);
+    bool ok = false;
+
+    if (buffer) {
+        copy_state_data(buffer, memcpyinc, csm_save_zst_new);
+        if (sl_v2_write_header(fp, zst_feature_mask(), (u4)body_len, sl_crc32(buffer, body_len))
+            && fwrite(buffer, 1, body_len, fp) == body_len) {
+            ok = true;
+            if (thumbnail) {
+                CapturePicture();
+                fwrite(PrevPicture, 1, sizeof(PrevPicture), fp);
+            }
+        }
+        free(buffer);
+    }
+    return ok;
+}
+
 void zst_save(FILE* fp, bool Thumbnail, bool Compress)
 {
     PrepareOffset();
@@ -748,8 +1143,8 @@ void zst_save(FILE* fp, bool Thumbnail, bool Compress)
     unpackfunct();
 
     if (SFXEnable) {
-        SfxRomBuffer -= SfxCROM;
-        SfxLastRamAdr -= SfxRAMMem;
+        SfxRomBufferSt = (uint32_t)(SfxRomBuffer - SfxCROM);
+        SfxLastRamAdrSt = (uint32_t)(SfxLastRamAdr - SfxRAMMem);
     }
 
     if (SA1Enable) {
@@ -758,20 +1153,7 @@ void zst_save(FILE* fp, bool Thumbnail, bool Compress)
 
     if (!Compress || !zst_save_compressed(fp)) // If we don't want compressed or compression failed
     {
-        fwrite(zst_header_cur, 1, sizeof(zst_header_cur) - 1, fp); //-1 for null
-
-        fhandle = fp; // Set global file handle
-        copy_state_data(0, write_save_state_data, csm_save_zst_new);
-
-        if (Thumbnail) {
-            CapturePicture();
-            fwrite(PrevPicture, 1, sizeof(PrevPicture), fp);
-        }
-    }
-
-    if (SFXEnable) {
-        SfxRomBuffer += SfxCROM;
-        SfxLastRamAdr += SfxRAMMem;
+        zst_write_v2(fp, Thumbnail);
     }
 
     if (SA1Enable) {
@@ -782,12 +1164,9 @@ void zst_save(FILE* fp, bool Thumbnail, bool Compress)
     ResetState();
 }
 
-/*
-Merges all the passed strings into buffer. Make sure to pass an extra parameter as 0 after all the strings.
-Copies at most buffer_len characters. Result is always null terminated.
-Returns how many bytes are needed to store all strings.
-Thus if return is <= buffer_len, everything was copied.
-*/
+/* Concatenate the varargs (terminated by a 0) into buffer, at most buffer_len
+   bytes and always null terminated. Returns the length needed; <= buffer_len
+   means it all fit. */
 static size_t string_merge(char* buffer, size_t buffer_len, ...)
 {
     char* s;
@@ -815,11 +1194,14 @@ static size_t string_merge(char* buffer, size_t buffer_len, ...)
 
 static char txtmsg[30];
 
-void set_state_message(char* prefix, char* suffix)
+void set_state_message(char const* prefix, char const* suffix)
 {
     char num[3];
     sprintf(num, "%d", (unsigned int)current_zst);
-    string_merge(txtmsg, sizeof(txtmsg), prefix, isextension(ZStateName, "zss") ? "AUTO" : num, suffix, 0);
+    /* The terminator is fetched with va_arg(ap, char*), so pass a pointer:
+       a plain 0 is an int and reading it back as a pointer is undefined. */
+    string_merge(txtmsg, sizeof(txtmsg), prefix,
+        isextension(ZStateName, "zss") ? "AUTO" : num, suffix, (char*)NULL);
 
     Msgptr = txtmsg;
     MessageOn = MsgCount;
@@ -885,7 +1267,7 @@ void statesaver(void)
     stim();
 }
 
-extern uint32_t SfxMemTable[256], SfxCPB;
+extern zreg SfxMemTable[256], SfxCPB;
 extern uint32_t SfxPBR, SfxROMBR, SfxRAMBR, SfxSCBR;
 extern u1* SCBRrel;
 extern uint8_t ioportval;
@@ -906,7 +1288,7 @@ static bool zst_load_compressed(FILE* fp, size_t compressed_size)
         uint8_t* compressed_buffer = 0;
 
         if ((compressed_buffer = (uint8_t*)malloc(compressed_size))) {
-            fread(compressed_buffer, 1, compressed_size, fp);
+            IGNORE_RESULT(fread(compressed_buffer, 1, compressed_size, fp));
             if (uncompress(buffer, &data_size, compressed_buffer, compressed_size) == Z_OK) {
                 copy_state_data(buffer, memcpyrinc, csm_load_zst_new);
                 worked = true;
@@ -918,34 +1300,231 @@ static bool zst_load_compressed(FILE* fp, size_t compressed_size)
     return (worked);
 }
 
+/* Length of the body a given origin writes for this cartridge. */
+static size_t zst_body_size(enum zst_origin o)
+{
+    size_t const hdr = sizeof(zst_header_cur) - 1;
+    switch (o) {
+    case ZST_ZSNES2:
+        return cur_zst_size - hdr;
+    case ZST_ZSNES2_WIDE:
+        return cur_zst_size - hdr + ZST_WIDE_EXTRA;
+    case ZST_151:
+        /* v143_zst_size is tallied at this build's layout. Only the PPU register
+           file differs on disk: 1.51 wrote ZST_151_PPUREG (3019) of it, and its
+           hdmadata is data rather than host pointers, so the tally's
+           HDMA_SAVED_BYTES already accounts for the width. The SPC and DSP blocks
+           are byte-identical on disk (Voice0BufPtr is stored as a dword offset in
+           both), so they need no adjustment. */
+        return v143_zst_size - hdr
+            - (PHnum2writeppureg - ZST_151_PPUREG) + (sizeof(hdmadata) - HDMA_SAVED_BYTES);
+    case ZST_V06:
+        return old_zst_size - (sizeof(zst_header_old) - 1);
+    default:
+        return 0;
+    }
+}
+
+/* The loader has only a length to tell the formats apart, so two of them
+   coming out the same for some cartridge would load a save as the wrong
+   format. Sweep the seven chips and every SRAM size and check no pair meets,
+   thumbnail included. Returns the number of cartridges that would. */
+int zst_format_check(void)
+{
+    static enum zst_origin const order[] = { ZST_ZSNES2, ZST_ZSNES2_WIDE, ZST_151, ZST_V06 };
+    u1 const chips_were[7] = { DSP1Enable, (u1)C4Enable, (u1)SFXEnable,
+        (u1)SA1Enable, (u1)SPC7110Enable, (u1)SETAEnable, (u1)DSP4Enable };
+    u1 const msu_was = (u1)MSUEnable;
+    uint32_t const ramsize_was = ramsize;
+    size_t const sizes_were[3] = { cur_zst_size, v143_zst_size, old_zst_size };
+    unsigned mask;
+    int clashes = 0;
+
+    /* Every shape's own length, to answer the second question below. */
+    static size_t shape[256 * 8];
+    size_t shapes = 0;
+
+    for (mask = 0; mask < 256u; mask++) {
+        unsigned kb;
+
+        DSP1Enable = (mask & 1) != 0;
+        C4Enable = (mask & 2) != 0;
+        SFXEnable = (mask & 4) != 0;
+        SA1Enable = (mask & 8) != 0;
+        SPC7110Enable = (mask & 16) != 0;
+        SETAEnable = (mask & 32) != 0;
+        DSP4Enable = (mask & 64) != 0;
+        MSUEnable = (mask & 128) != 0;
+
+        for (kb = 0; kb <= 1024u; kb = kb ? kb * 2u : 16u) {
+            size_t i;
+            size_t j;
+
+            ramsize = kb * 128u;
+            calculate_state_sizes();
+            shape[shapes++] = cur_zst_size;
+            for (i = 0; i < sizeof(order) / sizeof(*order); i++) {
+                for (j = 0; j < i; j++) {
+                    size_t const a = zst_body_size(order[i]);
+                    size_t const b = zst_body_size(order[j]);
+
+                    if (a == b || a == b + sizeof(PrevPicture)
+                        || b == a + sizeof(PrevPicture)) {
+                        printf("SELFTEST: FAIL state lengths %u and %u meet at "
+                               "chips %02x sram %uK (%zu vs %zu)\n",
+                            (unsigned)order[i], (unsigned)order[j], mask, kb, a, b);
+                        clashes++;
+                    }
+                }
+            }
+        }
+    }
+
+    /* And whether one cartridge's own state is the length this build expects
+       a 64-bit 2.3.0 state of another to be. Such a file would be read at the
+       wrong pointer width: every field after the HDMA block shifts, and the
+       restored program counter then points anywhere. */
+    {
+        size_t i;
+        size_t j;
+
+        for (i = 0; i < shapes; i++) {
+            for (j = 0; j < shapes; j++) {
+                if (shape[i] == shape[j] + ZST_WIDE_EXTRA) {
+                    printf("SELFTEST: FAIL a %zu-byte state is also a wide "
+                           "%zu-byte one\n",
+                        shape[i], shape[j]);
+                    clashes++;
+                    i = shapes; /* one report is enough */
+                    break;
+                }
+            }
+        }
+    }
+
+    DSP1Enable = chips_were[0];
+    C4Enable = chips_were[1] != 0;
+    SFXEnable = chips_were[2] != 0;
+    SA1Enable = chips_were[3] != 0;
+    SPC7110Enable = chips_were[4] != 0;
+    SETAEnable = chips_were[5] != 0;
+    DSP4Enable = chips_were[6] != 0;
+    MSUEnable = msu_was != 0;
+    ramsize = ramsize_was;
+    cur_zst_size = sizes_were[0];
+    v143_zst_size = sizes_were[1];
+    old_zst_size = sizes_were[2];
+    return clashes;
+}
+
+/* Guess the origin from the header and the file length, allowing for the
+   thumbnail some versions append. Only a state at offset 0 is a file we can
+   measure; a movie chapter sits partway through a .zmv. */
+static enum zst_origin zst_classify(FILE* fp, size_t zst_version, long* extra)
+{
+    static enum zst_origin const order[] = { ZST_ZSNES2, ZST_ZSNES2_WIDE, ZST_151, ZST_V06 };
+    long const pos = ftell(fp);
+    long size;
+    size_t i;
+
+    *extra = 0;
+    if (zst_version == 60) {
+        return (ZST_V06);
+    }
+    /* V144: ours, at either pointer width. V143: ours or 1.51's. */
+    if (!cur_zst_size || pos != 0 || fseek(fp, 0, SEEK_END)) {
+        return (ZST_ZSNES2);
+    }
+    size = ftell(fp);
+    if (fseek(fp, pos, SEEK_SET) || size < 0) {
+        return (ZST_ZSNES2);
+    }
+    size -= (long)(sizeof(zst_header_cur) - 1);
+
+    for (i = 0; i < sizeof(order) / sizeof(*order); i++) {
+        long const want = (long)zst_body_size(order[i]);
+        if (size == want || size == want + (long)sizeof(PrevPicture)) {
+            *extra = size - want;
+            return (order[i]);
+        }
+    }
+    return (ZST_UNKNOWN);
+}
+
 bool zst_load(FILE* fp, size_t Compressed)
 {
     size_t zst_version = 0;
 
     if (Compressed) {
         if (!zst_load_compressed(fp, Compressed)) {
-            return (false);
+            return false;
         }
+    } else if (sl_detect(fp) == SL_FMT_V2) {
+        /* Self-describing standalone state: the envelope tells us the body's
+           length and a CRC over it, and the feature mask that it belongs to
+           this cartridge. A wrong length, wrong game, or corrupt body is
+           refused here rather than restored into random memory. */
+        sl_v2_header h;
+        size_t const expect = cur_zst_size - (sizeof(zst_header_cur) - 1);
+        uint8_t* buffer;
+
+        if (!sl_v2_read_header(fp, &h)) {
+            return false;
+        }
+        if (h.body_len != expect || h.feature_mask != zst_feature_mask()) {
+            return false;
+        }
+        if (!(buffer = (uint8_t*)malloc(h.body_len ? h.body_len : 1))) {
+            return false;
+        }
+        if (fread(buffer, 1, h.body_len, fp) != h.body_len
+            || sl_crc32(buffer, h.body_len) != h.body_crc32) {
+            free(buffer);
+            return false;
+        }
+        copy_state_data(buffer, memcpyrinc, csm_load_zst_new);
+        free(buffer);
+        zst_version = SL_V2_VERSION;
+        Totalbyteloaded += h.body_len;
     } else {
         char zst_header_check[sizeof(zst_header_cur) - 1];
+        enum zst_origin origin;
+        long extra;
 
         Totalbyteloaded += fread(zst_header_check, 1, sizeof(zst_header_check), fp);
 
-        if (!memcmp(zst_header_check, zst_header_cur, sizeof(zst_header_check) - 2)) {
-            zst_version = 143; // v1.43+
-        }
-
-        if (!memcmp(zst_header_check, zst_header_old, sizeof(zst_header_check) - 2)) {
-            zst_version = 60; // v0.60 - v1.42
-        }
+        zst_version = (size_t)sl_legacy_version(zst_header_check);
 
         if (!zst_version) {
-            return (false);
-        } // Pre v0.60 saves are no longer loaded
+            return false;
+        } // Unrecognised header; pre v0.60 saves are no longer loaded
+
+        if (fseek(fp, -(long)sizeof(zst_header_check), SEEK_CUR) == 0) {
+            origin = zst_classify(fp, zst_version, &extra);
+            IGNORE_RESULT(fseek(fp, (long)sizeof(zst_header_check), SEEK_CUR));
+        } else {
+            origin = (zst_version == 60) ? ZST_V06 : ZST_ZSNES2;
+            extra = 0;
+        }
+        if (origin == ZST_UNKNOWN) {
+            return false;
+        }
+
+        /* 1.51/1.43 (V143 from ZSNES itself): its PPU register block is
+           translated by zst_151_regmap, and its SPC/DSP blocks share this build's
+           layout bar Voice0BufPtr, which the shared path already converts. */
+        zst_ppureg_run = (origin == ZST_151) ? ZST_151_PPUREG : 0;
+        zst_dspsave_run = (origin == ZST_151) ? ZST_151_DSPSAVE : 0;
+        zst_wide_ptrs = (origin == ZST_ZSNES2_WIDE);
 
         load_save_size = 0;
         fhandle = fp; // Set global file handle
-        copy_state_data(0, read_save_state_data, (zst_version == 143) ? csm_load_zst_new : csm_load_zst_old);
+        copy_state_data(0, read_save_state_data,
+            (zst_version == 144)       ? csm_load_zst_new
+                : (zst_version == 143) ? csm_load_zst_143
+                                       : csm_load_zst_old);
+        zst_ppureg_run = zst_dspsave_run = 0;
+        zst_wide_ptrs = 0;
         Totalbyteloaded += load_save_size;
     }
 
@@ -953,8 +1532,8 @@ bool zst_load(FILE* fp, size_t Compressed)
         SfxCPB = SfxMemTable[(SfxPBR & 0xFF)];
         SfxCROM = SfxMemTable[(SfxROMBR & 0xFF)];
         SfxRAMMem = (uintptr_t)sfxramdata + ((SfxRAMBR & 0xFF) << 16);
-        SfxRomBuffer += SfxCROM;
-        SfxLastRamAdr += SfxRAMMem;
+        SfxRomBuffer = SfxCROM + SfxRomBufferSt;
+        SfxLastRamAdr = SfxRAMMem + SfxLastRamAdrSt;
         SCBRrel = sfxramdata + (SfxSCBR << 10);
     }
 
@@ -981,14 +1560,157 @@ bool zst_load(FILE* fp, size_t Compressed)
         nexthdma = 0;
     }
 
+    nmiprevaddrl = (zreg)-1; /* restart the NMI-idle window */
+    nmiprevaddrh = 0;
+    nmirept = 0;
+
     repackfunct();
     initpitch();
     ResetOffset();
     ResetState();
-    procexecloop();
+    /* curexecstate rides in the extra block from V143 on, and its low byte is
+       not always what procexecloop would derive: the execution loop clears
+       bit 0 while it is parked. Only the older format needs it filled in -
+       and a state carrying anything but the four values the loop knows, which
+       is a file that is not the state it says it is. */
+    if (zst_version < 143 || curexecstate > 3) {
+        procexecloop();
+    }
 
-    return (true);
+    return true;
 }
+
+#ifdef ZSNES_DEBUG_HOOKS
+/* ZST_ROUNDTRIP=N: at frame N save, load, save, load, save, and compare the
+   last two files. Both are taken after a load, since the loader resets a few
+   fields on purpose (nexthdma). Reports to stderr and <tmpdir>/zsnes_zst.txt. */
+void zst_roundtrip_check(void);
+
+/* Build <tmpdir>/<name> into buf. Fixed /tmp paths collide between users on a
+   shared machine, so honour TMPDIR the way the rest of the world does. */
+static char const* zst_tmp_path(char* buf, size_t len, char const* name)
+{
+    char const* dir = getenv("TMPDIR");
+
+    if (!dir || !*dir) {
+        dir = "/tmp";
+    }
+    snprintf(buf, len, "%s/%s", dir, name);
+    return buf;
+}
+
+void zst_roundtrip_check(void)
+{
+    char pabuf[PATH_SIZE], pbbuf[PATH_SIZE], rbuf[PATH_SIZE];
+    char const* const pa = zst_tmp_path(pabuf, sizeof pabuf, "zsnes_zst_a.zst");
+    char const* const pb = zst_tmp_path(pbbuf, sizeof pbbuf, "zsnes_zst_b.zst");
+    char const* const pr = zst_tmp_path(rbuf, sizeof rbuf, "zsnes_zst.txt");
+    FILE* f;
+    long na = 0, nb = 0;
+    int ok = 0, loaded = 0;
+
+    if (getenv("ZST_LOADONLY")) {
+        /* Compatibility check: load a state written by another build and
+           report whether it was accepted. */
+        FILE* g = fopen(pa, "rb");
+        long fsz = 0;
+        int got;
+        char const* fit;
+        if (g) {
+            fseek(g, 0, SEEK_END);
+            fsz = ftell(g);
+            rewind(g);
+        }
+        got = g && zst_load(g, 0);
+        if (g)
+            fclose(g);
+        /* Accepting a state only means the header matched. The size says
+           whether the body was read the way it was written: every section is
+           a fixed length for a given cartridge, so a layout this build
+           describes wrongly cannot come out at the right total. */
+        long const hdrlen = (long)(sizeof(zst_header_cur) - 1);
+        long const v143body = (long)zst_body_size(ZST_151) + hdrlen;
+
+        fit = (fsz == (long)(cur_zst_size + SL_V2_DESC_LEN))                       ? "V2"
+            : (fsz == (long)(cur_zst_size + SL_V2_DESC_LEN + sizeof(PrevPicture))) ? "V2+thumb"
+            : (fsz == (long)cur_zst_size)                                          ? "V144"
+            : (fsz == (long)cur_zst_size + ZST_WIDE_EXTRA)                         ? "V144-WIDE"
+            : (fsz == v143body)                                                    ? "V143"
+            : (fsz == v143body + (long)sizeof(PrevPicture))                        ? "V143+thumb"
+            : (fsz == (long)old_zst_size)                                          ? "V0.6"
+                                                                                   : "NO-MATCH";
+        {
+            char msg[192];
+            snprintf(msg, sizeof(msg),
+                "LOADONLY %s size=%ld fits=%s (V144=%zu V143=%zu V0.6=%zu)\n",
+                got ? "ACCEPTED" : "REJECTED", fsz, fit,
+                cur_zst_size, v143_zst_size, old_zst_size);
+            fputs(msg, stderr);
+            FILE* r = fopen(pr, "wb");
+            if (r) {
+                fputs(msg, r);
+                fclose(r);
+            }
+        }
+        return;
+    }
+    if ((f = fopen(pb, "wb")) != NULL) { /* get into a loaded state first */
+        zst_save(f, false, false);
+        fclose(f);
+    }
+    if ((f = fopen(pb, "rb")) != NULL) {
+        loaded = zst_load(f, 0);
+        fclose(f);
+    }
+    zst_dbg_on = 1;
+    zst_dbg_off = 0;
+    if (loaded && (f = fopen(pa, "wb")) != NULL) {
+        zst_save(f, false, false);
+        na = ftell(f);
+        fclose(f);
+    }
+    zst_dbg_on = 0;
+    if (loaded && (f = fopen(pa, "rb")) != NULL) {
+        loaded = zst_load(f, 0);
+        fclose(f);
+    }
+    if (loaded && (f = fopen(pb, "wb")) != NULL) {
+        zst_save(f, false, false);
+        nb = ftell(f);
+        fclose(f);
+    }
+    if (loaded && na > 0 && na == nb) {
+        FILE* a = fopen(pa, "rb");
+        FILE* b = fopen(pb, "rb");
+        ok = a && b;
+        if (ok) {
+            long i;
+            for (i = 0; i < na; i++)
+                if (fgetc(a) != fgetc(b)) {
+                    ok = 0;
+                    fprintf(stderr, "ZST ROUNDTRIP: first difference at byte %ld\n", i);
+                    break;
+                }
+        }
+        if (a)
+            fclose(a);
+        if (b)
+            fclose(b);
+    }
+    {
+        FILE* r = fopen(pr, "wb");
+        char const* verdict = !loaded ? "FAIL (load rejected the state)"
+            : na != nb                ? "FAIL (sizes differ)"
+            : ok                      ? "PASS"
+                                      : "FAIL (contents differ)";
+        fprintf(stderr, "ZST ROUNDTRIP: %s (%ld vs %ld bytes)\n", verdict, na, nb);
+        if (r) {
+            fprintf(r, "%s %ld %ld\n", verdict, na, nb);
+            fclose(r);
+        }
+    }
+}
+#endif
 
 // Wrapper for above
 bool zst_compressed_loader(FILE* fp)
@@ -1012,14 +1734,14 @@ void zst_sram_load(FILE* fp)
     }
     if (SA1Enable) {
         fseek(fp, PHnum2writesa1reg, SEEK_CUR);
-        fread(SA1RAMArea, 1, 131072, fp); // SA-1 sram
+        IGNORE_RESULT(fread(SA1RAMArea, 1, 131072, fp)); // SA-1 sram
         fseek(fp, 15, SEEK_CUR);
     }
     if (DSP1Enable) {
         fseek(fp, 2874, SEEK_CUR);
     }
     if (SETAEnable) {
-        fread(setaramdata, 1, 4096, fp);
+        IGNORE_RESULT(fread(setaramdata, 1, 4096, fp));
     } // SETA sram
     if (SPC7110Enable) {
         fseek(fp, PHnum2writespc7110reg + 6, SEEK_CUR);
@@ -1032,7 +1754,7 @@ void zst_sram_load(FILE* fp)
     }
     fseek(fp, 220, SEEK_CUR);
     if (ramsize) {
-        fread(sram, 1, ramsize, fp);
+        IGNORE_RESULT(fread(sram, 1, ramsize, fp));
     } // normal sram
 }
 
@@ -1049,7 +1771,7 @@ void zst_sram_load_compressed(FILE* fp)
         if ((buffer = (uint8_t*)malloc(data_size))) {
             uint8_t* compressed_buffer = 0;
             if ((compressed_buffer = (uint8_t*)malloc(compressed_size))) {
-                fread(compressed_buffer, 1, compressed_size, fp);
+                IGNORE_RESULT(fread(compressed_buffer, 1, compressed_size, fp));
                 if (uncompress(buffer, &data_size, compressed_buffer, compressed_size) == Z_OK) {
                     uint8_t* data = buffer + PH65816regsize + 199635;
                     if (spcon) {
@@ -1174,7 +1896,7 @@ void stateloader(char* statename, bool keycheck, bool xfercheck)
     stim();
 }
 
-void debugloadstate()
+void debugloadstate(void)
 {
     stateloader(ZStateName, 0, 0);
 }
@@ -1204,7 +1926,7 @@ void SaveSecondState(void)
 }
 
 extern uint8_t CHIPBATT, *sram2;
-void SaveCombFile();
+void SaveCombFile(void);
 
 // Sram saving
 void SaveSramData(void)
@@ -1249,19 +1971,19 @@ void SaveSramData(void)
 }
 
 extern bool SramExists;
-void OpenSramFile()
+void OpenSramFile(void)
 {
     FILE* fp;
 
     setextension(ZSaveName, "srm");
     if ((fp = fopen_dir(ZSramPath, ZSaveName, "rb"))) {
-        fread(sram, 1, ramsize, fp);
+        IGNORE_RESULT(fread(sram, 1, ramsize, fp));
         fclose(fp);
 
         SramExists = true;
 
         if (*ZSaveST2Name && (fp = fopen_dir(ZSramPath, ZSaveST2Name, "rb"))) {
-            fread(sram2, 1, ramsize, fp);
+            IGNORE_RESULT(fread(sram2, 1, ramsize, fp));
             fclose(fp);
         }
     } else {
@@ -1415,7 +2137,7 @@ void savespcdata(void)
     }
 }
 
-void SaveGameSpecificInput()
+void SaveGameSpecificInput(void)
 {
     if (!*ZSaveName) {
         psr_cfg_run(write_input_vars, ZCfgPath, "zinput.cfg");
@@ -1427,12 +2149,13 @@ void SaveGameSpecificInput()
     }
 }
 
-void LoadGameSpecificInput()
+void LoadGameSpecificInput(void)
 {
     if (GameSpecificInput && *ZSaveName) {
         psr_cfg_run(read_input_vars, ZCfgPath, "zinput.cfg");
 
         setextension(ZSaveName, "inp");
         psr_cfg_run(read_input_vars, ZInpPath, ZSaveName);
+        ClampKeyBindings();
     }
 }

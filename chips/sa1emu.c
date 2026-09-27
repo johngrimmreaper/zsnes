@@ -1,24 +1,3 @@
-/*
-Copyright (C) 1997-2007 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #include <stdint.h>
 
 #include "sa1regs.h"
@@ -31,7 +10,7 @@ extern uint32_t SA1DMAChar, SA1DMADest, SA1DMASource;
 #define DDA SA1DMADest
 #define SA1_IRAM IRAM
 
-void SA1_DMA_CC2()
+void SA1_DMA_CC2(void)
 {
     // select register file index (0-7 or 8-15)
     const unsigned char* brf = &SA1_BRF[(SA1_CC2_line & 1) << 3];
@@ -62,7 +41,7 @@ void SA1_DMA_CC2()
 unsigned char SA1_DMA_VALUE;
 unsigned int SA1_DMA_ADDR;
 
-void SA1_DMA_CC1()
+void SA1_DMA_CC1(void)
 {
     // 16 bytes/char (2bpp); 32 bytes/char (4bpp); 64 bytes/char (8bpp)
     unsigned charmask = (1 << (6 - DMACB)) - 1;

@@ -9,7 +9,10 @@ typedef struct SpriteInfo {
     u1 pal;
     u1 status;
 } SpriteInfo;
-_Static_assert(sizeof(SpriteInfo) == 8, "SpriteInfo size mismatch");
+/* Two bytes of x, a host pointer, and two more bytes: 8 on a 32-bit build,
+   which is the stride the video assembly indexes spritetablea by. ui.c sizes
+   the allocation from the same sizeof. */
+_Static_assert(sizeof(SpriteInfo) == 4 + sizeof(u1*), "SpriteInfo size mismatch");
 
 extern SpriteInfo* currentobjptr;
 extern u1 a16x16xinc;
@@ -28,7 +31,7 @@ extern u1 drawn;
 extern u1 dualwinbg;
 extern u1 dualwinsp;
 extern u1 extbgdone;
-extern u1 hirestiledat[256];
+extern u1 hirestiledat[256] ASM_ALIGNED(1);
 extern u1 maxbr;
 extern u1 pwinbgenab;
 extern u1 pwinspenab;
@@ -38,7 +41,7 @@ extern u1 winon;
 extern u1 winonbtype;
 extern u1 winonsp;
 extern u1 winonstype;
-extern u1* bg1cachloc[4];
+extern u1* bg1cachloc[4] ASM_ALIGNED(1);
 extern u1* bgofwptr;
 extern u1* cursprloc;
 extern u1* curvidoffset;
@@ -48,12 +51,12 @@ extern u1* tempcach; // points to cached memory
 extern u1* winptrref;
 extern u2 MosaicYAdder[16];
 extern u2 curtileptr;
-extern u2* bg1tdabloc[4];
-extern u2* bg1tdatloc[4];
+extern u2* bg1tdabloc[4] ASM_ALIGNED(1);
+extern u2* bg1tdatloc[4] ASM_ALIGNED(1);
 extern u2* temptile; // points to the secondary video pointer
-extern u4 bg1vbufloc[4];
-extern u4 bg1xposloc[4];
-extern u4 bg1yaddval[4];
+extern u4 bg1vbufloc[4] ASM_ALIGNED(1);
+extern u4 bg1xposloc[4] ASM_ALIGNED(1);
+extern u4 bg1yaddval[4] ASM_ALIGNED(1);
 extern u4 bgptr;
 extern u4 bgptrc;
 extern u4 bgptrd;

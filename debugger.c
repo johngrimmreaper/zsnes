@@ -1,24 +1,3 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #include <ctype.h>
 #include <string.h>
 #ifndef NCURSES
@@ -29,6 +8,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "zpath.h"
 
 #include "c_vcache.h"
+#include "chips/sa1regs.h"
 #include "cpu/c_execute.h"
 #include "cpu/memory.h"
 #include "cpu/memtable.h"
@@ -42,17 +22,20 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
 // All of these should be in headers, people!
 
-extern uint8_t oamram[1024], DSPMem[256];
+extern uint8_t oamram[1024] ASM_ALIGNED(1), DSPMem[256];
 
 extern uint8_t CurrentCPU;
 
 extern uint8_t soundon;
 extern uint32_t cycpbl;
 
-extern uint16_t xa, xx, xy;
-extern uint8_t xdb;
+/* The core keeps these in dword slots (gblvars.h) and only the low 16 (8 for
+   the bank) mean anything, so read them through XREG16/XREG8. */
+extern uint32_t xa, xx, xy, xdb;
+#define XREG16(r) ((uint16_t)(r))
+#define XREG8(r) ((uint8_t)(r))
 
-uint8_t debuggeron; // was in the deleted dos/debug.asm
+extern uint8_t debuggeron; /* the config owns it; cfg.psr declares it */
 
 // should be in "zstate.h"
 void debugloadstate();
@@ -607,18 +590,6 @@ void startdisplay()
 //*******************************************************
 // 008000 STZ $123456,x A:0000 X:0000 Y:0000 S:01FF DB:00 D:0000 P:33 E+
 
-/*
-void addtail() {
-    debugt++;
-    if (debugt == 100)
-    debugt = 0;
-    if (debugt == debugh)
-    debugh++;
-    if (debugh == 100)
-    debugh = 0;
-}
-*/
-
 // I'm going to have to completely rip out byuu's effective address
 // stuff, it is just plain *WRONG*, besides being unsafe...
 
@@ -632,14 +603,20 @@ void addtail() {
 // seems unlikely that instructions would be stored discontiguously
 // than that data would span 64kb boundaries.
 
+/* Which core the operand decoder is describing. It has to read the flags of
+   the core whose instruction it is: the M and X widths decide how many bytes
+   an immediate takes, so reading the 65816's while showing an SA-1
+   instruction prints the wrong operand length. */
+static u4 dbg_p, dbg_db, dbg_pb;
+
 void out65816_addrmode(unsigned char* instr)
 {
     char* padding = "";
 
-#define GETXB() ((ocname[4 * instr[0]] != 'J') ? xdb : xpb)
+#define GETXB() ((ocname[4 * instr[0]] != 'J') ? dbg_db : dbg_pb)
 
 #define INDEX_RIGHT(addr, index)                               \
-    ((xp & 0x10)                                               \
+    ((dbg_p & 0x10)                                            \
             ? (((addr) & ~0xff) | (((addr) + (index)) & 0xff)) \
             : (((addr) & ~0xffff) | (((addr) + (index)) & 0xffff)))
 
@@ -656,7 +633,7 @@ void out65816_addrmode(unsigned char* instr)
 
     case 1: // #$12,#$1234 (M-flag)
         wprintw(debugwin, "#$");
-        if (xp & 0x20) {
+        if (dbg_p & 0x20) {
             wprintw(debugwin, "%02x", instr[1]);
             wprintw(debugwin, "%15s", padding);
         } else {
@@ -703,7 +680,7 @@ void out65816_addrmode(unsigned char* instr)
         t = memr8(0, addr);
         t |= memr8(0, addr + 1) << 8;
         t |= memr8(0, addr + 2) << 16;
-        t = INDEX_RIGHT(t, xy);
+        t = INDEX_RIGHT(t, XREG16(xy));
         wprintw(debugwin, "[%06x] ", t);
 
         break;
@@ -719,14 +696,14 @@ void out65816_addrmode(unsigned char* instr)
     case 10: // $12,x : $12+d+x
     {
         wprintw(debugwin, "$%02x,X%5s", instr[1], padding);
-        wprintw(debugwin, "[%06x] ", INDEX_RIGHT(instr[1] + xd, xx));
+        wprintw(debugwin, "[%06x] ", INDEX_RIGHT(instr[1] + xd, XREG16(xx)));
         break;
     }
 
     case 11: // $12,y
     {
         wprintw(debugwin, "$%02x,Y%5s", instr[1], padding);
-        wprintw(debugwin, "[%06x] ", INDEX_RIGHT(instr[1] + xd, xy));
+        wprintw(debugwin, "[%06x] ", INDEX_RIGHT(instr[1] + xd, XREG16(xy)));
         break;
     }
 
@@ -734,8 +711,8 @@ void out65816_addrmode(unsigned char* instr)
     {
         unsigned int t = instr[1] | (instr[2] << 8);
         wprintw(debugwin, "$%04x,X   ", t);
-        t = INDEX_RIGHT(t, xx);
-        wprintw(debugwin, "[%02x%04x] ", xdb, t);
+        t = INDEX_RIGHT(t, XREG16(xx));
+        wprintw(debugwin, "[%02x%04x] ", dbg_db, t);
 
         break;
     }
@@ -744,8 +721,8 @@ void out65816_addrmode(unsigned char* instr)
     {
         unsigned int t = instr[1] | (instr[2] << 8);
         wprintw(debugwin, "$%04x,Y   ", t);
-        t = INDEX_RIGHT(t, xy);
-        wprintw(debugwin, "[%02x%04x] ", xdb, t);
+        t = INDEX_RIGHT(t, XREG16(xy));
+        wprintw(debugwin, "[%02x%04x] ", dbg_db, t);
 
         break;
     }
@@ -754,7 +731,7 @@ void out65816_addrmode(unsigned char* instr)
     {
         unsigned int t = instr[1] | (instr[2] << 8) | (instr[3] << 16);
         wprintw(debugwin, "$%06x,X ", t);
-        t = INDEX_RIGHT(t, xx);
+        t = INDEX_RIGHT(t, XREG16(xx));
         wprintw(debugwin, "[%06x] ", t);
 
         break;
@@ -765,7 +742,7 @@ void out65816_addrmode(unsigned char* instr)
         signed char c = instr[1];
         unsigned short t = c + xpc + 2;
 
-        wprintw(debugwin, "$%04x%4s [%02x%04x] ", t, padding, xpb, t);
+        wprintw(debugwin, "$%04x%4s [%02x%04x] ", t, padding, dbg_pb, t);
 
         break;
     }
@@ -775,7 +752,7 @@ void out65816_addrmode(unsigned char* instr)
         unsigned short s = instr[1] | (instr[2] << 8);
         unsigned short t = s + xpc + 3;
 
-        wprintw(debugwin, "$%04x%4s [%02x%04x] ", t, padding, xpb, t);
+        wprintw(debugwin, "$%04x%4s [%02x%04x] ", t, padding, dbg_pb, t);
 
         break;
     }
@@ -797,7 +774,7 @@ void out65816_addrmode(unsigned char* instr)
         addr2 = memr8(00, addr1);
         addr2 |= memr8(00, addr1 + 1) << 8;
 
-        wprintw(debugwin, "[%02x%04x] ", xdb, addr2);
+        wprintw(debugwin, "[%02x%04x] ", dbg_db, addr2);
 
         break;
     }
@@ -816,14 +793,14 @@ void out65816_addrmode(unsigned char* instr)
         unsigned short cx = *(unsigned short*)(instr + 1);
         unsigned short x;
 
-        wprintw(debugwin, "($%04x,X) [%02x", cx, xpb);
-        if (xp & 0x10)
-            cx = (cx & 0xFF00) | ((cx + xx) & 0xFF);
+        wprintw(debugwin, "($%04x,X) [%02x", cx, dbg_pb);
+        if (dbg_p & 0x10)
+            cx = (cx & 0xFF00) | ((cx + XREG16(xx)) & 0xFF);
         else
-            cx += xx;
+            cx += XREG16(xx);
         // .out20n
-        x = memr8(xpb, cx);
-        x += memr8(xpb, cx + 1) << 8;
+        x = memr8(dbg_pb, cx);
+        x += memr8(dbg_pb, cx + 1) << 8;
         wprintw(debugwin, "%04x] ", x);
 
         break;
@@ -848,7 +825,7 @@ void out65816_addrmode(unsigned char* instr)
         break;
 
     case 26: // #$12,#$1234 (X-flag)
-        if (xp & 0x10) {
+        if (dbg_p & 0x10) {
             wprintw(debugwin, "#$%02x%15s", instr[1], padding);
         } else {
             wprintw(debugwin, "#$%04x%13s",
@@ -902,15 +879,42 @@ void out65816()
     memcpy(opname, &ocname[opcode * 4], 4);
     wprintw(debugwin, "%s", opname);
 
+    dbg_p = xp;
+    dbg_db = XREG8(xdb);
+    dbg_pb = xpb;
     out65816_addrmode(address);
 
     wprintw(debugwin, "A:%04x X:%04x Y:%04x S:%04x DB:%02x D:%04x P:%02x %c",
-        xa, xx, xy, xs, xdb, xd, xp, (xe == 1) ? 'E' : 'e');
+        XREG16(xa), XREG16(xx), XREG16(xy), xs, XREG8(xdb), xd, xp,
+        (xe == 1) ? 'E' : 'e');
 }
 
+/* The same line for the SA-1, whose core is a 65816: its instruction pointer
+   is a host pointer that the execution loop keeps in SA1Ptr, with SA1RegPCS
+   the base the PC is measured from. The indirect modes still read through the
+   65816's memory map, which is the same cart nearly everywhere. */
 void outsa1()
 {
-    // stub!
+    unsigned char* const address = SA1Ptr;
+    unsigned char const opcode = *address;
+    char opname[5] = "FOO ";
+
+    wprintw(debugwin, "%02x%04x ", (unsigned)(SA1xpb & 0xFF),
+        (unsigned)((address - SA1RegPCS) & 0xFFFF));
+
+    memcpy(opname, &ocname[opcode * 4], 4);
+    wprintw(debugwin, "%s", opname);
+
+    dbg_p = SA1RegP;
+    dbg_db = SA1xdb & 0xFF;
+    dbg_pb = SA1xpb & 0xFF;
+    out65816_addrmode(address);
+
+    wprintw(debugwin, "A:%04x X:%04x Y:%04x S:%04x DB:%02x D:%04x P:%02x %c",
+        (unsigned)(SA1xa & 0xFFFF), (unsigned)(SA1xx & 0xFFFF),
+        (unsigned)(SA1xy & 0xFFFF), (unsigned)(SA1xs & 0xFFFF),
+        (unsigned)(SA1xdb & 0xFF), (unsigned)(SA1xd & 0xFFFF),
+        (unsigned)(SA1RegP & 0xFF), SA1RegE == 1 ? 'E' : 'e');
 }
 
 void nextopcode()
@@ -927,10 +931,11 @@ void nextopcode()
     // I don't understand the buffering scheme here... I'm just going
     // to hope it isn't really all that important.
 
-    // if (debugsa1 != 1)
-    out65816();
-    // else
-    //   outputbuffersa1();
+    if (debugsa1 != 1) {
+        out65816();
+    } else {
+        outsa1();
+    }
 }
 
 void cleardisplay()
@@ -999,7 +1004,7 @@ void outspc_addrmode()
         {
             signed char off;
             off = *(signed char*)(spcPCRam + 1);
-            HEX16(off + 2 + (spcPCRam - SPCRAM));
+            HEX16((unsigned)(off + 2 + (spcPCRam - SPCRAM)));
             // format += 3;
             break;
         }
@@ -1031,7 +1036,7 @@ void outspc_addrmode()
         {
             signed char off;
             off = *(signed char*)(spcPCRam + 1);
-            HEX16(off + 2 + spcPCRam - SPCRAM);
+            HEX16((unsigned)(off + 2 + (spcPCRam - SPCRAM)));
             // format += 2;
             break;
         }
@@ -1040,7 +1045,7 @@ void outspc_addrmode()
         {
             signed char off;
             off = *(signed char*)(spcPCRam + 2);
-            HEX16(off + 2 + spcPCRam - SPCRAM);
+            HEX16((unsigned)(off + 2 + (spcPCRam - SPCRAM)));
             // format += 2;
             break;
         }

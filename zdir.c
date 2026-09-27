@@ -1,24 +1,3 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-
 #define _ATFILE_SOURCE
 
 #include <sys/stat.h>
@@ -137,15 +116,16 @@ struct dirent_info* readdir_info(z_DIR* dir)
 #else
 #include <unistd.h>
 
-#include "linux/lib.h"
-
 struct dirent_info* readdir_info(z_DIR* dir)
 {
     static struct dirent_info info;
     struct dirent_info* infop = 0;
 
-    struct dirent* entry = readdir(dir);
-    if (entry) {
+    /* A loop, not a recursion: a directory of entries that cannot be stat'ed -
+       broken symlinks, say - used to nest one frame deep per entry. */
+    struct dirent* entry;
+
+    while (!infop && (entry = readdir(dir)) != NULL) {
         struct stat stat_buffer;
         if (!fstatat(dirfd(dir), entry->d_name, &stat_buffer, 0)) {
             info.name = entry->d_name;
@@ -154,8 +134,6 @@ struct dirent_info* readdir_info(z_DIR* dir)
             info.uid = stat_buffer.st_uid;
             info.gid = stat_buffer.st_gid;
             infop = &info;
-        } else {
-            infop = readdir_info(dir);
         }
     }
     return (infop);

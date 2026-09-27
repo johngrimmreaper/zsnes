@@ -1,27 +1,8 @@
-/*
-Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
-
-http://www.zsnes.com
-http://sourceforge.net/projects/zsnes
-https://zsnes.bountysource.com
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-version 2 as published by the Free Software Foundation.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
+#include "types.h" /* IGNORE_RESULT */
 
 #ifdef __UNIXSDL__
 #include "gblhdr.h"
-#include "linux/audio.h"
+#include "unix/audio.h"
 #else
 #include <ctype.h>
 #include <stdio.h>
@@ -29,7 +10,6 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include <string.h>
 #include <sys/stat.h>
 #endif
-#include "asm_call.h"
 #include "c_init.h"
 #include "c_vcache.h"
 #include "cfg.h"
@@ -80,6 +60,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
 #define MB_bytes 0x100000
 #define Mbit_bytes 0x20000
+#define MaxInterleaveBanks (0xC00000 / 0x8000)
 
 // Offsets to add to infoloc start to reach particular variable
 #define BankOffset 21 // Contains Speed as well
@@ -106,18 +87,14 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 u1 ComboHeader[23] = "Key Combination File\x1A\x01";
 u1 sramsavedis;
 
-// Some archaic code from an unfinished Dynarec
+/* Which processors the execution loop still owes time to: bit 0 the 65816,
+   bit 1 the SPC700. The loop clears bit 0 when the CPU is parked and returns
+   EXEC_SOUND once only bit 1 is left. Nothing reads above those two bits. */
 extern uint32_t curexecstate;
 
 void procexecloop(void)
 {
-    curexecstate &= 0xFFFFFF00;
-
-    if (spcon) {
-        curexecstate += 3;
-    } else {
-        curexecstate += 1;
-    }
+    curexecstate = spcon ? 3u : 1u;
 }
 
 void Debug_WriteString(char* str)
@@ -131,11 +108,6 @@ void Debug_WriteString(char* str)
     fclose(fp);
 }
 
-// I want to port over the more complicated
-// functions from init.asm, or replace with
-// better versions from NSRT. -Nach
-
-// init.asm goodness
 extern uint32_t NumofBanks;
 extern uint32_t NumofBytes;
 static uint8_t Interleaved;
@@ -146,6 +118,10 @@ uint32_t infoloc;
 uint32_t ramsize;
 uint32_t ramsizeand;
 
+/* SRAM size in KB from a header byte. The cap keeps the shift defined; the
+   callers clamped the result to 1024 anyway. */
+static uint32_t sram_kb(uint8_t n) { return 8u << (n > 7 ? 7 : n); }
+
 bool SplittedROM;
 uint32_t addOnStart;
 uint32_t addOnSize;
@@ -154,9 +130,9 @@ uint32_t addOnSize;
 bool validChecksum(uint8_t* ROM, int32_t BankLoc)
 {
     if (ROM[BankLoc + InvCSLowOffset] + (ROM[BankLoc + InvCSHiOffset] << 8) + ROM[BankLoc + CSLowOffset] + (ROM[BankLoc + CSHiOffset] << 8) == 0xFFFF) {
-        return (true);
+        return true;
     }
-    return (false);
+    return false;
 }
 
 bool valid_normal_bank(uint8_t bankbyte)
@@ -166,27 +142,27 @@ bool valid_normal_bank(uint8_t bankbyte)
     case 33:
     case 48:
     case 49:
-        return (true);
+        return true;
         break;
     }
-    return (false);
+    return false;
 }
 
 bool EHiHeader(uint8_t* ROM, int32_t BankLoc)
 {
     if (validChecksum(ROM, BankLoc) && (ROM[BankLoc + BankOffset] == 53 || ROM[BankLoc + BankOffset] == 37)) {
-        return (true);
+        return true;
     }
-    return (false);
+    return false;
 }
 
 // FuSoYa: add support for ExLoROM
 bool ELoHeader(unsigned char* ROM, int BankLoc)
 {
     if (validChecksum(ROM, BankLoc) && (ROM[BankLoc + BankOffset] == 0x30 || ROM[BankLoc + BankOffset] == 0x20)) {
-        return (true);
+        return true;
     }
-    return (false);
+    return false;
 }
 
 void SwapData(uint32_t* loc1, uint32_t* loc2, uint32_t amount)
@@ -199,13 +175,13 @@ void SwapData(uint32_t* loc1, uint32_t* loc2, uint32_t amount)
     }
 }
 
-void swapBlocks(uint8_t* blocks)
+void swapBlocks(uint32_t* blocks)
 {
     uint_fast32_t i, j;
     for (i = 0; i < NumofBanks; i++) {
         for (j = 0; j < NumofBanks; j++) {
-            if (blocks[j] == (int8_t)i) {
-                int8_t b;
+            if (blocks[j] == i) {
+                uint32_t b;
                 SwapData(((uint32_t*)romdata + blocks[i] * 0x2000), ((uint32_t*)romdata + blocks[j] * 0x2000), 0x2000);
                 b = blocks[j];
                 blocks[j] = blocks[i];
@@ -216,11 +192,17 @@ void swapBlocks(uint8_t* blocks)
     }
 }
 
-void deintlv1()
+void deintlv1(void)
 {
-    uint8_t blocks[256];
-    int_fast32_t i;
-    int32_t numblocks = NumofBanks / 2;
+    uint32_t blocks[MaxInterleaveBanks];
+    uint_fast32_t i;
+    uint32_t numblocks = NumofBanks / 2;
+
+    if (NumofBanks > MaxInterleaveBanks)
+        return;
+    for (i = 0; i < NumofBanks; i++) {
+        blocks[i] = i;
+    }
     for (i = 0; i < numblocks; i++) {
         blocks[i * 2] = i + numblocks;
         blocks[i * 2 + 1] = i;
@@ -277,14 +259,13 @@ bool AllASCII(unsigned char* b, int32_t size)
     int_fast32_t i;
     for (i = 0; i < size; i++) {
         if (b[i] && (b[i] < 32 || b[i] > 126)) {
-            return (false);
+            return false;
         }
     }
-    return (true);
+    return true;
 }
 
-// Code to detect if opcode sequence is a valid and popular one for an SNES ROM
-// Code by Cowering
+// Common SNES reset sequences, based on Cowering's detector.
 static bool valid_start_sequence(uint8_t opcode1, uint8_t opcode2, uint8_t opcode3)
 {
     switch (opcode1) {
@@ -292,56 +273,56 @@ static bool valid_start_sequence(uint8_t opcode1, uint8_t opcode2, uint8_t opcod
     case 0x5c:
     case 0x18:
     case 0xad:
-        return (true);
+        return true;
         break;
     case 0x4b:
         if (opcode2 == 0xab && (opcode3 == 0x18 || opcode3 == 0x20)) {
-            return (true);
+            return true;
         }
         break;
     case 0x4c:
         if ((opcode2 == 0x00 || opcode2 == 0xc0) && opcode3 == 0x84) {
-            return (true);
+            return true;
         }
         if (opcode2 == 0x6d && opcode3 == 0x86) {
-            return (true);
+            return true;
         }
         if (opcode2 == 0x00 && opcode3 == 0x80) {
-            return (true);
+            return true;
         }
         break;
     case 0xc2:
         if (opcode2 == 0x30 && opcode3 == 0xa9) {
-            return (true);
+            return true;
         }
         break;
     case 0x20:
         if ((opcode2 == 0x16 || opcode2 == 0x06) && opcode3 == 0x80) {
-            return (true);
+            return true;
         }
         break;
     case 0x80:
         if ((opcode2 == 0x16 && opcode3 == 0x4c) || (opcode2 == 0x07 && opcode3 == 0x82)) {
-            return (true);
+            return true;
         }
         break;
     case 0x9c:
         if (opcode2 == 0x00 && opcode3 == 0x21) {
-            return (true);
+            return true;
         }
         break;
     case 0xa2:
         if (opcode2 == 0xff && opcode3 == 0x86) {
-            return (true);
+            return true;
         }
         break;
     case 0xa9:
-        if ((opcode2 == 0x00 && (opcode3 = 0x48 || opcode3 == 0x4b)) || (opcode2 == 0x8f && opcode3 == 0x8d) || (opcode2 == 0x20 && opcode3 == 0x4b) || (opcode2 == 0x1f && opcode3 == 0x4b)) {
-            return (true);
+        if ((opcode2 == 0x00 && (opcode3 == 0x48 || opcode3 == 0x4b)) || (opcode2 == 0x8f && opcode3 == 0x8d) || (opcode2 == 0x20 && opcode3 == 0x4b) || (opcode2 == 0x1f && opcode3 == 0x4b)) {
+            return true;
         }
         break;
     }
-    return (false);
+    return false;
 }
 
 static int16_t valid_reset(uint8_t* Buffer)
@@ -373,10 +354,12 @@ int32_t InfoScore(uint8_t* Buffer)
     if (!Buffer[ROMSizeOffset]) {
         score += 2;
     }
-    if ((1 << (Buffer[ROMSizeOffset] - 7)) > 48) {
+    /* 1 << (n - 7) > 48 and 8 << n > 1024, spelled so an arbitrary header byte
+       cannot shift by a negative or oversized count. */
+    if (Buffer[ROMSizeOffset] >= 13) {
         score -= 2;
     }
-    if ((8 << Buffer[SRAMSizeOffset]) > 1024) {
+    if (Buffer[SRAMSizeOffset] >= 8) {
         score -= 2;
     }
     if (Buffer[CountryOffset] < 14) {
@@ -393,7 +376,7 @@ int32_t InfoScore(uint8_t* Buffer)
 
 extern uint8_t ForceHiLoROM;
 
-void BankCheck()
+void BankCheck(void)
 {
     uint8_t* ROM = romdata;
     infoloc = 0;
@@ -449,13 +432,8 @@ void BankCheck()
             break;
         }
 
-        /*
-    Force code.
-    ForceHiLoROM is from the GUI.
-    forceromtype is from Command line, we have a static var
-    to prevent forcing a secong game loaded from the GUI when
-    the first was loaded from the command line with forcing.
-    */
+        /* ForceHiLoROM comes from the GUI, forceromtype from the command
+           line; the static keeps a command-line force off a later GUI load. */
         if (ForceHiLoROM == 1 || (forceromtype == 1 && !CommandLineForce2)) {
             CommandLineForce2 = true;
             loscore += 50;
@@ -482,13 +460,27 @@ bool DSP4Enable, OBCEnable, RTCEnable, SA1Enable, SDD1Enable, SFXEnable;
 bool SETAEnable; // ST010 & 11
 bool SGBEnable, SPC7110Enable, ST18Enable, MSUEnable;
 
-void chip_detect()
+void chip_detect(void)
 {
     uint8_t* ROM = romdata;
 
-    C4Enable = RTCEnable = SA1Enable = SDD1Enable = OBCEnable = CHIPBATT = false;
-    SGBEnable = ST18Enable = DSP1Enable = DSP2Enable = DSP3Enable = false;
-    DSP4Enable = SPC7110Enable = BSEnable = SFXEnable = SETAEnable = MSUEnable = false;
+    C4Enable = false;
+    RTCEnable = false;
+    SA1Enable = false;
+    SDD1Enable = false;
+    OBCEnable = false;
+    CHIPBATT = false;
+    SGBEnable = false;
+    ST18Enable = false;
+    DSP1Enable = false;
+    DSP2Enable = false;
+    DSP3Enable = false;
+    DSP4Enable = false;
+    SPC7110Enable = false;
+    BSEnable = false;
+    SFXEnable = false;
+    SETAEnable = false;
+    MSUEnable = false;
 
     // DSP Family
     if (ROM[infoloc + TypeOffset] == 3) {
@@ -639,7 +631,7 @@ uint16_t sum(uint8_t* array, size_t size)
 }
 
 static uint16_t Checksumvalue;
-void CalcChecksum()
+void CalcChecksum(void)
 {
     uint8_t* ROM = romdata;
 
@@ -717,7 +709,7 @@ void MirrorROM(uint8_t* ROM)
     }
 }
 
-void SetupSramSize()
+void SetupSramSize(void)
 {
     uint8_t* ROM = romdata;
     if (BSEnable) {
@@ -725,16 +717,16 @@ void SetupSramSize()
     } else if (SFXEnable) {
         if (ROM[infoloc + CompanyOffset] == 0x33) // Extended header
         {
-            ramsize = 8 << ((uint32_t)ROM[infoloc - 3]);
+            ramsize = sram_kb(ROM[infoloc - 3]);
         } else {
             ramsize = 256;
         }
     } else if (SETAEnable) {
         ramsize = 32;
     } else if (!strncmp((char*)ROM, "BANDAI SFC-ADX", 14)) { // For the Sufami Turbo
-        ramsize = 8 << ((uint32_t)ROM[0x100032]);
+        ramsize = sram_kb(ROM[0x100032]);
     } else {
-        ramsize = ((ROM[infoloc + SRAMSizeOffset]) ? (8 << ((uint32_t)ROM[infoloc + SRAMSizeOffset])) : 0);
+        ramsize = ROM[infoloc + SRAMSizeOffset] ? sram_kb(ROM[infoloc + SRAMSizeOffset]) : 0;
     }
 
     // Fix if some ROM goes nuts on size
@@ -752,9 +744,9 @@ bool Header512;
 
 char CSStatus[41], CSStatus2[41], CSStatus3[41], CSStatus4[41];
 
-void DumpROMLoadInfo()
+void DumpROMLoadInfo(void)
 {
-    extern char *ZVERSION, *VERSION_DATE, *VERSION_PORT;
+    extern char const *ZVERSION, *VERSION_DATE, *VERSION_PORT;
 
     FILE* fp = 0;
 
@@ -814,7 +806,7 @@ void loadFile(char* filename)
                 fseek(fp, 512, SEEK_SET);
             }
 
-            fread(ROM + curromspace, stat_results.st_size, 1, fp);
+            IGNORE_RESULT(fread(ROM + curromspace, stat_results.st_size, 1, fp));
             fclose(fp);
 
             curromspace += stat_results.st_size;
@@ -862,9 +854,12 @@ void loadZipFile(char* filename)
     bool multifile = false, NSS = false;
     char* incrementer = 0;
 
-    unzFile zipfile = unzopen_dir(ZRomPath, filename); // Open zip file
-    int cFile = unzGoToFirstFile(zipfile); // Set cFile to first compressed file
-    unz_file_info cFileInfo; // Create variable to hold info for a compressed file
+    ZipFile* zipfile = zipopen_dir(ZRomPath, filename); // Open zip file
+    if (!zipfile) {
+        return;
+    }
+    int cFile = zip_first(zipfile); // Set cFile to first compressed file
+    uint32_t cFileSize = 0;
 
     int LargestGoodFile = 0; // To keep track of largest file
 
@@ -872,16 +867,16 @@ void loadZipFile(char* filename)
     char ourFile[256];
     ourFile[0] = '\n';
 
-    while (cFile == UNZ_OK) // While not at end of compressed file list
+    while (cFile == ZIP_OK) // While not at end of compressed file list
     {
         // Temporary char array for file name
         char cFileName[256];
 
-        // Gets info on current file, and places it in cFileInfo
-        unzGetCurrentFileInfo(zipfile, &cFileInfo, cFileName, 256, NULL, 0, NULL, 0);
+        // Name and size of the member the cursor is on
+        zip_entry(zipfile, cFileName, 256, &cFileSize);
 
         // Get the file's size
-        fileSize = cFileInfo.uncompressed_size;
+        fileSize = cFileSize;
 
         // Find split files
         if (strlen(cFileName) >= 3) // Char + ".1"
@@ -915,50 +910,50 @@ void loadZipFile(char* filename)
         }
 
         // Go to next file in zip file
-        cFile = unzGoToNextFile(zipfile);
+        cFile = zip_next(zipfile);
     }
 
     // No files found
     if (ourFile[0] == '\n') {
-        unzClose(zipfile);
+        zip_close(zipfile);
         return;
     }
 
     for (;;) {
         // Sets current file to the file we liked before
-        if (unzLocateFile(zipfile, ourFile, 1) != UNZ_OK) {
+        if (zip_locate(zipfile, ourFile, 1) != ZIP_OK) {
             if (NSS) {
                 (*incrementer)--;
                 continue;
             }
-            unzClose(zipfile);
+            zip_close(zipfile);
             return;
         }
 
-        // Gets info on current file, and places it in cFileInfo
-        unzGetCurrentFileInfo(zipfile, &cFileInfo, ourFile, 256, NULL, 0, NULL, 0);
+        // Name and size of the member the cursor is on
+        zip_entry(zipfile, ourFile, 256, &cFileSize);
 
         // Get the file's size
-        fileSize = cFileInfo.uncompressed_size;
+        fileSize = cFileSize;
 
         // Too big?
         if (curromspace + fileSize > maxromspace + 512) {
-            unzClose(zipfile);
+            zip_close(zipfile);
             return;
         }
 
         // Open file
-        unzOpenCurrentFile(zipfile);
+        zip_open_entry(zipfile);
 
         // Read file into memory
-        err = unzReadCurrentFile(zipfile, ROM + curromspace, fileSize);
+        err = zip_read(zipfile, ROM + curromspace, fileSize);
 
         // Close file
-        unzCloseCurrentFile(zipfile);
+        zip_close_entry(zipfile);
 
         // Encountered error?
         if (err != fileSize) {
-            unzClose(zipfile);
+            zip_close(zipfile);
             return;
         }
 
@@ -978,7 +973,7 @@ void loadZipFile(char* filename)
         }
 
         if (!multifile) {
-            unzClose(zipfile);
+            zip_close(zipfile);
             return;
         }
         (*incrementer)++;
@@ -991,8 +986,7 @@ void load_file_fs(char* path)
 
     if (isextension(path, "zip")) {
         loadZipFile(path);
-    }
-    if (isextension(path, "gz")) {
+    } else if (isextension(path, "gz")) {
         loadGZipFile(path);
     } else {
         loadFile(path);
@@ -1007,7 +1001,7 @@ void load_file_fs(char* path)
 char* STCart2 = 0;
 uint8_t* sram2;
 
-void SplitSetup(char* basepath, char* basefile, uint32_t MirrorSystem)
+void SplitSetup(char* basepath, char const* basefile, uint32_t MirrorSystem)
 {
     uint8_t* ROM = romdata;
 
@@ -1018,7 +1012,12 @@ void SplitSetup(char* basepath, char* basefile, uint32_t MirrorSystem)
     memmove(ROM + addOnStart, ROM, addOnSize);
 
     if (!*basepath) {
-        load_file_fs(basefile);
+        /* loadFile() increments the extension digit in place for split ROMs,
+           so it needs a writable copy, never the caller's literal. */
+        char file[PATH_SIZE];
+
+        snprintf(file, sizeof(file), "%s", basefile);
+        load_file_fs(file);
     } else {
         load_file_fs(basepath);
     }
@@ -1048,7 +1047,7 @@ void SplitSetup(char* basepath, char* basefile, uint32_t MirrorSystem)
     SplittedROM = true;
 }
 
-void SplitSupport()
+void SplitSupport(void)
 {
     char* ROM = (char*)romdata;
     SplittedROM = false;
@@ -1075,10 +1074,27 @@ void SplitSupport()
             addOnSize = curromspace;
             SplitSetup(STPath, "STBIOS.ZIP", 3);
         } else if (maxromspace >= (curromspace << 2) + 0x100000) {
+            uint32_t const size1 = curromspace;
+
             memcpy(ROM + curromspace + curromspace, ROM, curromspace);
             memcpy(ROM + curromspace * 3, ROM, curromspace);
             curromspace = 0;
             load_file_fs(STCart2);
+            /* The slots are laid out for two carts of one size, and the room
+               was checked against the first; a second of another size - any
+               file can be named on the command line - is not paired, and the
+               first goes back where the BIOS expects it. */
+            if (curromspace != size1) {
+                char first[NAME_SIZE];
+
+                snprintf(first, sizeof(first), "%s", ZCartName);
+                curromspace = 0;
+                load_file_fs(first);
+                addOnStart = 0x100000;
+                addOnSize = curromspace;
+                SplitSetup(STPath, "STBIOS.ZIP", 3);
+                return;
+            }
             memcpy(ROM + curromspace, ROM, curromspace);
             SwapData((uint32_t*)romdata, ((uint32_t*)romdata + (curromspace >> 1)), curromspace >> 1);
             addOnSize = curromspace << 2;
@@ -1096,21 +1112,21 @@ bool NSRTHead(uint8_t* ROM)
 
     if (!strncmp("NSRT", (char*)&NSRTHead[24], 4) && NSRTHead[28] == 22) {
         if ((sum(NSRTHead, 32) & 0xFF) != NSRTHead[30] || NSRTHead[30] + NSRTHead[31] != 255 || (NSRTHead[0] & 0x0F) > 13 || ((NSRTHead[0] & 0xF0) >> 4) > 3 || ((NSRTHead[0] & 0xF0) >> 4) == 0) {
-            return (false); // Corrupt
+            return false; // Corrupt
         }
-        return (true); // NSRT header
+        return true; // NSRT header
     }
-    return (false); // None
+    return false; // None
 }
 
-void calculate_state_sizes(), InitRewindVars(), zst_init();
+void calculate_state_sizes(void), InitRewindVars(void), zst_init(void);
 bool findZipIPS(char*, char*);
 bool PatchUsingIPS(char*);
 extern bool IPSPatched;
 uint8_t lorommapmode2, curromsize, snesinputdefault1, snesinputdefault2;
 bool input1gp, input1mouse, input2gp, input2mouse, input2scope, input2just;
 
-void loadROM()
+void loadROM(void)
 {
     bool isCompressed = false, isZip = false;
 
@@ -1135,6 +1151,14 @@ void loadROM()
     Header512 = false;
 
     if (!curromspace) {
+        return;
+    }
+
+    /* An iNES image - a NES ROM sitting in a SNES directory. Its reset vector
+       means nothing to the 65816, which would then run off the memory map. */
+    if (curromspace >= 16 && !memcmp(romdata, "NES\x1a", 4)) {
+        puts("Not a SNES ROM: this is a NES image.");
+        curromspace = 0;
         return;
     }
 
@@ -1327,21 +1351,9 @@ extern uint8_t vidmemch2[4096];
 extern uint8_t vidmemch8[4096];
 extern uint8_t pal16bclha[1024];
 
-void clearSPCRAM()
+void clearSPCRAM(void)
 {
-    /*
-  SPC RAM is filled with alternating 0x00 and 0xFF for 0x20 bytes.
-
-  Basically the SPCRAM is initialized as follows:
-  xx00 - xx1f: $00
-  xx20 - xx3f: $ff
-  xx40 - xx5f: $00
-  xx60 - xx7f: $ff
-  xx80 - xx9f: $00
-  xxa0 - xxbf: $ff
-  xxc0 - xxdf: $00
-  xxe0 - xxff: $ff
-  */
+    /* SPC RAM powers up as alternating 0x20-byte runs of 0x00 and 0xFF. */
     uint_fast32_t i;
     for (i = 0; i < 65472; i += 0x40) {
         memset(SPCRAM + i, 0, 0x20);
@@ -1349,7 +1361,7 @@ void clearSPCRAM()
     }
 }
 
-void clearmem2()
+void clearmem2(void)
 {
     memset(sram, 0xFF, 65536);
     memset(vram, 0, 65536);
@@ -1367,9 +1379,9 @@ void clearmem(void)
     memset(sram, 0, 65536 * 2);
     memset(regptra, 0, sizeof(regptra));
     memset(regptwa, 0, sizeof(regptwa));
-    memset(vcache2b, 0, 262144 + 256);
-    memset(vcache4b, 0, 131072 + 256);
-    memset(vcache8b, 0, 65536 + 256);
+    memset(vcache2b, 0, VCACHE2_BYTES);
+    memset(vcache4b, 0, VCACHE4_BYTES);
+    memset(vcache8b, 0, VCACHE8_BYTES);
     memset(pal16b, 0, sizeof(pal16b));
     memset(pal16bcl, 0, sizeof(pal16bcl));
     memset(pal16bclha, 0, 1024);
@@ -1386,28 +1398,23 @@ extern uint32_t PHdspsave2;
 s4 echobuf[22500];
 extern uint8_t DSPMem[256];
 
-void clearvidsound()
+void clearvidsound(void)
 {
     memset(BRRBuffer, 0, PHdspsave);
     memset(echoon0, 0, PHdspsave2);
     memset(&echobuf, 0, sizeof(echobuf));
-    memset(spcBuffera, 0, 65536 * 4 + 4096);
+    memset(spcBuffera, 0, SPCBUFFER_BYTES);
     memset(DSPMem, 0, 256);
 }
 
-/*
-
---------------Caution Hack City--------------
-
-Would be nice to trash this section in the future
-*/
+/* Per-game hacks. Worth retiring one day. */
 
 extern uint8_t ENVDisable, cycpb268, cycpb358, cycpbl2, cycpblt2;
 extern uint32_t cycpbl;
 extern uint8_t opexec268, opexec358, opexec268b, opexec358b;
 extern uint8_t opexec268cph, opexec358cph, opexec268cphb, opexec358cphb;
 
-void headerhack()
+void headerhack(void)
 {
     char* RomData = (char*)romdata;
     ENVDisable = 0;
@@ -1640,36 +1647,41 @@ uint32_t showinfogui(void)
     return (MsgCount);
 }
 
-extern uint32_t nmiprevaddrl, nmiprevaddrh, nmirept, nmiprevline, nmistatus;
+extern zreg nmiprevaddrl, nmiprevaddrh;
+extern uint32_t nmirept, nmiprevline, nmistatus;
 extern uint8_t spcnumread;
 extern uint8_t NextLineCache;
 extern uint32_t Voice0Freq[8]; // Frequency of Voice (Delta Freq)
 extern uint32_t dspPAdj;
 extern uint16_t Voice0Pitch[8];
 
-void initpitch()
+void initpitch(void)
 {
     int i;
 
     for (i = 0; i < 8; i++) {
-        Voice0Pitch[i] = DSPMem[2 + i * 0x10];
-        Voice0Freq[i] = ((((Voice0Pitch[i] & 0x3FFF) * dspPAdj) >> 8) & 0xFFFFFFFF);
+        /* Only the frequency needs rebuilding: it scales by dspPAdj, which
+           follows the loading machine's sample rate. Pitch is 14 bits.
+           0xFFFE is DSPStart's "never written" marker, so scaling it would
+           invent a note. */
+        if (Voice0Pitch[i] != 0xFFFE)
+            Voice0Freq[i] = (uint32_t)((uint64_t)(Voice0Pitch[i] & 0x3FFF) * dspPAdj >> 8);
     }
 }
 
-extern uint32_t SfxR1, SfxR2, SfxSFR, SfxSCMR;
+extern uint32_t SfxSFR, SfxSCMR;
 extern uint8_t SetaCmdEnable[4];
 extern uint8_t disablespcclr, *sfxramdata, SramExists;
 extern unsigned char* setaramdata;
 extern uint8_t* SA1RAMArea;
 extern uint8_t ForcePal, ForceROMTiming, MovieWaiting, DSP1Type;
 extern uint16_t totlines;
-void SetAddressingModes(), GenerateBank0Table();
-void SetAddressingModesSA1(), GenerateBank0TableSA1();
-void InitDSP(), InitDSP3(), InitDSP4(), InitOBC1();
+void SetAddressingModes(void), GenerateBank0Table(void);
+void SetAddressingModesSA1(void), GenerateBank0TableSA1(void);
+void InitDSP(void), InitDSP3(void), InitDSP4(void), InitOBC1(void);
 void InitFxTables(void);
 
-void CheckROMType()
+void CheckROMType(void)
 {
     char* ROM = (char*)romdata;
 
@@ -1769,8 +1781,8 @@ void CheckROMType()
         // SRAM mapping, banks 78 - 79
         map_mem(0x78, &sramsbank, 2);
 
-        SfxR1 = 0;
-        SfxR2 = 0;
+        SfxR0[1] = 0;
+        SfxR0[2] = 0;
         memset(sfxramdata, 0, 262144); // clear 256kB SFX ram
 
         if (SramExists) {
@@ -1794,7 +1806,7 @@ void CheckROMType()
             memset(SetaCmdEnable, 0, 4);
             SetaCmdEnable[0] = 0x80; // 60:0000
         } else {
-            void ST011_Reset();
+            void ST011_Reset(void);
             ST011_Reset();
             map_mem(0x68, &seta11bank, 1);
             map_mem(0x60, &seta11banka, 1);
@@ -1832,7 +1844,7 @@ void CheckROMType()
 extern uint16_t copv, brkv, abortv, nmiv, nmiv2, irqv, irqv2;
 extern uint16_t copv8, brkv8, abortv8, nmiv8, irqv8;
 
-void SetIRQVectors()
+void SetIRQVectors(void)
 { // get vectors (NMI & reset)
     uint8_t* ROM = romdata;
 
@@ -1874,12 +1886,8 @@ void SetupROM(void)
     CheckROMType();
     SetIRQVectors();
 
-    /* get timing (pal/ntsc)
-  ForceROMTiming is from the GUI.
-  ForcePal is from Command line, we have a static var
-  to prevent forcing a secong game loaded from the GUI when
-  the first was loaded from the command line with forcing.
-  */
+    /* PAL/NTSC. ForceROMTiming comes from the GUI, ForcePal from the command
+       line; the static keeps a command-line force off a later GUI load. */
     if (ForcePal && !CLforce) {
         CLforce = true;
     } else {
@@ -1894,11 +1902,15 @@ void SetupROM(void)
         romispal = (!BSEnable);
         break;
     default:
-        // Country codes 2-12 are PAL regions (Europe through Indonesia).
-        // Code 13 (South Korea) is NTSC. Code 18 is used by some PAL games.
+        /* 2..12 are the PAL regions and 17 is Australia, also PAL. 1.51
+           tested 2..12 alone; 18 is "other", kept because some PAL releases
+           carry it. 13 (Korea), 15 (Canada) and 16 (Brazil, PAL-M at 60Hz)
+           all run NTSC timing. */
         {
             uint8_t country = ROM[infoloc + CountryOffset];
-            romispal = !BSEnable && ((country >= 2 && country <= 12) || country == 18);
+            romispal = !BSEnable
+                && ((country >= 2 && country <= 12) || country == 17
+                    || country == 18);
         }
     }
 
@@ -1915,7 +1927,7 @@ void SetupROM(void)
     }
 }
 
-void SaveCombFile()
+void SaveCombFile(void)
 {
     if (!romloadskip) {
         FILE* fp;
@@ -1934,7 +1946,7 @@ void SaveCombFile()
     }
 }
 
-void OpenCombFile()
+void OpenCombFile(void)
 {
     FILE* fp;
 
@@ -1942,11 +1954,14 @@ void OpenCombFile()
     NumComboLocl = 0;
 
     if ((fp = fopen_dir(ZComboPath, ZSaveName, "rb"))) {
-        fread(ComboHeader, 1, 23, fp);
+        IGNORE_RESULT(fread(ComboHeader, 1, 23, fp));
         NumComboLocl = ComboHeader[22];
 
+        if (NumComboLocl > lengthof(CombinDataLocl))
+            NumComboLocl = lengthof(CombinDataLocl);
+
         if (NumComboLocl) {
-            fread(CombinDataLocl, sizeof(*CombinDataLocl), NumComboLocl, fp);
+            IGNORE_RESULT(fread(CombinDataLocl, sizeof(*CombinDataLocl), NumComboLocl, fp));
         }
 
         fclose(fp);
@@ -1956,10 +1971,11 @@ void OpenCombFile()
 uint32_t SfxAC;
 uint8_t ForceNewGfxOff;
 
-void preparesfx()
+void preparesfx(void)
 {
     char* ROM = (char*)romdata;
     int_fast16_t i;
+    uint32_t const rom_buffer_size = maxromspace;
 
     SfxAC = 0;
 
@@ -1968,6 +1984,9 @@ void preparesfx()
     }
 
     // [sneed]: bigger rom support
+    // Keep the expanded ROM inside the buffer that holds it.
+    if (NumofBanks > rom_buffer_size / 0x10000)
+        return;
     for (i = (NumofBanks - 1); i >= 0; i--) {
         memcpy((int32_t*)romdata + i * 0x4000, (int32_t*)romdata + i * 0x2000, 0x8000);
         memcpy((int32_t*)romdata + i * 0x4000 + 0x2000, (int32_t*)romdata + i * 0x2000, 0x8000);
@@ -1984,11 +2003,9 @@ static void map_set(u1** dest, uint8_t* src, size_t count, size_t step)
 }
 
 uint32_t cromptradd;
-extern uint32_t SfxR0, SfxR1, SfxR2, SfxR3, SfxR4, SfxR5, SfxR6, SfxR7,
-    SfxR8, SfxR9, SfxR10, SfxR11, SfxR12, SfxR13, SfxR14, SfxR15;
 extern void* ram7f;
 
-void map_lorom()
+void map_lorom(void)
 {
     uint8_t* ROM = romdata;
     uint_fast8_t x;
@@ -2018,9 +2035,10 @@ void map_lorom()
     // set banks C0-FF (40h x 32KB ROM banks @ 8000h)
     map_set(snesmap2 + 0xC0, ROM + 0x200000, 0x40, 0x8000);
 
-    // set banks 70-77 (07h x SRAM)
+    // set banks 70-77 (07h x SRAM, 32K to a bank as mem_sram_bank70 slices it,
+    // mirrored to the cart's size)
     for (x = 0x70; x <= 0x77; x++) {
-        snesmap2[x] = sram;
+        snesmap2[x] = sram + (((uint32_t)(x - 0x70) << 15) & ramsizeand);
     }
 
     // set banks 7E/7F (WRAM)
@@ -2028,7 +2046,7 @@ void map_lorom()
     snesmmap[0x7F] = snesmap2[0x7F] = ram7f;
 }
 
-void map_hirom()
+void map_hirom(void)
 {
     uint8_t* ROM = romdata;
     uint_fast8_t x;
@@ -2059,9 +2077,10 @@ void map_hirom()
     // set banks C0-FF (40h x 64KB ROM banks @10000h)
     map_set(snesmap2 + 0xC0, ROM, 0x40, 0x10000);
 
-    // set banks 70-77 (07h x SRAM)
+    // set banks 70-77 (07h x SRAM, 32K to a bank as mem_sram_bank70 slices it,
+    // mirrored to the cart's size)
     for (x = 0x70; x <= 0x77; x++) {
-        snesmap2[x] = sram;
+        snesmap2[x] = sram + (((uint32_t)(x - 0x70) << 15) & ramsizeand);
     }
 
     // set banks 7E/7F (WRAM)
@@ -2070,7 +2089,7 @@ void map_hirom()
 }
 
 // [Sneed] fixed accuracy to official board, to-do test that 6000-7FFF writes to SRAM properly
-void map_ehirom()
+void map_ehirom(void)
 {
     uint8_t* ROM = romdata;
     // set addresses 8000-FFFF
@@ -2105,7 +2124,7 @@ void map_ehirom()
 }
 
 // FuSoYa: Add support for 64Mbit ExLoROM
-void map_elorom()
+void map_elorom(void)
 {
     unsigned char* ROM = (unsigned char*)romdata;
     int x;
@@ -2130,9 +2149,10 @@ void map_elorom()
     // set banks C0-FF (40h x 32KB ROM banks @ 8000h)
     map_set(snesmap2 + 0xC0, ROM + 0x200000, 0x40, 0x8000);
 
-    // set banks 70-77 (07h x SRAM)
+    // set banks 70-77 (07h x SRAM, 32K to a bank as mem_sram_bank70 slices it,
+    // mirrored to the cart's size)
     for (x = 0x70; x <= 0x77; x++) {
-        snesmap2[x] = sram;
+        snesmap2[x] = sram + (((uint32_t)(x - 0x70) << 15) & ramsizeand);
     }
 
     // set banks 7E/7F (WRAM)
@@ -2140,21 +2160,20 @@ void map_elorom()
     snesmmap[0x7F] = snesmap2[0x7F] = ram7f;
 }
 
-void map_sfx()
+void map_sfx(void)
 {
     uint8_t* ROM = romdata;
     uint_fast8_t x;
 
     // Clear SFX registers
-    SfxR0 = SfxR1 = SfxR2 = SfxR3 = SfxR4 = SfxR5 = SfxR6 = SfxR7 = 0;
-    SfxR8 = SfxR9 = SfxR10 = SfxR11 = SfxR12 = SfxR13 = SfxR14 = SfxR15 = 0;
+    memset(SfxR0, 0, sizeof(SfxR0));
 
     // set addresses 8000-FFFF
     // set banks 00-3F (40h x 64KB ROM banks @10000h)
     map_set(snesmmap, ROM, 0x40, 0x10000);
 
-    // set banks 40-5F (40h x128KB ROM banks @20000h)
-    // [sneed]: fix inaccuracy in mapping (40-5F is Hirom banks), this value should be 0x20 but it's being set to 0x30 for safety
+    // banks 40-5F (40h x 128KB ROM banks @ 20000h). 40-5F are HiROM banks, so
+    // this count should be 0x20; 0x30 is deliberate slack.
     map_set(snesmmap + 0x40, ROM + 0x8000, 0x30, 0x20000);
 
     // set banks 80-BF (40h x 64KB ROM banks @10000h)
@@ -2184,9 +2203,8 @@ void map_sfx()
         }
     }
 
-    // set banks 70-77/78-7F (SFXRAM & SRAM)
-    // [sneed]: fixed mapping. Later on the SRAM size should be checked (so that the 64kb, 128kb, 256kb setting work properly.)
-    // most SNES SuperFX games didn't use more than 128kb SuperFX ram, so this is fine to use.
+    // banks 70-77/78-7F (SuperFX RAM and SRAM). Should really check the SRAM
+    // size so 64/128/256 KB all map right; no SuperFX game used over 128 KB.
     for (x = 0x70; x < 0x78; x += 2) {
         map_set(snesmap2 + x, sfxramdata, 2, 0x10000);
     }
@@ -2201,7 +2219,7 @@ void map_sfx()
     preparesfx();
 }
 
-void map_sa1()
+void map_sa1(void)
 {
     uint8_t* ROM = romdata;
     uint8_t test[] = { 0xA9, 0x10, 0xCF, 0xAD };
@@ -2241,7 +2259,7 @@ void map_sa1()
     snesmmap[0x7F] = snesmap2[0x7F] = ram7f;
 }
 
-void map_sdd1()
+void map_sdd1(void)
 {
     uint8_t* ROM = romdata;
 
@@ -2276,7 +2294,7 @@ void map_sdd1()
     snesmmap[0x7F] = snesmap2[0x7F] = ram7f;
 }
 
-void map_bsx()
+void map_bsx(void)
 {
     uint8_t* ROM = romdata;
     uint_fast8_t x;
@@ -2304,9 +2322,10 @@ void map_bsx()
     // set banks C0-FF (40h x 32KB ROM banks @ 8000h)
     map_set(snesmap2 + 0xC0, ROM + 0x8000, 0x40, 0x8000);
 
-    // set banks 70-77 (07h x SRAM)
+    // set banks 70-77 (07h x SRAM, 32K to a bank as mem_sram_bank70 slices it,
+    // mirrored to the cart's size)
     for (x = 0x70; x <= 0x77; x++) {
-        snesmap2[x] = sram;
+        snesmap2[x] = sram + (((uint32_t)(x - 0x70) << 15) & ramsizeand);
     }
 
     // set banks 7E/7F (WRAM)
@@ -2343,7 +2362,7 @@ void initsnes(void)
     }
 }
 
-void OpenSramFile(), CheatCodeLoad(), LoadSecondState(), LoadGameSpecificInput();
+void OpenSramFile(void), CheatCodeLoad(void), LoadSecondState(void), LoadGameSpecificInput(void);
 
 bool loadfileGUI(void)
 {
@@ -2372,7 +2391,7 @@ bool loadfileGUI(void)
     return (result);
 }
 
-void GUIQuickLoadUpdate();
+void GUIQuickLoadUpdate(void);
 
 void powercycle(bool sramload, bool romload)
 {
@@ -2440,7 +2459,7 @@ extern uint32_t SPC700read, SPC700write;
 extern int32_t FIRTAPVal0[8];
 extern uint32_t xa, xdb, xx, xy;
 extern uint16_t VIRQLoc;
-extern uint8_t spcextraram[64], SPCROM[64];
+extern uint8_t spcextraram[64], SPCROM[64] ASM_ALIGNED(4);
 uint8_t SPCSkipXtraROM, disableeffects = 0;
 // This is saved in states
 uint8_t cycpl = 0; // cycles per scanline
@@ -2454,11 +2473,11 @@ u2 stackor = 0x0100;
 uint8_t xp = 0;
 uint8_t xe = 0;
 u1 xirqb = 0;
-eop** Curtableaddr = 0;
+opfn** Curtableaddr = 0;
 
-void InitC4();
-void SPC7110init();
-void SPC7110_deinit_decompression_state();
+void InitC4(void);
+void SPC7110init(void);
+void SPC7110_deinit_decompression_state(void);
 
 void init65816(void)
 {

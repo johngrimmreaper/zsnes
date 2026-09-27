@@ -24,82 +24,52 @@ on:
   workflow_dispatch:
 
 jobs:
-  linux:
-    name: linux
-    runs-on: ubuntu-latest
+  linux_i686:
+    runs-on: ubuntu-26.04
     env:
       DEBIAN_FRONTEND: noninteractive
+      APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+      SDL_TAG: release-3.4.14
       PKG_CONFIG_LIBDIR: /usr/lib/i386-linux-gnu/pkgconfig:/usr/share/pkgconfig
     steps:
       - uses: actions/checkout@v6
       - name: Install dependencies
         run: |
           sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            gcc-multilib \
-            g++-multilib \
-            git \
-            libc6-dev-i386 \
-            make \
-            nasm \
-            ninja-build \
-            python3 \
-            pkg-config \
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y --no-install-recommends \
+            build-essential cmake ninja-build git make python3 pkg-config \
             clang-format-19 \
-            libxcursor-dev:i386 \
-            libxi-dev:i386 \
-            libxinerama-dev:i386 \
-            libx11-dev:i386 \
-            libxfixes-dev:i386 \
-            libxrandr-dev:i386 \
-            libgl1-mesa-dev:i386 \
-            zlib1g-dev:i386 \
-            libpng-dev:i386 \
-            libao-dev:i386 \
-            libpipewire-0.3-dev:i386
+            gcc-multilib g++-multilib libc6-dev-i386 \
+            libx11-dev:i386 libxcursor-dev:i386 libxi-dev:i386 \
+            libxinerama-dev:i386 libxfixes-dev:i386 libxrandr-dev:i386 \
+            libgl1-mesa-dev:i386 zlib1g-dev:i386 libpng-dev:i386 \
+            libao-dev:i386 libpipewire-0.3-dev:i386 \
+            xvfb curl
           sudo ln -sf /usr/bin/clang-format-19 /usr/local/bin/clang-format
       - name: Install SDL3 (i386)
         run: |
           if apt-cache show libsdl3-dev:i386 >/dev/null 2>&1; then
-            sudo apt-get install -y --no-install-recommends libsdl3-dev:i386
+            sudo apt-get $APT_OPTS install -y --no-install-recommends libsdl3-dev:i386
           else
             rm -rf /tmp/SDL
-            git clone --depth 1 https://github.com/libsdl-org/SDL.git /tmp/SDL
+            git clone --depth 1 --branch $SDL_TAG \
+              https://github.com/libsdl-org/SDL.git /tmp/SDL
             cmake -S /tmp/SDL -B /tmp/SDL/build -GNinja \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_INSTALL_PREFIX=/usr/local \
-              -DSDL_SHARED=ON \
-              -DSDL_STATIC=OFF \
-              -DSDL_X11=OFF \
-              -DSDL_WAYLAND=OFF \
-              -DSDL_KMSDRM=OFF \
+              -DSDL_SHARED=ON -DSDL_STATIC=OFF \
+              -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=OFF \
               -DSDL_UNIX_CONSOLE_BUILD=ON \
-              -DSDL_ALSA=OFF \
-              -DSDL_PULSEAUDIO=OFF \
-              -DSDL_PIPEWIRE=OFF \
-              -DSDL_JACK=OFF \
-              -DSDL_SNDIO=OFF \
-              -DCMAKE_C_FLAGS='-m32' \
-              -DCMAKE_CXX_FLAGS='-m32'
+              -DSDL_ALSA=OFF -DSDL_PULSEAUDIO=OFF -DSDL_PIPEWIRE=OFF \
+              -DSDL_JACK=OFF -DSDL_SNDIO=OFF \
+              -DCMAKE_C_FLAGS='-m32' -DCMAKE_CXX_FLAGS='-m32'
             cmake --build /tmp/SDL/build --parallel
             sudo cmake --install /tmp/SDL/build
             echo '/usr/local/lib' | sudo tee /etc/ld.so.conf.d/zsnes-ci-sdl3.conf
             sudo ldconfig
             echo 'PKG_CONFIG_PATH=/usr/local/lib/pkgconfig' >> "$GITHUB_ENV"
           fi
-      - name: Build
-        run: |
-          make clean
-          make ARCH=linux
-          test -x ./zsnes
-      - name: Verify runtime links
-        run: |
-          ldd ./zsnes | tee ldd.txt
-          grep -E 'libSDL3|SDL3' ldd.txt
-          grep -E 'libpipewire-0\.3' ldd.txt
       - name: Check formatting
         run: |
           make fmt
@@ -107,100 +77,358 @@ jobs:
             git --no-pager diff --name-only
             exit 1
           fi
+      - name: Build
+        run: |
+          make clean
+          make linux_i686
+          test -x ./zsnes
+          file ./zsnes | grep -q 'ELF 32-bit'
+      - name: Unit tests
+        run: make -C test run
+      - name: Cross-word-size check
+        run: make -C test spc64
+      - name: Run the 32-bit executable
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: ZSNES_SELFTEST=1 ./zsnes -v 0
+      - name: Save-state formats (32-bit)
+        # The on-disk formats are word-size independent, so a 32-bit build must
+        # decode the same fixtures to the same machine as the 64-bit one. This
+        # is where a 64-bit-only assumption in a loader (e.g. a host-pointer
+        # width baked into an offset) surfaces.
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: |
+          make linux_i686 WITH_DEBUG_HOOKS=1
+          test/state_fixtures.sh ./zsnes
+          make clean
+          make linux_i686
+      - name: Verify runtime links
+        run: |
+          ldd ./zsnes | tee ldd.txt
+          grep -E 'libSDL3|SDL3' ldd.txt
+          grep -E 'libpipewire-0\.3' ldd.txt
 
-  windows:
-    name: win
-    runs-on: ubuntu-24.04
+  linux_x86_64:
+    runs-on: ubuntu-26.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+      SDL_TAG: release-3.4.14
+      SDL_VIDEODRIVER: dummy
+      SDL_AUDIODRIVER: dummy
     steps:
       - uses: actions/checkout@v6
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            mingw-w64 \
-            libz-mingw-w64-dev \
-            nasm python3 pkg-config
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y --no-install-recommends \
+            build-essential make python3 pkg-config git xvfb \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+            libsdl3-dev libgl1-mesa-dev libpng-dev zlib1g-dev \
+            libao-dev libpipewire-0.3-dev libncurses-dev
+      - name: Build and run 64-bit
+        run: |
+          make clean
+          make linux_x86_64
+          test -x ./zsnes
+          ZSNES_SELFTEST=1 ./zsnes -v 0
+          make asmalign
+      - name: Portability gate
+        run: |
+          command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 \
+            || { echo "aarch64 cross compiler missing; portcheck would skip it"; exit 1; }
+          make portcheck
+      # Nothing here built the debugger, so it broke unnoticed: debugasm.c was
+      # still passing a u4 where execsingle takes a zreg, and debuggeron was
+      # defined in two translation units.
+      - name: Debugger build
+        run: |
+          make clean
+          make linux_x86_64 WITH_DEBUGGER=1
+          test -x ./zsnes
+      - name: AddressSanitizer
+        run: |
+          make linux_x86_64 WITH_DEBUG_HOOKS=1 \
+            EXTRA_CFLAGS='-fsanitize=address -fno-omit-frame-pointer -g -O1' \
+            EXTRA_LDFLAGS='-fsanitize=address'
+          ASAN_OPTIONS=detect_leaks=0 ZSNES_SELFTEST=1 ./zsnes -v 0
+          # The selftest emulates nothing. This runs free test ROMs through
+          # every filter and video mode, then fuzzes the file loaders.
+          test/asan_soak.sh ./zsnes 25
+          # Save-state guards for the things users lean on: that a state saved
+          # now reloads to the same machine, and that every on-disk format still
+          # decodes - ZSNES 1.51/1.43 (V143), this build's V144, the 64-bit
+          # 2.3.0/2.3.1 wide format, and the 2.4.0+ V2 envelope. Under ASan, so
+          # the load path is checked for overruns.
+          test/state_fixtures.sh ./zsnes
+          test/savecycle.sh ./zsnes test/roms/CPUMSC.sfc \
+            test/fixtures/cpumsc.v143.zst test/fixtures/cpumsc.v144.zst \
+            test/fixtures/cpumsc.wide.zst test/fixtures/cpumsc.v2.zst
+          make clean
+
+      - name: Cross-unit type gate
+        run: |
+          make clean
+          make linux_x86_64 \
+            EXTRA_CFLAGS='-flto -Werror=lto-type-mismatch -Werror=odr -Werror=strict-aliasing' \
+            EXTRA_LDFLAGS='-flto -Werror=lto-type-mismatch -Werror=odr -Werror=strict-aliasing'
+          test -x ./zsnes
+          ZSNES_SELFTEST=1 ./zsnes -v 0
+          make clean
+
+
+  linux_aarch64:
+    runs-on: ubuntu-26.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+      SDL_TAG: release-3.4.14
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install dependencies
+        run: |
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross \
+            make pkg-config curl cmake ninja-build git
+      - name: Build zlib for aarch64
+        run: |
+          sha=bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
+          for url in \
+            https://zlib.net/fossils/zlib-1.3.2.tar.gz \
+            https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz
+          do
+            curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+              -o zlib.tar.gz "$url" || continue
+            if echo "$sha  zlib.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+              break
+            fi
+            echo "zlib: bad checksum from $url, trying the next source"
+          done
+          echo "$sha  zlib.tar.gz" | sha256sum -c -
+          tar xzf zlib.tar.gz
+          cd zlib-1.3.2
+          CC=aarch64-linux-gnu-gcc ./configure --static \
+            --prefix=/usr/aarch64-linux-gnu
+          make -j"$(nproc)"
+          sudo make install
+      - name: Build SDL3 for aarch64
+        run: |
+          git clone --depth 1 --branch $SDL_TAG \
+            https://github.com/libsdl-org/SDL.git /tmp/SDL
+          cmake -S /tmp/SDL -B /tmp/SDL/build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/aarch64-linux-gnu \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+            -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF \
+            -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=OFF \
+            -DSDL_UNIX_CONSOLE_BUILD=ON \
+            -DSDL_ALSA=OFF -DSDL_PULSEAUDIO=OFF -DSDL_PIPEWIRE=OFF \
+            -DSDL_JACK=OFF -DSDL_SNDIO=OFF
+          cmake --build /tmp/SDL/build --parallel
+          sudo cmake --install /tmp/SDL/build
       - name: Build
         run: |
           make clean
-          make ARCH=win \
-            WITH_PNG= \
-            CC_TARGET=i686-w64-mingw32-gcc \
-            CXX_TARGET=i686-w64-mingw32-g++ \
-            CC=i686-w64-mingw32-gcc \
-            CXX=i686-w64-mingw32-g++ \
-            WINDRES=i686-w64-mingw32-windres
+          make linux_aarch64
+          file ./zsnes | grep -q aarch64
 
-#  darwin:
-#    name: darwin
-#    runs-on: macos-14
-#    steps:
-#      - uses: actions/checkout@v6
-#      - name: Install dependencies
-#        run: |
-#          brew update
-#          brew install nasm pkg-config sdl3 libpng
-#      - name: Build
-#        run: |
-#          make clean
-#          make ARCH=darwin WITH_AO= WITH_PIPEWIRE=
-#  freebsd:
-#    name: freebsd (optional)
-#    continue-on-error: true
-#    runs-on: ubuntu-24.04
-#    steps:
-#      - uses: actions/checkout@v6
-#      - name: Build in FreeBSD VM
-#        uses: vmactions/freebsd-vm@v1
-#        with:
-#          usesh: true
-#          sync: no
-#          run: |
-#            rm -rf "$HOME/work"
-#            mkdir -p "$HOME/work"
-#            cd "$HOME/work"
-#            fetch -o src.tar.gz "https://codeload.github.com/${{ github.repository }}/tar.gz/${{ github.sha }}"
-#            tar -xzf src.tar.gz --strip-components=1
-#            pkg install -y gmake nasm pkgconf sdl3 png
-#            gmake clean
-#            gmake ARCH=freebsd WITH_AO= WITH_PIPEWIRE=
-#  openbsd:
-#    name: openbsd (optional)
-#    continue-on-error: true
-#    runs-on: ubuntu-24.04
-#    steps:
-#      - uses: actions/checkout@v6
-#      - name: Build in OpenBSD VM
-#        uses: vmactions/openbsd-vm@v1
-#        with:
-#          usesh: true
-#          sync: no
-#          run: |
-#            rm -rf "$HOME/work"
-#            mkdir -p "$HOME/work"
-#            cd "$HOME/work"
-#            ftp -o src.tar.gz "https://codeload.github.com/${{ github.repository }}/tar.gz/${{ github.sha }}"
-#            tar -xzf src.tar.gz --strip-components=1
-#            pkg_add gmake nasm pkgconf sdl3 png
-#            gmake clean
-#            gmake ARCH=openbsd WITH_AO= WITH_PIPEWIRE=
-#  netbsd:
-#    name: netbsd (optional)
-#    continue-on-error: true
-#    runs-on: ubuntu-24.04
-#    steps:
-#      - uses: actions/checkout@v6
-#      - name: Build in NetBSD VM
-#        uses: vmactions/netbsd-vm@v1
-#        with:
-#          usesh: true
-#          sync: no
-#          run: |
-#            rm -rf "$HOME/work"
-#            mkdir -p "$HOME/work"
-#            cd "$HOME/work"
-#            ftp -o src.tar.gz "https://codeload.github.com/${{ github.repository }}/tar.gz/${{ github.sha }}"
-#            tar -xzf src.tar.gz --strip-components=1
-#            /usr/sbin/pkg_add gmake nasm pkgconf SDL3 libpng
-#            gmake clean
-#            gmake ARCH=netbsd WITH_AO= WITH_PIPEWIRE=
+  linux_riscv64:
+    runs-on: ubuntu-26.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+      SDL_TAG: release-3.4.14
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install dependencies
+        run: |
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y --no-install-recommends \
+            gcc-riscv64-linux-gnu g++-riscv64-linux-gnu libc6-dev-riscv64-cross \
+            make pkg-config curl cmake ninja-build git
+      - name: Build zlib for riscv64
+        run: |
+          sha=bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
+          for url in \
+            https://zlib.net/fossils/zlib-1.3.2.tar.gz \
+            https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz
+          do
+            curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+              -o zlib.tar.gz "$url" || continue
+            if echo "$sha  zlib.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+              break
+            fi
+            echo "zlib: bad checksum from $url, trying the next source"
+          done
+          echo "$sha  zlib.tar.gz" | sha256sum -c -
+          tar xzf zlib.tar.gz
+          cd zlib-1.3.2
+          CC=riscv64-linux-gnu-gcc ./configure --static \
+            --prefix=/usr/riscv64-linux-gnu
+          make -j"$(nproc)"
+          sudo make install
+      - name: Build SDL3 for riscv64
+        run: |
+          git clone --depth 1 --branch $SDL_TAG \
+            https://github.com/libsdl-org/SDL.git /tmp/SDL
+          cmake -S /tmp/SDL -B /tmp/SDL/build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/riscv64-linux-gnu \
+            -DCMAKE_INSTALL_LIBDIR=lib \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=riscv64 \
+            -DCMAKE_C_COMPILER=riscv64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=riscv64-linux-gnu-g++ \
+            -DCMAKE_FIND_ROOT_PATH=/usr/riscv64-linux-gnu \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF \
+            -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=OFF \
+            -DSDL_UNIX_CONSOLE_BUILD=ON \
+            -DSDL_ALSA=OFF -DSDL_PULSEAUDIO=OFF -DSDL_PIPEWIRE=OFF \
+            -DSDL_JACK=OFF -DSDL_SNDIO=OFF
+          cmake --build /tmp/SDL/build --parallel
+          sudo cmake --install /tmp/SDL/build
+      - name: Build
+        run: |
+          make clean
+          make linux_riscv64
+          file ./zsnes | grep -qi 'risc-v'
+
+  linux_aarch64_native:
+    name: linux_aarch64 (native)
+    runs-on: ubuntu-26.04-arm
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+      SDL_TAG: release-3.4.14
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install dependencies
+        run: |
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y --no-install-recommends \
+            build-essential cmake ninja-build git make pkg-config zlib1g-dev \
+            libgl1-mesa-dev libpng-dev
+      - name: Install SDL3
+        run: |
+          git clone --depth 1 --branch $SDL_TAG \
+            https://github.com/libsdl-org/SDL.git /tmp/SDL
+          cmake -S /tmp/SDL -B /tmp/SDL/build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF \
+            -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=OFF \
+            -DSDL_UNIX_CONSOLE_BUILD=ON \
+            -DSDL_ALSA=OFF -DSDL_PULSEAUDIO=OFF -DSDL_PIPEWIRE=OFF \
+            -DSDL_JACK=OFF -DSDL_SNDIO=OFF
+          cmake --build /tmp/SDL/build --parallel
+          sudo cmake --install /tmp/SDL/build
+          sudo ldconfig
+          echo 'PKG_CONFIG_PATH=/usr/local/lib/pkgconfig' >> "$GITHUB_ENV"
+      - name: Build and run
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: |
+          make clean
+          make
+          file ./zsnes | grep -q aarch64
+          ZSNES_SELFTEST=1 ./zsnes -v 0
+
+  windows:
+    name: win
+    runs-on: ubuntu-26.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      APT_OPTS: -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+      SDL_TAG: release-3.4.14
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install dependencies
+        run: |
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y \
+            mingw-w64 \
+            libz-mingw-w64-dev \
+            python3 pkg-config
+      - name: Build 32-bit
+        run: |
+          make clean
+          make win_i686 WITH_PNG=
+          test -f ./zsnes.exe
+      - name: Build 64-bit
+        run: |
+          make clean
+          make win_x86_64 WITH_PNG=
+          test -f ./zsnes.exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: zsnes-win64
+          path: zsnes.exe
+
+  windows-run:
+    name: win (run)
+    needs: windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: zsnes-win64
+      - name: Run the executable
+        shell: cmd
+        run: |
+          set ZSNES_SELFTEST=1
+          zsnes.exe -v 0
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install dependencies
+        run: |
+          brew untap aws/tap || true
+          brew update
+          brew install pkgconf sdl3 libpng libao
+      - name: Build
+        run: |
+          make clean
+          make
+          test -x ./zsnes
+      - name: Run the executable
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: ZSNES_SELFTEST=1 ./zsnes -v 0
+      - name: Unit tests
+        run: make -C test run
+
+  freebsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build and run on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.3"
+          usesh: true
+          prepare: |
+            pkg install -y gmake pkgconf python3 sdl3 png libao mesa-libs
+          run: |
+            gmake
+            test -x ./zsnes
+            SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ZSNES_SELFTEST=1 ./zsnes -v 0
+            gmake test

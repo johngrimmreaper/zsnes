@@ -16,10 +16,6 @@
 typedef uint8_t u1;
 typedef uint32_t u4;
 
-/* chips/c_sa1data.c */
-extern u1 SA1Status, CurrentExecSA1, CurrentCPU;
-extern u4 prevedi, SA1xpc;
-
 /* video/c_makev16tdata.c */
 extern u1 transpbuf[], DoTransp;
 extern u4 prevrgbcol, prevrgbpal, coadder16;
@@ -68,7 +64,7 @@ extern u1 SPCRAM[], SPCROM[64], spcextraram[64], FutureExpandS[192];
 extern u1 reg1read, reg2read, reg3read, reg4read, timeron;
 extern u1 timincr0, timincr1, timincr2, timinl0, timinl1, timinl2, timrcall;
 extern u1 spcnumread;
-extern u4 spcPCRam, spcA, spcX, spcY, spcP, spcNZ, spcS, spcRamDP, spcCycle;
+extern u4 spcPCRamSt, spcA, spcX, spcY, spcP, spcNZ, spcS, spcRamDPSt, spcCycle;
 extern u4 PHspcsave, timer2upd;
 
 /* video/c_mode716data.c */
@@ -121,7 +117,7 @@ extern u1 winbgdata[]; /* endmem.c */
 
 /* video/newgfx.c */
 extern u1 OrLogicTable[4], AndLogicTable[4], XorLogicTable[4], XNorLogicTable[4];
-extern u1 NGNumSpr, Mode7HiRes;
+extern u1 NGNumSpr;
 extern u4 sprclprio;
 extern u4 ngwintable[32], ngwintablec[32], pwinen, pngwinen;
 extern u4 bgcmsung, modeused[2], reslbyl, mosjmptab[15], nglogicval;
@@ -129,13 +125,23 @@ extern u4* ngcwinptr;
 
 #define GAP(a, b) ((int)((const u1*)&(b) - (const u1*)&(a)))
 
+/* A distance that spans a run containing pointers.  The pinned number is the
+   one the 32-bit NASM object had; a 64-bit build widens the run, so only the
+   width-independent checks around it apply there.  The block's internal
+   consistency is still checked at both widths. */
+#if UINTPTR_MAX > 0xffffffffu
+#define ZT_CHECK_INT32(got, expected) ((void)0)
+#else
+#define ZT_CHECK_INT32(got, expected) ZT_CHECK_INT(got, expected)
+#endif
+
 static void test_dsp_savestate_offsets(void)
 {
     ZT_SECTION("dspproc: save-state block distances");
     /* zstate.c copies PHdspsave bytes from BRRBuffer and PHdspsave2 from
        echoon0; PHdspconvb is the conversion window used by old states. */
-    ZT_CHECK_INT(PHdspsave, 0x42C);
-    ZT_CHECK_INT(PHdspconvb, 0x3CC);
+    ZT_CHECK_INT32(PHdspsave, 0x42C);
+    ZT_CHECK_INT32(PHdspconvb, 0x3CC);
     ZT_CHECK_INT(PHdspsave2, 0x150);
     ZT_CHECK_INT(PHdspsave, GAP(BRRBuffer[0], echoon0));
     ZT_CHECK_INT(PHdspconvb, GAP(Voice0Freq, echoon0));
@@ -255,7 +261,7 @@ static void test_makevid(void)
     ZT_SECTION("makevid: scratch block layout");
     ZT_CHECK_INT(GAP(bgcoloradder, res512switch), 1);
     ZT_CHECK_INT(GAP(bgcoloradder, pwinbgenab), 2);
-    ZT_CHECK_INT(GAP(bgcoloradder, windowdata[0]), 0x15);
+    ZT_CHECK_INT32(GAP(bgcoloradder, windowdata[0]), 0x15);
     ZT_CHECK_INT(GAP(windowdata[0], numwin), 16);
     /* numwin, multiwin, multiclip, multitype are read as one dword. */
     ZT_CHECK_INT(GAP(numwin, multiwin), 1);
@@ -263,14 +269,14 @@ static void test_makevid(void)
     ZT_CHECK_INT(GAP(numwin, multitype), 3);
     /* The per-BG pointer arrays are indexed as bg1xxx + bgnum*4. */
     ZT_CHECK_INT(GAP(bg1vbufloc, bg2vbufloc), 4);
-    ZT_CHECK_INT(GAP(bg1vbufloc, bg4xposloc), 0x5C);
-    ZT_CHECK_INT(GAP(bgcoloradder, tempbuffer[0]), 0x9C);
-    ZT_CHECK_INT(GAP(tempbuffer[0], curmosaicsz), 0x88);
-    ZT_CHECK_INT(GAP(bgcoloradder, winptrref), 0x12B);
-    ZT_CHECK_INT(GAP(winptrref, hirestiledat[0]), 4);
-    ZT_CHECK_INT(GAP(bgcoloradder, yadder), 0x22F);
-    ZT_CHECK_INT(GAP(yadder, curvidoffset), 0x24);
-    ZT_CHECK_INT(GAP(curvidoffset, bgsubby), 12);
+    ZT_CHECK_INT32(GAP(bg1vbufloc, bg4xposloc), 0x5C);
+    ZT_CHECK_INT32(GAP(bgcoloradder, tempbuffer[0]), 0x9C);
+    ZT_CHECK_INT32(GAP(tempbuffer[0], curmosaicsz), 0x88);
+    ZT_CHECK_INT32(GAP(bgcoloradder, winptrref), 0x12B);
+    ZT_CHECK_INT32(GAP(winptrref, hirestiledat[0]), 4);
+    ZT_CHECK_INT32(GAP(bgcoloradder, yadder), 0x22F);
+    ZT_CHECK_INT32(GAP(yadder, curvidoffset), 0x24);
+    ZT_CHECK_INT32(GAP(curvidoffset, bgsubby), 12);
     ZT_CHECK_INT(GAP(bgsubby, temp), 4);
     ZT_CHECK_INT(GAP(temp, a16x16yinc), 3);
 }
@@ -306,7 +312,6 @@ static void test_newgfx(void)
     ZT_CHECK_INT(GAP(bgcmsung, modeused[0]), 4);
     ZT_CHECK_INT(GAP(modeused[0], reslbyl), 8);
     ZT_CHECK_INT(GAP(nglogicval, mosjmptab[0]), 4);
-    ZT_CHECK_INT(GAP(mosjmptab[0], Mode7HiRes), 60);
     /* NGNumSpr is a lone byte, so sprclprio after it is deliberately unaligned. */
     ZT_CHECK_INT(GAP(NGNumSpr, sprclprio), 1);
 }
@@ -327,7 +332,7 @@ static void test_spcdata(void)
 
     ZT_SECTION("spc700: 64KB address space and the boot ROM window");
     /* SPCRAM holds the SPC700's 64KB plus the boot ROM that overlays $FFC0. */
-    ZT_CHECK_INT(GAP(SPCRAM[0], spcPCRam), 65552);
+    ZT_CHECK_INT(GAP(SPCRAM[0], spcPCRamSt), 65552);
     ZT_CHECK(SPCRAM[0] == 0xFF && SPCRAM[65471] == 0xFF);
     ZT_CHECK(memcmp(SPCRAM + 65472, iplrom, sizeof iplrom) == 0);
     ZT_CHECK(memcmp(SPCROM, iplrom, sizeof iplrom) == 0);
@@ -336,14 +341,16 @@ static void test_spcdata(void)
     ZT_CHECK(SPCRAM[65472 + 64] == 0xAA && SPCRAM[65472 + 79] == 0x99);
 
     ZT_SECTION("spc700: register and timer block layout");
-    ZT_CHECK_INT(GAP(spcPCRam, spcA), 4);
+    /* spcPCRam and spcRamDP hold host pointers, so the live variables sit
+       outside this block and a dword shadow keeps the save-state layout. */
+    ZT_CHECK_INT(GAP(spcPCRamSt, spcA), 4);
     ZT_CHECK_INT(GAP(spcA, spcX), 4);
     ZT_CHECK_INT(GAP(spcX, spcY), 4);
     ZT_CHECK_INT(GAP(spcY, spcP), 4);
     ZT_CHECK_INT(GAP(spcP, spcNZ), 4);
     ZT_CHECK_INT(GAP(spcNZ, spcS), 4);
-    ZT_CHECK_INT(GAP(spcS, spcRamDP), 4);
-    ZT_CHECK_INT(GAP(spcRamDP, spcCycle), 4);
+    ZT_CHECK_INT(GAP(spcS, spcRamDPSt), 4);
+    ZT_CHECK_INT(GAP(spcRamDPSt, spcCycle), 4);
     ZT_CHECK_INT(spcS, 0x1FF); /* the only non-zero initialiser */
     /* $F4-$F7 and the seven timer bytes are read as one run of bytes. */
     ZT_CHECK_INT(GAP(spcCycle, reg1read), 4);
@@ -461,7 +468,7 @@ static void test_execdata(void)
     ZT_CHECK(((const u1*)&soundcycleft - (const u1*)&tempedx) % 32 == 0);
     /* Same again from ZMVZClose to ExecExitOkay. */
     ZT_CHECK_INT(GAP(NextLineCache, ZMVZClose), 1);
-    ZT_CHECK_INT(GAP(ZMVZClose, ExecExitOkay), 31);
+    ZT_CHECK_INT32(GAP(ZMVZClose, ExecExitOkay), 31);
     ZT_CHECK(((const u1*)&ExecExitOkay - (const u1*)&tempedx) % 32 == 0);
     /* NASM fills an ALIGN with nops; zero-filling here would change the image. */
     ZT_CHECK_INT(((const u1*)&soundcycleft)[-1], 0x90);
@@ -487,21 +494,6 @@ static void test_execdata(void)
     ZT_CHECK_INT(nmiprevline, 224);
     ZT_CHECK_INT(NumberOfOpcodes2, 370);
     ZT_CHECK_INT(ExecExitOkay, 1);
-}
-
-/* chips/c_sa1proc.c: the block that was left in chips/sa1proc.asm. zstate.c
- * saves three bytes from &SA1Status, so those three must stay adjacent and in
- * order; prevedi followed the assembly's commented-out ALIGN32, so it sits at
- * an odd offset on purpose. */
-static void test_sa1proc(void)
-{
-    ZT_SECTION("sa1proc: the three save-state bytes");
-    ZT_CHECK_INT(GAP(SA1Status, CurrentExecSA1), 1);
-    ZT_CHECK_INT(GAP(CurrentExecSA1, CurrentCPU), 1);
-
-    ZT_SECTION("sa1proc: unaligned tail");
-    ZT_CHECK_INT(GAP(CurrentCPU, prevedi), 1);
-    ZT_CHECK_INT(GAP(prevedi, SA1xpc), 4);
 }
 
 /* video/c_makev16tdata.c: the .bss blocks from video/makev16t.asm. The
@@ -535,14 +527,14 @@ static void test_newgfx16data(void)
 
     ZT_SECTION("newgfx16: the two 32-byte gaps");
     ZT_CHECK_INT(GAP(clinemainsub, cpalptrng), 0x22);
-    ZT_CHECK_INT(GAP(mosjmptab16bntms[0], UnusedBit[0]), 0x50);
+    ZT_CHECK_INT32(GAP(mosjmptab16bntms[0], UnusedBit[0]), 0x50);
     /* The padding is nops; a zero here means someone used .balign without a
        fill byte. */
     ZT_CHECK_INT(((const u1*)&cpalptrng)[-1], 0x90);
     ZT_CHECK_INT(((const u1*)&UnusedBit)[-1], 0x90);
 
     ZT_SECTION("newgfx16: jump tables and constants");
-    ZT_CHECK_INT(GAP(cpalptrng, palchanged), 0x30);
+    ZT_CHECK_INT32(GAP(cpalptrng, palchanged), 0x30);
     ZT_CHECK_INT(GAP(palchanged, ng16bbgval), 4);
     ZT_CHECK_INT(GAP(ng16bbgval, ng16bprval), 4);
     ZT_CHECK_INT(GAP(ng16bprval, mosjmptab16b[0]), 4);
@@ -636,7 +628,6 @@ int main(void)
     test_execdata();
     test_makevid();
     test_newgfx();
-    test_sa1proc();
     test_makev16t();
     test_newgfx16data();
     test_regsdata();

@@ -1,17 +1,11 @@
 /*
- * cpu/spc_ioregs.h - SPC700 I/O register ($00F0-$00FF) read/write handlers,
- * ported from the SPCRegF0..FF / RSPCRegF0..FF routines in cpu/spc700.asm.
+ * SPC700 I/O register ($00F0-$00FF) handlers, from the SPCRegF0..FF and
+ * RSPCRegF0..FF routines in cpu/spc700.asm. Textual include (cpu/c_spc700.c),
+ * which supplies the integer typedefs, the SPC globals and DSPWriteReg().
  *
- * Textual include (cpu/c_spc700.c): the includer must first provide the u1/u4
- * typedefs and declarations for the globals used below - SPCRAM[], DSPMem,
- * SPCROM, spcextraram, disablespcclr, SPCSkipXtraROM, reg1read..reg4read,
- * spc700read, timeron, timincr0..2, timinl0..2, spcnumread - plus DSPWriteReg().
- *
- * Register ABI of the original asm (preserved by the callers): the dispatch
- * passes the register number in ebx (0xF0..0xFF) and, for writes, the value in
- * al; reads return the value in al. Handlers must not disturb the SPC core's
- * other registers - in C that is automatic, and the callers save eax around the
- * call because the core keeps live data in ah.
+ * The dispatch passes the register number in ebx and, for a write, the value
+ * in al; a read returns it in al. Callers save eax around the call because the
+ * core keeps live data in ah.
  */
 #ifndef SPC_IOREGS_H
 #define SPC_IOREGS_H
@@ -26,8 +20,14 @@ static inline void spc_write_reg(u4 reg, u1 al)
 
     case 0xF1: /* control: clear input ports, page in IPL ROM, enable timers */
         if (disablespcclr != 1) {
-            if (al & 0x10) { SPCRAM[0xF4] = 0; SPCRAM[0xF5] = 0; }
-            if (al & 0x20) { SPCRAM[0xF6] = 0; SPCRAM[0xF7] = 0; }
+            if (al & 0x10) {
+                SPCRAM[0xF4] = 0;
+                SPCRAM[0xF5] = 0;
+            }
+            if (al & 0x20) {
+                SPCRAM[0xF6] = 0;
+                SPCRAM[0xF7] = 0;
+            }
         }
         if (SPCSkipXtraROM != 1) {
             const u1* src = (al & 0x80) ? SPCROM : spcextraram;
@@ -48,27 +48,46 @@ static inline void spc_write_reg(u4 reg, u1 al)
         SPCRAM[0xF3] = al;
         break;
 
-    case 0xF4: reg1read = al; spc700read++; break;
-    case 0xF5: reg2read = al; spc700read++; break;
-    case 0xF6: reg3read = al; spc700read++; break;
-    case 0xF7: reg4read = al; spc700read++; break;
+    case 0xF4:
+        reg1read = al;
+        spc700read++;
+        break;
+    case 0xF5:
+        reg2read = al;
+        spc700read++;
+        break;
+    case 0xF6:
+        reg3read = al;
+        spc700read++;
+        break;
+    case 0xF7:
+        reg4read = al;
+        spc700read++;
+        break;
 
-    case 0xF8: SPCRAM[0xF8] = al; break;
-    case 0xF9: SPCRAM[0xF9] = al; break;
+    case 0xF8:
+        SPCRAM[0xF8] = al;
+        break;
+    case 0xF9:
+        SPCRAM[0xF9] = al;
+        break;
 
     case 0xFA: /* timer targets; latch into the counter only when it is idle */
         timincr0 = al;
-        if (timinl0 == 0) timinl0 = al;
+        if (timinl0 == 0)
+            timinl0 = al;
         SPCRAM[0xFA] = al;
         break;
     case 0xFB:
         timincr1 = al;
-        if (timinl1 == 0) timinl1 = al;
+        if (timinl1 == 0)
+            timinl1 = al;
         SPCRAM[0xFB] = al;
         break;
     case 0xFC:
         timincr2 = al;
-        if (timinl2 == 0) timinl2 = al;
+        if (timinl2 == 0)
+            timinl2 = al;
         SPCRAM[0xFC] = al;
         break;
 

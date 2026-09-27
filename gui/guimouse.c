@@ -1,37 +1,18 @@
-/*
- * Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
- *
- * http://www.zsnes.com
- * http://sourceforge.net/projects/zsnes
- * https://zsnes.bountysource.com
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- */
-
 #include <stdarg.h>
 #include <string.h>
 
-#include "../asm_call.h"
 #include "../c_init.h"
+#ifdef __UNIXSDL__
+#include "../unix/sdllink.h"
+#endif
 #include "../c_intrf.h"
-#include "../cfg.h"
 #include "../cpu/c_dsp.h"
 #include "../cpu/execute.h"
 #include "../cpu/regs.h"
 #include "../gblvars.h"
-#include "../input.h"
 #include "../link.h"
+#include "cfg.h"
+#include "input.h"
 #ifndef lengthof
 #define lengthof(x) (sizeof(x) / sizeof *(x))
 #endif
@@ -55,8 +36,13 @@
 #include "guimouse.h"
 #include "guiwindp.h"
 
+#include "../video/filter.h"
 #include "../video/ntsc.h"
 #include "../video/procvidc.h"
+
+#if defined __UNIXSDL__ && defined __OPENGL__
+#include "../unix/gl_draw.h"
+#endif
 
 #ifdef __WIN32__
 #include "../win/winlink.h"
@@ -222,20 +208,6 @@ static void GUIClickCButtonK(s4 const eax, s4 const edx, s4 const p1, s4 const p
     }
 }
 
-static void GUIClickCButtonN(s4 const eax, s4 const edx, s4 const p1, s4 const p2, u1* const p3, void (*const p4)(void))
-{
-    if (GUIClickArea(eax, edx, p1 + 1, p2 + 3, p1 + 6, p2 + 8)) {
-#ifdef __WIN32__
-        if (*p3 != 1)
-            Keep4_3Ratio = 1;
-#endif
-        *p3 ^= 1;
-#ifdef __WIN32__
-        p4();
-#endif
-    }
-}
-
 static void GUIClickCButtonM(s4 const eax, s4 const edx, s4 const p1, s4 const p2, u1* const p3)
 {
     if (GUIClickArea(eax, edx, p1 + 1, p2 + 3, p1 + 6, p2 + 8)) {
@@ -250,21 +222,6 @@ static bool GUIClickCButton5(s4 const eax, s4 const edx, s4 const p1, s4 const p
         *p3 = *p3 == p4 ? *p3 ^ p4 : p4;
         return true;
     }
-    return false;
-}
-
-static bool GUIClickCButton6(s4 const eax, s4 const edx, s4 const p1, s4 const p2, u1* const p3, u1 const p4)
-{
-    if (GUIClickArea(eax, edx, p1 + 1, p2 + 3, p1 + 6, p2 + 8)) {
-        if (*p3 == p4) {
-            *p3 = 0;
-        } else {
-            *p3 = p4;
-            memset(vidbufferofsb, 0, 288 * 128 * 4);
-        }
-        return true;
-    }
-
     return false;
 }
 
@@ -299,7 +256,7 @@ static void GUIClickCButtonI(s4 const eax, s4 const edx, s4 const p1, s4 const p
 {
     if (GUIClickArea(eax, edx, p1 + 1, p2 + 3, p1 + 6, p2 + 8)) {
         *p3 ^= 1;
-        if (GUIBIFIL[cvidmode] != 0) {
+        if (GUIBIFIL[cvidmode] != 0 && !VideoSettingsLive()) {
 #ifdef __WIN32__
             initDirectDraw();
 #elif defined __OPENGL__
@@ -497,13 +454,6 @@ static void GUIPButtonHole(s4 const eax, s4 const edx, s4 const p1, s4 const p2,
         *p3 = p4;
 }
 
-static void GUIPButtonHoleS(s4 const eax, s4 const edx, s4 const p1, s4 const p2, u1* const p3, u1 const p4)
-{
-    if (GUIClickArea(eax, edx, p1 + 1, p2 + 1, p1 + 7, p2 + 7)) {
-        *p3 = p4;
-    }
-}
-
 static void GUIPButtonHoleLoad(s4 const eax, s4 const edx, s4 const p1, s4 const p2, u1* const p3, u1 const p4)
 {
     if (GUIClickArea(eax, edx, p1 + 1, p2 + 1, p1 + 7, p2 + 7)) {
@@ -631,6 +581,7 @@ static void GUIPTabClick(s4 const eax, s4 const edx, s4 const p1, s4 const p2, u
                 break;
             *p = 0;
         }
+        va_end(ap);
         GUIFreshInputSelect = 1;
     }
 }
@@ -800,8 +751,12 @@ static void DisplayGUIMovieClick(s4 const eax, s4 const edx)
 #define GUIInputSetIndKey(p1, keycontrolval)                                            \
     do {                                                                                \
         /* Check if controller is set */                                                \
-        if (*(u4 const*)(keycontrolval) == 0)                                           \
-            return; /* XXX cast makes no sense */                                       \
+        /* Was a dword read of a single byte, which picked up whatever three            \
+           globals the linker put after it - undefined, and it made the test            \
+           depend on the *other* players' flags. It asks whether this                   \
+           controller is set, so read the byte. */                                      \
+        if (*(keycontrolval) == 0)                                                      \
+            return;                                                                     \
                                                                                         \
         DGOptnsProcBox(eax, edx, 45, 102, &p1##upk, (keycontrolval)); /* Up */          \
         DGOptnsProcBox(eax, edx, 45, 112, &p1##downk, (keycontrolval)); /* Down */      \
@@ -866,6 +821,9 @@ static void DisplayGUIInputClick_skipscrol(s4 const eax, s4 const edx)
     GUIClickCButton(eax, edx, 5, 170, &AllowUDLR);
     GUIClickCButton(eax, edx, 105, 170, &Turbo30hz);
     GUIClickCButtonM(eax, edx, 5, 180, &pl12s34);
+#ifdef __UNIXSDL__
+    GUIClickCButton(eax, edx, 5, 190, &InputPhysicalKeys);
+#endif
 }
 
 static void DisplayGUIInputClick(s4 const eax, s4 const edx)
@@ -891,51 +849,91 @@ static void DisplayGUIOptionClick(s4 const eax, s4 const edx)
     GUIPTabClick(eax, edx, 40, 74, 2, GUIOptionTabs, (s4*)0);
 
     if (GUIOptionTabs[0] == 1) { // Basic
-        GUIClickCButton(eax, edx, 11, 41, &Show224Lines);
-        GUIClickCButton(eax, edx, 11, 71, &newengen);
-        GUIClickCButton(eax, edx, 11, 81, &bgfixer);
-        GUIClickCButton(eax, edx, 11, 111, &AutoPatch);
-        GUIClickCButton(eax, edx, 11, 121, &DisplayInfo);
-        GUIClickCButton(eax, edx, 11, 131, &RomInfo);
+        s4 row[OPT_BAS_COUNT];
+
+        GUIOptionBasicRows(row);
+        GUIClickCButton(eax, edx, 11, row[OPT_BAS_224], &Show224Lines);
+        GUIClickCButton(eax, edx, 11, row[OPT_BAS_NEWENG], &newengen);
+        /* Only where it is actually drawn: the box is hidden under the new
+           engine, and a click there used to toggle it unseen. */
+        if (newengen == 0) {
+            GUIClickCButton(eax, edx, 11, row[OPT_BAS_ALTENG], &bgfixer);
+        }
+        GUIClickCButton(eax, edx, 11, row[OPT_BAS_PATCH], &AutoPatch);
+        GUIClickCButton(eax, edx, 11, row[OPT_BAS_ROMINFODISP], &DisplayInfo);
+        GUIClickCButton(eax, edx, 11, row[OPT_BAS_ROMLOG], &RomInfo);
 #ifdef __WIN32__
-        GUIClickCButton(eax, edx, 11, 161, &PauseFocusChange);
-        GUIClickCButton(eax, edx, 11, 171, &HighPriority);
+        GUIClickCButton(eax, edx, 11, row[OPT_BAS_PAUSEBG], &PauseFocusChange);
+        GUIClickCButton(eax, edx, 11, row[OPT_BAS_PRIORITY], &HighPriority);
         CheckPriority();
 #endif
-        GUIClickCButton(eax, edx, 11, 181, &DisableScreenSaver);
+        GUIClickCButton(eax, edx, 11, row[OPT_BAS_SAVER], &DisableScreenSaver);
 #ifdef __WIN32__
         CheckScreenSaver();
 #endif
     }
 
     if (GUIOptionTabs[0] == 2) {
-        GUIClickCButton(eax, edx, 11, 31, &FPSAtStart);
-        GUIClickCButton(eax, edx, 11, 41, &CPUAtStart);
-        GUIClickCButton(eax, edx, 11, 51, &TimerEnable);
-        GUIClickCButton(eax, edx, 89, 51, &TwelveHourClock);
-        GUIClickCButton(eax, edx, 11, 61, &ClockBox);
-        GUIClickCButton(eax, edx, 11, 91, &SmallMsgText);
-        GUIClickCButton(eax, edx, 11, 101, &GUIEnableTransp);
-        GUIPButtonHole(eax, edx, 11, 131, &ScreenShotFormat, 0);
+        s4 row[OPT_OVR_COUNT];
+        u1 const clock = TimerEnable;
+
+        GUIOptionOverlayRows(row);
+        GUIClickCButton(eax, edx, 11, row[OPT_OVR_FPS], &FPSAtStart);
+        GUIClickCButton(eax, edx, 11, row[OPT_OVR_CPU], &CPUAtStart);
+        GUIClickCButton(eax, edx, 11, row[OPT_OVR_CLOCK], &TimerEnable);
+        /* The two below only exist while the clock is on, and the state read
+           before this click decides that, so turning the clock on does not
+           also take a click meant for it. */
+        if (clock == 1) {
+            GUIClickCButton(eax, edx, 89, row[OPT_OVR_CLOCK], &TwelveHourClock);
+            GUIClickCButton(eax, edx, 11, row[OPT_OVR_CLOCKBOX], &ClockBox);
+        }
+        GUIClickCButton(eax, edx, 11, row[OPT_OVR_SMALLTEXT], &SmallMsgText);
+        GUIClickCButton(eax, edx, 11, row[OPT_OVR_TRANSP], &GUIEnableTransp);
+        GUIPButtonHole(eax, edx, 11, row[OPT_OVR_BMP], &ScreenShotFormat, 0);
 #ifndef NO_PNG
-        GUIPButtonHole(eax, edx, 11, 141, &ScreenShotFormat, 1);
+        GUIPButtonHole(eax, edx, 11, row[OPT_OVR_PNG], &ScreenShotFormat, 1);
 #endif
     }
+}
+
+/* One of the mutually exclusive filter boxes: clicking the one that is on
+   turns it off, and everything the filters cannot be combined with is put
+   straight by VideoFilterToggle rather than by each box for itself. */
+static void GUIClickFilter(s4 const eax, s4 const edx, s4 const p1, s4 const p2,
+    VideoFilter const f)
+{
+    if (GUIClickArea(eax, edx, p1 + 1, p2 + 3, p1 + 6, p2 + 8)) {
+        VideoFilterToggle(f);
+    }
+}
+
+/* The hq box picks whichever level the radio buttons are set to. */
+static VideoFilter GUIHqFilter(void)
+{
+    return hqFilterlevel >= 4 ? VFILTER_HQ4X
+        : hqFilterlevel == 3  ? VFILTER_HQ3X
+                              : VFILTER_HQ2X;
 }
 
 static void DisplayGUIVideoClick_notmodestab(s4 const eax, s4 const edx)
 {
     if (GUIVideoTabs[0] == 2) // Filters tab
     {
+        s4 row[FILT_ROW_COUNT];
+
+        GUIFilterRows(row);
         Clear2xSaIBuffer();
 
         {
             {
                 // Bilinear
                 if (GUIBIFIL[cvidmode] != 0) {
-                    if (GUIClickArea(eax, edx, 18 + 1, 35 + 3, 18 + 6, 35 + 8))
-                        NTSCFilter = 0;
-                    GUIClickCButtonI(eax, edx, 18, 35, &BilinearFilter);
+                    if (GUIClickArea(eax, edx, 18 + 1, row[FILT_ROW_TOP] + 3, 18 + 6, row[FILT_ROW_TOP] + 8)
+                        && !BilinearFilter && VideoFilterGet() != VFILTER_NONE) {
+                        VideoFilterSet(VFILTER_NONE); // one filter at a time
+                    }
+                    GUIClickCButtonI(eax, edx, 18, row[FILT_ROW_TOP], &BilinearFilter);
                 } else {
                     // Interpolations
 #ifdef __WIN32__
@@ -944,144 +942,78 @@ static void DisplayGUIVideoClick_notmodestab(s4 const eax, s4 const edx)
                     if (GUII2VID[cvidmode] != 0)
 #endif
                     {
-                        if (GUIClickArea(eax, edx, 18 + 1, 35 + 3, 18 + 6, 35 + 8)) {
-                            hqFilter = 0;
-                            NTSCFilter = 0;
-                            En2xSaI = 0;
+                        if (GUIClickArea(eax, edx, 18 + 1, row[FILT_ROW_TOP] + 3, 18 + 6, row[FILT_ROW_TOP] + 8)) {
+                            antienab ^= 1;
+                            if (antienab) {
+                                VideoFilterSet(VFILTER_NONE);
+                                antienab = 1; // VideoFilterSet clears it
+                            }
                         }
-                        GUIClickCButton(eax, edx, 18, 35, &antienab);
                     }
                 }
 
                 // NTSC filter
                 if (GUINTVID[cvidmode] != 0) {
-                    if (GUIClickArea(eax, edx, 128 + 1, 35 + 3, 128 + 6, 35 + 8)) {
-                        En2xSaI = 0;
-                        hqFilter = 0;
-                        scanlines = 0;
-                        antienab = 0;
-                    }
+                    if (GUIClickArea(eax, edx, 128 + 1, row[FILT_ROW_TOP] + 3, 128 + 6, row[FILT_ROW_TOP] + 8)
+                        && VideoFilterGet() != VFILTER_NTSC) {
 #ifdef __OPENGL__
-                    if (GUIClickArea(eax, edx, 128 + 1, 35 + 3, 128 + 6, 35 + 8))
                         BilinearFilter = 0;
 #endif
-                    GUIClickCButtonN(eax, edx, 128, 35, &NTSCFilter, NTSCFilterInit);
+#ifdef __WIN32__
+                        Keep4_3Ratio = 1;
+#endif
+                    }
+                    GUIClickFilter(eax, edx, 128, row[FILT_ROW_TOP], VFILTER_NTSC);
                 }
 
                 // Kreed 2x filters
                 if (GUIDSIZE[cvidmode] != 0) {
-                    if (GUIClickArea(eax, edx, 18 + 1, 45 + 3, 18 + 6, 45 + 8)) {
-                        hqFilter = 0;
-                        scanlines = 0;
-                        antienab = 0;
-                        NTSCFilter = 0;
-                    }
-                    if (GUIClickArea(eax, edx, 128 + 1, 45 + 3, 128 + 6, 45 + 8)) {
-                        hqFilter = 0;
-                        scanlines = 0;
-                        antienab = 0;
-                        NTSCFilter = 0;
-                    }
-                    if (GUIClickArea(eax, edx, 18 + 1, 55 + 3, 18 + 6, 55 + 8)) {
-                        hqFilter = 0;
-                        scanlines = 0;
-                        antienab = 0;
-                        NTSCFilter = 0;
-                    }
-                    GUIClickCButton6(eax, edx, 18, 45, &En2xSaI, 1);
-                    GUIClickCButton6(eax, edx, 128, 45, &En2xSaI, 2);
-                    GUIClickCButton6(eax, edx, 18, 55, &En2xSaI, 3);
+                    GUIClickFilter(eax, edx, 18, row[FILT_ROW_SAI1], VFILTER_2XSAI);
+                    GUIClickFilter(eax, edx, 128, row[FILT_ROW_SAI1], VFILTER_SUPEREAGLE);
+                    GUIClickFilter(eax, edx, 18, row[FILT_ROW_SAI2], VFILTER_SUPER2XSAI);
                 }
 
-                u1 const bl = cvidmode; // Hq*x filters
-                if (GUIHQ4X[bl] != 0) {
-                    GUIPButtonHole(eax, edx, 188, 68, &hqFilterlevel, 4);
-                    goto radiobuttonhq3x;
-                }
-                if (GUIHQ3X[bl] != 0) {
-                radiobuttonhq3x:
-                    GUIPButtonHole(eax, edx, 158, 68, &hqFilterlevel, 3);
-                    goto radiobuttonhq2x;
-                }
-                if (GUIHQ2X[bl] != 0) {
-                radiobuttonhq2x:
-                    GUIPButtonHole(eax, edx, 128, 68, &hqFilterlevel, 2);
-                    if (GUIClickArea(eax, edx, 128 + 1, 55 + 3, 128 + 6, 55 + 8)) {
-                        En2xSaI = 0;
-                        scanlines = 0;
-                        antienab = 0;
-                        NTSCFilter = 0;
+                // Hq*x filters
+                if (GUIHQ2X[cvidmode] != 0) {
+                    GUIClickFilter(eax, edx, 128, row[FILT_ROW_SAI2], GUIHqFilter());
+                    /* The level buttons are drawn only while the filter is on,
+                       so they answer only then. They used to answer wherever
+                       the mode allowed them, which changed the level from a
+                       blank part of the panel. */
+                    if (hqFilter != 0) {
+                        s4 const y = row[FILT_ROW_HQLEVEL];
+
+                        if (GUIHQ4X[cvidmode] != 0
+                            && GUIClickArea(eax, edx, 188 + 1, y + 1, 188 + 7, y + 7)) {
+                            VideoFilterSet(VFILTER_HQ4X);
+                        }
+                        if (GUIHQ3X[cvidmode] != 0
+                            && GUIClickArea(eax, edx, 158 + 1, y + 1, 158 + 7, y + 7)) {
+                            VideoFilterSet(VFILTER_HQ3X);
+                        }
+                        if (GUIClickArea(eax, edx, 128 + 1, y + 1, 128 + 7, y + 7)) {
+                            VideoFilterSet(VFILTER_HQ2X);
+                        }
                     }
-                    GUIClickCButton(eax, edx, 128, 55, &hqFilter);
                 }
             }
 
-            GUIClickCButton(eax, edx, 18, 115, &GrayscaleMode); // Grayscale
+            GUIClickCButton(eax, edx, 18, row[FILT_ROW_MISC], &GrayscaleMode); // Grayscale
 
             // Hires Mode7
             if (GUIM7VID[cvidmode] != 0)
-                GUIClickCButton5(eax, edx, 128, 115, &Mode7HiRes16b, 1);
+                GUIClickCButton5(eax, edx, 128, row[FILT_ROW_MISC], &Mode7HiRes16b, 1);
 
 #ifdef __WIN32__
-            // Triple buffs/vsyncs
+            // Triple buffering. VSync is on the Monitors panel.
             if (GUIWFVID[cvidmode] != 0) {
-                GUIClickCButtonf(eax, edx, 128, 145, &TripleBufferWin, initDirectDraw);
+                GUIClickCButtonf(eax, edx, 18, row[FILT_ROW_SYNC], &TripleBufferWin, initDirectDraw);
             }
-            GUIClickCButtonf(eax, edx, 18, 145, &vsyncon, initDirectDraw);
-#endif
-
-#ifdef __OPENGL__
-            if (GUIBIFIL[cvidmode] != 0)
-                GUIClickCButtonI(eax, edx, 18, 145, &vsyncon);
 #endif
 
             // Keep 4:3 Ratio
             if (GUIKEEP43[cvidmode] != 0)
-                GUIClickCButtonK(eax, edx, 18, 175, &Keep4_3Ratio, initwinvideo);
-
-            // GL Scanlines
-            if (GUIBIFIL[cvidmode] != 0) {
-                // Update mouse location
-                s4 const eax = GUImouseposx - GUIwinposx[5];
-                s4 const edx = GUImouseposy - GUIwinposy[5];
-
-                if (GUIClickArea(eax, edx, 23, 88, 23 + 100, 92)) {
-                    sl_intensity = eax - 23;
-                    GUIHold = 8; // Lock mouse to bar when clicked
-                    GUIHoldYlim = GUIwinposy[5] + 90;
-                    s4 const eax = GUIwinposx[5] + 23;
-                    GUIHoldXlimL = eax;
-                    GUIHoldXlimR = eax + 100;
-                }
-            } else {
-                // Scanlines
-                if (GUIDSIZE[cvidmode] != 0) {
-                    if (GUIClickArea(eax, edx, 168 + 1, 87 + 3, 168 + 38, 87 + 8)) {
-                        En2xSaI = 0;
-                        hqFilter = 0;
-                        NTSCFilter = 0;
-                    }
-                    GUIPButtonHoleS(eax, edx, 18, 87, &scanlines, 0);
-                    GUIPButtonHoleS(eax, edx, 168, 87, &scanlines, 1);
-                }
-
-                {
-                    if (GUIDSIZE[cvidmode] != 0) {
-                        if (GUIClickArea(eax, edx, 68 + 1, 87 + 3, 68 + 38, 87 + 8)) {
-                            En2xSaI = 0;
-                            hqFilter = 0;
-                            NTSCFilter = 0;
-                        }
-                        if (GUIClickArea(eax, edx, 118 + 1, 87 + 3, 118 + 38, 87 + 8)) {
-                            En2xSaI = 0;
-                            hqFilter = 0;
-                            NTSCFilter = 0;
-                        }
-                        GUIPButtonHoleS(eax, edx, 68, 87, &scanlines, 2);
-                        GUIPButtonHoleS(eax, edx, 118, 87, &scanlines, 3);
-                    }
-                }
-            }
+                GUIClickCButtonK(eax, edx, 18, row[FILT_ROW_DISP], &Keep4_3Ratio, initwinvideo);
         }
     }
 
@@ -1135,10 +1067,12 @@ static void DisplayGUIVideoClick_notmodestab(s4 const eax, s4 const edx)
                 goto nomovebar;
             }
 
-            s4 const eax = GUIwinposx[5] + 8;
-            GUIHoldXlimL = eax;
-            GUIHoldXlimR = eax + 200;
-            GUIHold = 7; // Lock mouse to bar when clicked
+            {
+                s4 const eax = GUIwinposx[5] + 8;
+                GUIHoldXlimL = eax;
+                GUIHoldXlimR = eax + 200;
+                GUIHold = 7; // Lock mouse to bar when clicked
+            }
         nomovebar:;
         }
 
@@ -1196,10 +1130,12 @@ static void DisplayGUIVideoClick_notmodestab(s4 const eax, s4 const edx)
                 goto nomovebar2;
             }
 
-            s4 const eax = GUIwinposx[5] + 8;
-            GUIHoldXlimL = eax;
-            GUIHoldXlimR = eax + 200;
-            GUIHold = 7; // Lock mouse to bar when clicked
+            {
+                s4 const eax = GUIwinposx[5] + 8;
+                GUIHoldXlimL = eax;
+                GUIHoldXlimR = eax + 200;
+                GUIHold = 7; // Lock mouse to bar when clicked
+            }
         nomovebar2:;
         }
 
@@ -1215,23 +1151,134 @@ static void DisplayGUIVideoClick_skipscrol(s4 const eax, s4 const edx)
     if (GUIWinControl(eax, edx, 5, 27, 115, 27 + 20 * 8, &GUIBlankVar, &GUIcurrentvideoviewloc, &GUINumValue, 27, 8, &GUIcurrentvideocursloc, 2, 5, 0))
         return;
 
-    GUIPHoldbutton(eax, edx, 130, 31, 166, 41, 4);
+    {
+        s4 row[MODE_ROW_COUNT];
 
-    GUIPHoldbutton(eax, edx, 182, 116, 218, 126, 12);
-
-    GUITextBoxInputNach(eax, edx, 130, 130, 178, 140, 0, 5, SetCustomXY);
-    GUITextBoxInputNach(eax, edx, 191, 130, 239, 140, 1, 5, SetCustomXY);
+        GUIModeRows(row);
+        GUIPHoldbutton(eax, edx, 130, row[MODE_ROW_SET] + 1, 166,
+            row[MODE_ROW_SET] + 11, 4);
+        GUIPHoldbutton(eax, edx, 182, row[MODE_ROW_CUSTOM] - 4, 218,
+            row[MODE_ROW_CUSTOM] + 6, 12);
+        GUITextBoxInputNach(eax, edx, 130, row[MODE_ROW_CUSTOMBOX], 178,
+            row[MODE_ROW_CUSTOMBOX] + 10, 0, 5, SetCustomXY);
+        GUITextBoxInputNach(eax, edx, 191, row[MODE_ROW_CUSTOMBOX], 239,
+            row[MODE_ROW_CUSTOMBOX] + 10, 1, 5, SetCustomXY);
+    }
 
     DisplayGUIVideoClick_notmodestab(eax, edx);
 }
 
+/* Offer every tab in `tabs` for clicking, starting at `x`, and return where the
+   next row of tabs would begin. The widths are the ones GUIDrawTabs lays out:
+   eight pixels of frame plus six a character, two between tabs. Working them
+   out from the labels keeps the click areas and the drawing from drifting
+   apart - they used to be a column of hand-written pixel pairs that had to be
+   re-derived by hand whenever a tab was added or renamed. */
+static s4 GUITabRowClick(s4 const eax, s4 const edx, u4* const tabs, s4 x,
+    u4* const others)
+{
+    char const* label = (char const*)tabs + 8; // XXX ugly cast, as in GUIDrawTabs
+    u4 const count = tabs[1];
+    u4 i;
+
+    for (i = 1; i <= count; i++) {
+        s4 const width = 8 + 6 * (s4)strlen(label);
+
+        GUIPTabClick(eax, edx, x, x + width + 1, i, tabs, others, (u4*)0);
+        x += width + 2;
+        label += strlen(label) + 1;
+    }
+    return x;
+}
+
 static void DisplayGUIVideoClick(s4 const eax, s4 const edx)
 {
-    GUIPTabClick(eax, edx, 0, 39, 1, GUIVideoTabs, GUIVntscTab, (s4*)0);
-    GUIPTabClick(eax, edx, 40, 91, 2, GUIVideoTabs, GUIVntscTab, (s4*)0);
+    s4 const next = GUITabRowClick(eax, edx, GUIVideoTabs, 0, GUIVntscTab);
+
     if (NTSCFilter == 1) {
-        GUIPTabClick(eax, edx, 92, 125, 1, GUIVntscTab, GUIVideoTabs, (s4*)0);
-        GUIPTabClick(eax, edx, 126, 184, 2, GUIVntscTab, GUIVideoTabs, (s4*)0);
+        GUITabRowClick(eax, edx, GUIVntscTab, next, GUIVideoTabs);
+    }
+
+    if (GUIVideoTabs[0] == 3) { // Retro tab
+        /* Read the pointer afresh rather than trusting the arguments: while a
+           bar is held, ProcessMouse re-enters here as DisplayGUIVideoClick(0,
+           0) and moves the pointer itself, so the passed-in position is not the
+           one being dragged. Row positions come from GUICrtRows, the same
+           description the drawing uses. */
+        s4 const eax = (s4)GUImouseposx - (s4)GUIwinposx[5];
+        s4 const edx = (s4)GUImouseposy - (s4)GUIwinposy[5];
+        s4 const wx = (s4)GUIwinposx[5];
+        u1* const bar[3] = { &sl_intensity, &sl_vibrancy, &BloomLevel };
+        s4 row[CRT_ROW_COUNT];
+        s4 barY[3];
+        u4 i;
+
+        GUICrtRows(row);
+        barY[0] = row[CRT_ROW_SCAN];
+        barY[1] = row[CRT_ROW_VIB];
+        barY[2] = row[CRT_ROW_BLOOM];
+
+        if (!GUIScanlineSlider() && GUIDSIZE[cvidmode] != 0) {
+            s4 const stepX[4] = { 18, 68, 118, 168 };
+            u1 const stepV[4] = { 0, 2, 3, 1 };
+            s4 const y = row[CRT_ROW_SCAN] - 2;
+
+            for (i = 0; i < 4; i++) {
+                /* The hole and its label, which used to answer to two
+                   different rectangles - the label set the step and the hole
+                   only cleared the filter. */
+                if (GUIClickArea(eax, edx, stepX[i] + 1, y + 1, stepX[i] + 38, y + 8)) {
+                    /* A scanline step turns off what it cannot combine with. */
+                    VideoFilterSet(VFILTER_NONE);
+                    GUISetScanlineStep(scanlines == stepV[i] ? 0 : stepV[i]);
+                }
+            }
+        }
+        for (i = 0; i < 3; i++) {
+            if (i == 0 && !GUIScanlineSlider()) {
+                continue; /* the steps above stand in for the bar */
+            }
+            if (GUIClickArea(eax, edx, 23, barY[i] - 2, 23 + 100, barY[i] + 2)) {
+                if (i == 0) {
+                    GUISetScanlines((u1)(eax - 23));
+                } else {
+                    *bar[i] = (u1)(eax - 23);
+                }
+                GUIHold = 8; /* lock the pointer to this bar while held */
+                GUIHoldYlim = GUIwinposy[5] + (u4)barY[i];
+                GUIHoldXlimL = wx + 23;
+                GUIHoldXlimR = wx + 23 + 100;
+            }
+        }
+        if (GUIClickArea(eax, edx, 150, 176, 232, 188)) {
+            /* Reset every retro effect to off in one go. */
+            GUISetScanlines(0);
+            sl_vibrancy = 0;
+            BloomLevel = 0;
+        }
+    }
+
+    if (GUIVideoTabs[0] == 4) { // Monitors tab
+        u4 const count = VideoMonitorCount();
+        s4 row[MON_ROW_COUNT];
+        u4 i;
+
+        GUIMonitorRows(row);
+        for (i = 0; i < count && i < (u4)MON_MAX; i++) {
+            s4 const y = row[MON_ROW_LIST] + (s4)i * MON_PITCH;
+
+            if (GUIClickArea(eax, edx, 18 + 1, y + 1, 18 + 7, y + 7)) {
+                VideoMonitorSelect(i); /* stores the ID, not the position */
+            }
+        }
+
+#ifdef __WIN32__
+        GUIClickCButtonf(eax, edx, 18, row[MON_ROW_SYNC], &vsyncon, initDirectDraw);
+#elif defined __OPENGL__
+        if (allow_glvsync == 1 && GUIBIFIL[cvidmode] != 0) {
+            GUIClickCButtonI(eax, edx, 18, row[MON_ROW_SYNC], &vsyncon);
+        }
+#endif
     }
 
     if (GUIVideoTabs[0] == 1) { // SlideBar Implementation
@@ -1257,36 +1304,42 @@ static void DisplayGUIVideoClick2(s4 const eax, s4 const edx)
 
 static void DisplayGUISoundClick(void)
 {
+    s4 row[SND_ROW_COUNT];
     s4 const eax = GUImouseposx - GUIwinposx[6];
     s4 const edx = GUImouseposy - GUIwinposy[6];
 
-    GUIClickCButton(eax, edx, 11, 21, &SPCDisable);
-    GUIClickCButtonf(eax, edx, 11, 31, &soundon, reInitSound);
-    GUIClickCButton(eax, edx, 11, 41, &StereoSound);
-    GUIClickCButton(eax, edx, 11, 51, &RevStereo);
-    GUIClickCButton(eax, edx, 11, 61, &Surround);
+    GUISoundRows(row);
+
+    GUIClickCButton(eax, edx, 11, row[SND_ROW_OPTS] + 0 * SND_PITCH, &SPCDisable);
+    GUIClickCButtonf(eax, edx, 11, row[SND_ROW_OPTS] + 1 * SND_PITCH, &soundon, reInitSound);
+    GUIClickCButton(eax, edx, 11, row[SND_ROW_OPTS] + 2 * SND_PITCH, &StereoSound);
+    GUIClickCButton(eax, edx, 11, row[SND_ROW_OPTS] + 3 * SND_PITCH, &RevStereo);
+    GUIClickCButton(eax, edx, 11, row[SND_ROW_OPTS] + 4 * SND_PITCH, &Surround);
 #ifdef __WIN32__
-    GUIClickCButton(eax, edx, 11, 71, &PrimaryBuffer);
+    GUIClickCButton(eax, edx, 11, row[SND_ROW_OPTS] + 5 * SND_PITCH, &PrimaryBuffer);
 #endif
 
-    GUIPButtonHole(eax, edx, 11, 157, &SoundInterpType, 0);
-    GUIPButtonHole(eax, edx, 11, 167, &SoundInterpType, 1);
-    GUIPButtonHole(eax, edx, 11, 177, &SoundInterpType, 2);
-    GUIPButtonHole(eax, edx, 11, 187, &SoundInterpType, 3);
+    GUIPButtonHole(eax, edx, 11, row[SND_ROW_LIST] + 0 * SND_PITCH, &SoundInterpType, 0);
+    GUIPButtonHole(eax, edx, 11, row[SND_ROW_LIST] + 1 * SND_PITCH, &SoundInterpType, 1);
+    GUIPButtonHole(eax, edx, 11, row[SND_ROW_LIST] + 2 * SND_PITCH, &SoundInterpType, 2);
+    GUIPButtonHole(eax, edx, 11, row[SND_ROW_LIST] + 3 * SND_PITCH, &SoundInterpType, 3);
 
-    GUIPButtonHole(eax, edx, 111, 157, &LowPassFilterType, 0);
-    GUIPButtonHole(eax, edx, 111, 167, &LowPassFilterType, 1);
-    GUIPButtonHole(eax, edx, 111, 177, &LowPassFilterType, 2);
+    GUIPButtonHole(eax, edx, 111, row[SND_ROW_LIST] + 0 * SND_PITCH, &LowPassFilterType, 0);
+    GUIPButtonHole(eax, edx, 111, row[SND_ROW_LIST] + 1 * SND_PITCH, &LowPassFilterType, 1);
+    GUIPButtonHole(eax, edx, 111, row[SND_ROW_LIST] + 2 * SND_PITCH, &LowPassFilterType, 2);
 
-    if (GUIClickArea(eax, edx, 15, 101, 69, 109)) {
+#ifndef __UNIXSDL__
+    /* Nothing to cycle where the backend fixes the rate; see DisplayGUISound. */
+    if (GUIClickArea(eax, edx, 15, row[SND_ROW_RATEBOX], 69, row[SND_ROW_RATEBOX] + 8)) {
         static u1 const sampratenext[] = { 1, 4, 5, 6, 2, 3, 0, 0 };
         SoundQuality = sampratenext[SoundQuality];
     }
+#endif
 
-    if (GUIClickArea(eax, edx, 15, 129, 115, 133)) {
+    if (GUIClickArea(eax, edx, 15, row[SND_ROW_VOL] - 2, 115, row[SND_ROW_VOL] + 2)) {
         MusicRelVol = eax - 15;
         GUIHold = 5;
-        GUIHoldYlim = GUIwinposy[6] + 131;
+        GUIHoldYlim = GUIwinposy[6] + (u4)row[SND_ROW_VOL];
         u4 const vol = MusicRelVol * 128 / 100;
         MusicVol = vol < 127 ? vol : 127;
         DSPWriteReg(0x0C, DSPMem[0x0C]);
@@ -1341,6 +1394,7 @@ static void DisplayNetOptnsClick(void)
         GUIInputLimit = 31;
     }
     GUIClickCButton(eax, edx, 8, 66, &NetplayUDPConfig);
+    GUIClickCButton(eax, edx, 110, 66, &NetplayRelayConfig);
     GUIPHoldbutton(eax, edx, 8, 74, 56, 85, 85);
     GUIPHoldbutton(eax, edx, 66, 74, 114, 85, 86);
     GUIPHoldbutton(eax, edx, 124, 74, 212, 85, 87);
@@ -1482,8 +1536,7 @@ static void DisplayGUIOptnsClick(void)
 static void DisplayGUIAboutClick(s4 const eax, s4 const edx)
 {
     if (EEgg != 1) {
-        GUIPHoldbutton(eax, edx, 90, 22, 175, 32, 65);
-        GUIPHoldbutton(eax, edx, 90, 33, 175, 43, 66);
+        GUIPHoldbutton(eax, edx, 70, 23, 165, 33, 65);
     }
 }
 
@@ -1701,66 +1754,79 @@ static void DisplayGUIChipClick(s4 const eax, s4 const edx)
 
 #define PATH_LENGTH 1024
 
+/* The box of one path row, at the same place DisplayGUIPaths drew it. */
+static void GUIPathRowClick(s4 const eax, s4 const edx, u4 const i)
+{
+    s4 const y = GUIPathRow(i);
+
+    GUITextBoxInputNach(eax, edx, 8, y + 10, 237, y + 20, i, PATH_LENGTH, init_save_paths);
+}
+
 static void DisplayGUIPathsClick(s4 const eax, s4 const edx)
 {
+    u4 i;
+
     GUIPTabClick(eax, edx, 0, 51, 1, GUIPathTabs, (u4*)0);
     GUIPTabClick(eax, edx, 52, 86, 2, GUIPathTabs, (u4*)0);
     GUIPTabClick(eax, edx, 87, 157, 3, GUIPathTabs, (u4*)0);
 
     if (GUIPathTabs[0] == 1) { // General
-        GUITextBoxInputNach(eax, edx, 8, 41, 237, 51, 0, PATH_LENGTH, init_save_paths); // SRAMPath
-        GUITextBoxInputNach(eax, edx, 8, 76, 237, 86, 1, PATH_LENGTH, init_save_paths); // SStatePath
-        GUITextBoxInputNach(eax, edx, 8, 111, 237, 121, 2, PATH_LENGTH, init_save_paths); // MoviePath
-        GUITextBoxInputNach(eax, edx, 8, 146, 237, 156, 3, PATH_LENGTH, init_save_paths); // IPSPath
-
+        for (i = 0; i < 4; i++) {
+            GUIPathRowClick(eax, edx, i);
+        }
         GUIPButtonHole(eax, edx, 8, 178, &RelPathBase, 0);
         GUIPButtonHole(eax, edx, 88, 178, &RelPathBase, 1);
     }
 
     if (GUIPathTabs[0] == 2) { // More paths
-        GUITextBoxInputNach(eax, edx, 8, 41, 237, 51, 0, PATH_LENGTH, init_save_paths); // SnapPath
-        GUITextBoxInputNach(eax, edx, 8, 76, 237, 86, 1, PATH_LENGTH, init_save_paths); // SPCPath
-        GUITextBoxInputNach(eax, edx, 8, 111, 237, 121, 2, PATH_LENGTH, init_save_paths); // CHTPath
-        GUITextBoxInputNach(eax, edx, 8, 146, 237, 156, 3, PATH_LENGTH, init_save_paths); // ComboPath
-        GUITextBoxInputNach(eax, edx, 8, 181, 237, 191, 4, PATH_LENGTH, init_save_paths); // INPPath
+        for (i = 0; i < 5; i++) {
+            GUIPathRowClick(eax, edx, i);
+        }
     }
 
     if (GUIPathTabs[0] == 3) { // BIOS+Carts
-        GUITextBoxInputNach(eax, edx, 8, 41, 237, 51, 0, PATH_LENGTH, init_save_paths); // BSXPath
-        GUITextBoxInputNach(eax, edx, 8, 76, 237, 86, 1, PATH_LENGTH, init_save_paths); // STPath
-        GUITextBoxInputNach(eax, edx, 8, 111, 237, 121, 2, PATH_LENGTH, init_save_paths); // GNextPath
-        GUITextBoxInputNach(eax, edx, 8, 146, 237, 156, 3, PATH_LENGTH, init_save_paths); // SGPath
+        for (i = 0; i < 4; i++) {
+            GUIPathRowClick(eax, edx, i);
+        }
     }
 }
 
 static void DisplayGUISaveClick(s4 const eax, s4 const edx)
 {
-    GUIClickCButton(eax, edx, 11, 38, &nosaveSRAM);
-    GUIClickCButton(eax, edx, 11, 48, &SRAMSave5Sec);
-    GUIClickCButton(eax, edx, 11, 58, &SRAMState);
-    GUIClickCButton(eax, edx, 11, 68, &LatestSave);
-    GUIClickCButton(eax, edx, 11, 78, &AutoIncSaveSlot);
-    GUIClickCButton(eax, edx, 11, 88, &AutoState);
-    GUIClickCButton(eax, edx, 11, 98, &PauseLoad);
-    GUIClickCButton(eax, edx, 11, 108, &PauseRewind);
+    {
+        /* Read before the first click: turning "do not save SRAM" on hides the
+           box below it, and the click that did so must not also toggle it. */
+        u1 const sram_shown = nosaveSRAM == 0;
+
+        GUIClickCButton(eax, edx, 11, GUISaveRow(0), &nosaveSRAM);
+        if (sram_shown) {
+            GUIClickCButton(eax, edx, 11, GUISaveRow(1), &SRAMSave5Sec);
+        }
+        GUIClickCButton(eax, edx, 11, GUISaveRow(2), &SRAMState);
+        GUIClickCButton(eax, edx, 11, GUISaveRow(3), &LatestSave);
+        GUIClickCButton(eax, edx, 11, GUISaveRow(4), &AutoIncSaveSlot);
+        GUIClickCButton(eax, edx, 11, GUISaveRow(5), &AutoState);
+        GUIClickCButton(eax, edx, 11, GUISaveRow(6), &PauseLoad);
+        GUIClickCButton(eax, edx, 11, GUISaveRow(7), &PauseRewind);
+    }
 
     GUIPHoldbutton2(eax, edx, 173, 17, 181, 24, 70, &RewindStates, 1, 99);
     GUIPHoldbutton2(eax, edx, 184, 17, 192, 24, 71, &RewindStates, -1, 0);
     GUIPHoldbutton2(eax, edx, 173, 29, 181, 36, 72, &RewindFrames, 1, 99);
     GUIPHoldbutton2(eax, edx, 184, 29, 192, 36, 73, &RewindFrames, -1, 1);
 
-    DGOptnsProcBox(eax, edx, 27, 130, &KeyStateSlc0, 0);
-    DGOptnsProcBox(eax, edx, 27 + 45, 130, &KeyStateSlc1, 0);
-    DGOptnsProcBox(eax, edx, 27 + 45 * 2, 130, &KeyStateSlc2, 0);
-    DGOptnsProcBox(eax, edx, 27 + 45 * 3, 130, &KeyStateSlc3, 0);
-    DGOptnsProcBox(eax, edx, 27, 139, &KeyStateSlc4, 0);
-    DGOptnsProcBox(eax, edx, 27 + 45, 139, &KeyStateSlc5, 0);
-    DGOptnsProcBox(eax, edx, 27 + 45 * 2, 139, &KeyStateSlc6, 0);
-    DGOptnsProcBox(eax, edx, 27 + 45 * 3, 139, &KeyStateSlc7, 0);
-    DGOptnsProcBox(eax, edx, 27, 148, &KeyStateSlc8, 0);
-    DGOptnsProcBox(eax, edx, 27 + 45, 148, &KeyStateSlc9, 0);
-    DGOptnsProcBox(eax, edx, 27 + 45 * 2, 148, &KeyIncStateSlot, 0);
-    DGOptnsProcBox(eax, edx, 27 + 45 * 3, 148, &KeyDecStateSlot, 0);
+    {
+        u4* const slot[12] = { &KeyStateSlc0, &KeyStateSlc1, &KeyStateSlc2,
+            &KeyStateSlc3, &KeyStateSlc4, &KeyStateSlc5, &KeyStateSlc6,
+            &KeyStateSlc7, &KeyStateSlc8, &KeyStateSlc9, &KeyIncStateSlot,
+            &KeyDecStateSlot };
+        u4 i;
+
+        for (i = 0; i < 12; i++) {
+            DGOptnsProcBox(eax, edx, GUISaveSlotX(i % 4) + 1,
+                GUISaveSlotY(i / 4) + 1, slot[i], 0);
+        }
+    }
     DGOptnsProcBox(eax, edx, 8 + 25, 157, &KeySaveState, 0);
     DGOptnsProcBox(eax, edx, 8 + 57 + 25, 157, &KeyLoadState, 0);
     DGOptnsProcBox(eax, edx, 8 + 114 + 25, 157, &KeyStateSelct, 0);
@@ -1852,10 +1918,14 @@ static void GUIWinClicked(u4 const i, u4 const id)
         GUIwinorder[i] = 0;
         GUIwinactiv[id] = 0;
         GUIInputBox = 0;
-        --GUIwinptr;
-        init_save_paths();
-        SetMovieForcedLength();
-        SetCustomXY();
+        if (--GUIwinptr == 0)
+            GUIcmenupos = GUIpmenupos;
+        if (id == 5)
+            SetCustomXY();
+        else if (id == 15)
+            SetMovieForcedLength();
+        else if (id == 19)
+            init_save_paths();
     } else if (ry < 10) {
         GUIHold = 1;
         GUIHoldxm = (short)GUIwinposx[id];
@@ -2378,10 +2448,7 @@ static void ProcessMouseButtons(void)
         break;
 
     case 65:
-        ZsnesPage();
-        break;
-    case 66:
-        DocsPage();
+        ProjectPage();
         break;
     case 85:
         NetplayHostSession();

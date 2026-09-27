@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "asm_call.h"
 #include "c_init.h"
 #include "c_intrf.h"
 #include "c_vcache.h"
@@ -43,6 +42,10 @@ u2 curbgofs[4];
 u4 CSprWinPtr;
 u4 sramb4save;
 
+/* The line renderers read a dword at colormodedef + mode*4 + bg, which slides
+   past the last row once bg is nonzero. In vcache.asm the next symbol was
+   colormoded2, so that read landed in it; the rows below are that table, kept
+   adjacent because the read depends on it. */
 u1 colormodedef[][4] = {
     { 1, 1, 1, 1 },
     { 2, 2, 1, 0 },
@@ -51,6 +54,15 @@ u1 colormodedef[][4] = {
     { 3, 1, 0, 0 },
     { 2, 1, 0, 0 },
     { 2, 0, 0, 0 },
+    { 0, 0, 0, 0 },
+    /* colormoded2 */
+    { 4, 4, 4, 4 },
+    { 5, 5, 4, 0 },
+    { 5, 5, 0, 0 },
+    { 6, 5, 0, 0 },
+    { 6, 4, 0, 0 },
+    { 5, 4, 0, 0 },
+    { 5, 0, 0, 0 },
     { 0, 0, 0, 0 }
 };
 
@@ -95,6 +107,15 @@ static void ToggleLayer(u4 const layer)
     SetMessage(msg);
 }
 
+/* Two digits in place. sprintf would put its terminator where the rest of the
+   message is, leaving the player with "STATE SLOT 05". */
+static void ShowStateSlot(u4 const slot)
+{
+    sselm[11] = (char)('0' + slot / 10);
+    sselm[12] = (char)('0' + slot % 10);
+    SetMessage(sselm);
+}
+
 static void stateselcomp(u4 const* const key, u1 const slot_x)
 {
     if (!TestKey2(*key))
@@ -102,8 +123,7 @@ static void stateselcomp(u4 const* const key, u1 const slot_x)
 
     u4 const slot = current_zst / 10 * 10 + slot_x;
     current_zst = slot;
-    sprintf(sselm + 11, "%02d", slot);
-    SetMessage(sselm);
+    ShowStateSlot(slot);
 }
 
 static void soundselcomp(u4 const* const key, u1* const disable, u1* const status, char const chan_id)
@@ -203,8 +223,8 @@ static void docache(void)
 
     // do sprites
     if (!(scrndis & 0x10)) {
-        asm_call(cachesprites);
-        asm_call(processsprites);
+        cachesprites();
+        processsprites();
     }
 }
 
@@ -220,12 +240,16 @@ void cachevideo(void)
     ngmsdraw = 0;
     ngextbg = 0;
     hiresstuff = 0;
-    Mode7HiRes = 0;
 
     scfbl = 1;
     maxbr = vidbright;
     cgmod = 1;
     curblank = 0;
+
+    /* Declared ahead of the jump below: nofrskip is in their scope, and
+       neither is read on that path. */
+    u1 bl;
+    u2 ax = 1;
 
 #ifndef NO_DEBUGGER
     if (debuggeron != 0)
@@ -245,9 +269,7 @@ void cachevideo(void)
         }
     }
 
-    u1 bl;
     // if emulation paused, don't alter timing
-    u2 ax = 1;
     if (EMUPause != 1) {
         // fast forward goes over all other throttles
         // don't fast forward while dumping a movie
@@ -441,7 +463,7 @@ fastforb:
         show_gamma:;
             u1 const al = gammalevel;
             gammalevel16b = al / 2;
-            static char gammamsg[] = "GAMMA LEVEL:   ";
+            static char gammamsg[20] = "GAMMA LEVEL:   ";
             sprintf(gammamsg + 13, "%2d", al);
             SetMessage(gammamsg);
         }
@@ -453,7 +475,6 @@ fastforb:
     if (TestKey2(KeyDisplayCPU) && frameskip == 0)
         CPUOn ^= 1;
 
-    // do state selects
     stateselcomp(&KeyStateSlc0, 0);
     stateselcomp(&KeyStateSlc1, 1);
     stateselcomp(&KeyStateSlc2, 2);
@@ -464,18 +485,13 @@ fastforb:
     stateselcomp(&KeyStateSlc7, 7);
     stateselcomp(&KeyStateSlc8, 8);
     stateselcomp(&KeyStateSlc9, 9);
-    if (TestKey2(KeyStateSlc0)) { // XXX huh?
-        sselm[11] = '0';
-        SetMessage(sselm);
-    }
 
     if (TestKey2(KeyIncStateSlot)) {
         u4 cur = current_zst + 1;
         if (cur == 100)
             cur = 0;
         current_zst = cur;
-        sprintf(sselm + 11, "%02d", cur);
-        SetMessage(sselm);
+        ShowStateSlot(cur);
     }
 
     if (TestKey2(KeyDecStateSlot)) {
@@ -484,8 +500,7 @@ fastforb:
             cur = 100;
         --cur;
         current_zst = cur;
-        sprintf(sselm + 11, "%02d", cur);
-        SetMessage(sselm);
+        ShowStateSlot(cur);
     }
 
     if (TestKey2(KeyUsePlayer1234)) {
@@ -516,11 +531,11 @@ void genfulladdtab(void)
         for (u4 i = 0; i != lengthof(fulladdtab); ++i) {
             u2 v = i;
             if (i & vesa2_rtrcl)
-                v = v & vesa2_rtrcla | vesa2_rfull;
+                v = (v & vesa2_rtrcla) | vesa2_rfull;
             if (i & vesa2_gtrcl)
-                v = v & vesa2_gtrcla | vesa2_gfull;
+                v = (v & vesa2_gtrcla) | vesa2_gfull;
             if (i & vesa2_btrcl)
-                v = v & vesa2_btrcla | vesa2_bfull;
+                v = (v & vesa2_btrcla) | vesa2_bfull;
             fulladdtab[i] = v << 1;
         }
     }
@@ -538,7 +553,7 @@ void ConvertToAFormat(void)
         u4 w = 128;
         do {
             u4 const val = *b;
-            *b++ = (val & 0xFFC0FFC0) >> 1 | val & 0x001F001F;
+            *b++ = (val & 0xFFC0FFC0) >> 1 | (val & 0x001F001F);
         } while (--w != 0);
         b += 16;
     } while (--h != 0);

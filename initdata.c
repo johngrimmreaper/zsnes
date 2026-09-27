@@ -1,16 +1,3 @@
-/*
- * Copyright (C) 1997-2008 ZSNES Team ( zsKnight, _Demo_, pagefault, Nach )
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- */
-
 /* C port of init.asm's data: the 65816 register file and emulation globals.
    Each symbol keeps the exact width and initial value of its NASM declaration. */
 
@@ -59,6 +46,11 @@ u2 xyt;
 u2 xpc;
 u1 debugger;
 u1 curnmi;
+
+/* What the DSP mixer renders at. A backend that resamples leaves this at the
+   DSP's own rate; one that cannot sets it to whatever it opened the device
+   with (win/winlink.c). */
+u4 SoundOutputRate = 32000;
 
 u4 cycpbl = 110;
 u4 cycpblt = 110;
