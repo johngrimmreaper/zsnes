@@ -3,6 +3,7 @@ set -eu
 
 binary=/usr/bin/zsnes2
 desktop=/usr/share/applications/io.github.xyproto.zsnes2.desktop
+test_desktop=/usr/share/applications/io.github.xyproto.zsnes2.sdl3-test.desktop
 metainfo=/usr/share/metainfo/io.github.xyproto.zsnes2.metainfo.xml
 manpage=/usr/share/man/man1/zsnes2.1.gz
 
@@ -73,11 +74,15 @@ fi
 
 [ -r "$manpage" ]
 [ -r "$metainfo" ]
-desktop-file-validate "$desktop"
+desktop-file-validate "$desktop" "$test_desktop"
 grep -qx 'Name=ZSNES 2' "$desktop"
-grep -qx 'Exec=zsnes2 %f' "$desktop"
+grep -Fxq 'Exec=/usr/bin/zsnes2 -ad ao:pulse %f' "$desktop"
 grep -qx 'TryExec=zsnes2' "$desktop"
 grep -qx 'Icon=io.github.xyproto.zsnes2' "$desktop"
+grep -Fxq 'Name=ZSNES 2 (SDL3/PulseAudio Test)' "$test_desktop"
+grep -Fxq 'Exec=env SDL_AUDIO_DRIVER=pulseaudio /usr/bin/zsnes2 -ad sdl %f' "$test_desktop"
+grep -Fxq 'TryExec=zsnes2' "$test_desktop"
+grep -Fxq 'Icon=io.github.xyproto.zsnes2' "$test_desktop"
 grep -q '<id>io.github.xyproto.zsnes2</id>' "$metainfo"
 grep -q '<binary>zsnes2</binary>' "$metainfo"
 
