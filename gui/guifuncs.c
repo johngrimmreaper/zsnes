@@ -10,11 +10,11 @@
 #include "../win/lib.h"
 #endif
 
+#include "../zcompat.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <zlib.h>
 #define fnamencmp strncasecmp
 #define fnamecmp strcasecmp
 #endif
@@ -28,11 +28,7 @@
 
 #include "../cpu/execute.h" /* pressed[] */
 #include "../initc.h"
-#include "cfg.h"
-#include "input.h"
-#ifndef lengthof
-#define lengthof(x) (sizeof(x) / sizeof *(x))
-#endif
+#include "../length.h"
 #include "../ui.h"
 #include "../video/filter.h"
 #include "../zdir.h"
@@ -40,11 +36,13 @@
 #include "../zpath.h"
 #include "c_gui.h"
 #include "c_guiwindp.h"
+#include "cfg.h"
 #include "gui.h"
 #include "guiarena.h"
 #include "guicheat.h"
 #include "guifuncs.h"
 #include "guiwindp.h"
+#include "input.h"
 #include "md.h"
 
 #define BIT(X) (1 << (X))
@@ -1562,7 +1560,7 @@ u4 GUILoadKeysNavigate(u1 const gui_key_extended)
 #ifdef __UNIXSDL__
 #define DriveCount() 0
 #else
-static unsigned int DriveCount()
+static unsigned int DriveCount(void)
 {
     unsigned int drives = GetLogicalDrives(), count = 0, i = 0;
     while (i < 26) {

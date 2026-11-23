@@ -10,15 +10,8 @@
 #include "../cpu/execute.h"
 #include "../cpu/regs.h"
 #include "../gblvars.h"
+#include "../length.h"
 #include "../link.h"
-#include "cfg.h"
-#include "input.h"
-#ifndef lengthof
-#define lengthof(x) (sizeof(x) / sizeof *(x))
-#endif
-#ifndef endof
-#define endof(x) ((x) + lengthof(x))
-#endif
 #include "../ui.h"
 #include "../vcache.h"
 #include "../video/procvid.h"
@@ -27,6 +20,7 @@
 #include "../zstate.h"
 #include "c_gui.h"
 #include "c_guiwindp.h"
+#include "cfg.h"
 #include "gui.h"
 #include "guicheat.h"
 #include "guicombo.h"
@@ -35,6 +29,7 @@
 #include "guimisc.h"
 #include "guimouse.h"
 #include "guiwindp.h"
+#include "input.h"
 
 #include "../video/filter.h"
 #include "../video/ntsc.h"
@@ -212,7 +207,7 @@ static void GUIClickCButtonM(s4 const eax, s4 const edx, s4 const p1, s4 const p
 {
     if (GUIClickArea(eax, edx, p1 + 1, p2 + 3, p1 + 6, p2 + 8)) {
         *p3 ^= 1;
-        MultiTap = pl12s34 != 1 && (pl3contrl != 0 || pl4contrl != 0 || pl5contrl != 0);
+        MultiTap = pl12s34 != 1 && (pl3contrl != 0 || pl4contrl != 0 || pl5contrl != 0 || GamepadCount() >= 3);
     }
 }
 
