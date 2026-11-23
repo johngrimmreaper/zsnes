@@ -64,6 +64,12 @@ void UpdateDevices(void);
 
 void JoyRead(void);
 
+/* SNES pad bits for a player driven straight from the player-th recognised
+   gamepad, or 0 when there is none. Ports without gamepad support return 0. */
+u4 GamepadReadPlayer(u4 player);
+
+u4 GamepadCount(void);
+
 // Sets keys according to input device selected
 void SetInputDevice(u1 device, u1 player);
 
@@ -145,10 +151,7 @@ static inline int VideoMonitorNameRedundant(char const* id, char const* name)
 {
     u4 k = 0;
     int any = 0;
-
-    for (; *name; ++name) {
-        char c = *name;
-
+    for (char c = *name; *name; ++name) {
         if (c >= 'a' && c <= 'z') {
             c = (char)(c - 'a' + 'A');
         }

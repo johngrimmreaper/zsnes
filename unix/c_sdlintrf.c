@@ -18,10 +18,8 @@ u4 volatile CurKeyPos = 0;
 u4 CurKeyReadPos = 0;
 u4 KeyBuffer[16] = { 0 };
 u4 converta = 0;
+#include "../length.h"
 #include "../link.h"
-#ifndef lengthof
-#define lengthof(x) (sizeof(x) / sizeof *(x))
-#endif
 #include "../ui.h"
 #include "../vcache.h"
 #include "../video/c_2xsaiw.h"
@@ -355,8 +353,8 @@ void Set_MousePosition(u4 const x, u4 const y)
 
 u4 Get_MousePositionDisplacement(void)
 {
-    u4 const x = GetMouseMoveX();
-    u4 const y = GetMouseMoveY();
+    u4 const x = (u4)GetMouseMoveX() & 0xFFFF;
+    u4 const y = (u4)GetMouseMoveY() & 0xFFFF;
     return y << 16 | x;
 }
 

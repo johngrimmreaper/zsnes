@@ -10,17 +10,15 @@
 #include "../gblvars.h"
 #include "../gui/c_gui.h"
 #include "../intrf.h"
+#include "../length.h"
 #include "../link.h"
-#include "cfg.h"
-#include "input.h"
-#ifndef lengthof
-#define lengthof(x) (sizeof(x) / sizeof *(x))
-#endif
 #include "../ui.h"
 #include "../vcache.h"
 #include "../video/c_2xsaiw.h"
 #include "../video/newgfx16.h"
 #include "c_winintrf.h"
+#include "cfg.h"
+#include "input.h"
 
 #ifndef __RELEASE__
 #include "winlink.h"
@@ -323,6 +321,18 @@ void JoyRead(void)
     UpdateVFrame();
 }
 
+/* The Windows port has no SDL Gamepad layer; DirectInput feeds pressed[]. */
+u4 GamepadReadPlayer(u4 const player)
+{
+    (void)player;
+    return 0;
+}
+
+u4 GamepadCount(void)
+{
+    return 0;
+}
+
 #define SetDefaultKey2(player, k)           \
     player##upk = k[2], /* Up     */        \
         player##downk = k[3], /* Down   */  \
@@ -407,8 +417,8 @@ void Set_MousePosition(u4 const x, u4 const y)
 
 u4 Get_MousePositionDisplacement(void)
 {
-    u4 const x = GetMouseMoveX();
-    u4 const y = GetMouseMoveY();
+    u4 const x = (u4)GetMouseMoveX() & 0xFFFF;
+    u4 const y = (u4)GetMouseMoveY() & 0xFFFF;
     return y << 16 | x;
 }
 

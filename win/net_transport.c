@@ -2,10 +2,12 @@
    a SOCKET does not fit the int the rest of netplay passes around. */
 
 #define _CRT_RAND_S
-#include <mstcpip.h>
-#include <windows.h>
+/* Include order is deliberate (winsock2 before windows; mstcpip needs their
+   types) and must not be sorted; see .clang-format-ignore. */
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
+#include <windows.h>
 
 #include <stdio.h>
 #include <stdlib.h>

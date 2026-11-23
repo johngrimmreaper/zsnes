@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #endif
 #include "c_init.h"
+#include "c_intrf.h"
 #include "c_vcache.h"
 #include "cfg.h"
 #include "chips/c_dsp2proc.h"
@@ -30,12 +31,7 @@
 #include "init.h"
 #include "initc.h"
 #include "input.h"
-#ifndef lengthof
-#define lengthof(x) (sizeof(x) / sizeof *(x))
-#endif
-#ifndef endof
-#define endof(x) ((x) + lengthof(x))
-#endif
+#include "length.h"
 #include "ui.h"
 #include "video/procvid.h"
 #include "zpath.h"
@@ -2338,7 +2334,7 @@ void initsnes(void)
     ForceNewGfxOff = 0;
 
     if (!BSEnable) {
-        MultiTap = pl12s34 ? 0 : (pl3contrl || pl4contrl || pl5contrl);
+        MultiTap = pl12s34 ? 0 : (pl3contrl || pl4contrl || pl5contrl || GamepadCount() >= 3);
 
         if (SFXEnable) {
             map_sfx();

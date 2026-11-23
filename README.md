@@ -4,7 +4,7 @@
 
 <img align="right" width="128" height="128" alt="logo" src="img/128x128x32.png">
 
-The last release of [ZSNES](http://zsnes.sourceforge.net/) was over 18 years ago (2007-10-31). It requires heavy patching and tweaking of compilation flags to build and run on a modern Linux distro. Most of it was written in 32-bit x86 Assembly, with MMX instructions.
+The last release of [ZSNES](http://zsnes.sourceforge.net/) was over 18 years ago (2007-10-31). The development of ZSNES started in 1997. It requires heavy patching and tweaking of compilation flags to build and run on a modern Linux distro. Most of it was written in 32-bit x86 Assembly, with MMX instructions.
 
 This is a fork that aims to solve this.
 
@@ -12,7 +12,8 @@ Goals and non-goals:
 
 * Compiling ZSNES so that it works on 64-bit x86 is a goal (that has been reached).
 * Porting the Assembly to C11 is a goal (that has been reached).
-* Supporting modern Linux distros (and FreeBSD and macOS, if possible) is a goal.
+* Supporting modern Linux distros is a goal (that has been reached).
+* Supporting FreeBSD and macOS is a goal (if possible).
 * Supporting multiple CPUs and platforms is a goal (that has been reached).
 * Supporting DOS is not a goal.
 * Supporting Windows is not a goal, but a "nice to have".
@@ -31,9 +32,7 @@ Tested on Arch Linux, Fedora and Debian 12 on x86_64, and on macOS on aarch64.
 
     make
 
-Plain `make` builds for the current operating system and CPU on Windows/MSYS2,
-Linux, macOS, FreeBSD, OpenBSD, and NetBSD. Architecture-specific targets are
-also available:
+These specific targets are available (all but `linux_x86_64` may be a bit experimental):
 
 ```sh
 make win_i686
@@ -48,8 +47,8 @@ make freebsd_x86_64
 make freebsd_aarch64
 ```
 
-Cross targets require a suitable target compiler and target libraries. Run
-`make help` for the complete target list.
+* Cross targets require a suitable target compiler and target libraries.
+* Run `make help` for a complete target list.
 
 ### Run a ROM
 
@@ -71,8 +70,7 @@ Build `zsnes` with debug symbols and debugger-friendly optimization:
 
     make debug
 
-The build-mode stamp automatically replaces incompatible release objects. To
-run the same ROM under GDB:
+For runnin `zsnes` with the same ROM, under GDB:
 
 ```sh
 gdb --args ./zsnes ~/roms/snes/example.sfc
@@ -172,7 +170,7 @@ Thanks to Christoph Mallon for the commits that this fork is based on.
 
 ### List of contributors
 
-These are the contributors listed in the text files that are included with the 1.51 release of ZSNES, and on the zsnes.com webpage:
+These are the contributors listed in the text files that are included with the 1.51 release of ZSNES, and were mentioned on the [zsnes.com](https://zsnes.com/old) webpage:
 
 * `zsKnight`
 * `_Demo_`
@@ -213,13 +211,12 @@ These are the contributors listed in the text files that are included with the 1
 * Some of the information in the old text files in `docs/readme.txt/*.txt` has not yet been ported over to the `man/zsnes.1` man page or to a Markdown document.
 * The plan is to do this. Pull requests are welcome.
 
-Additional documentation:
+Additional old documentation:
 
-* [olddoc.md](olddoc.md)
-* [html](html)
+* [doc/html](doc/html)
 
 ### General info
 
 * License: GPL2
-* Version: 2.3.4
+* Version: 2.3.9
 * Fork author: Alexander F. Rødseth &lt;xyproto@archlinux.org&gt;

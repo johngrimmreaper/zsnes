@@ -1,5 +1,17 @@
 .PHONY: clean debug distclean fmt info test unused portcheck asmalign
 
+# The options the last build was given, so `make install` installs that build
+# instead of relinking it against the defaults. One given again here wins.
+define newline
+
+
+endef
+BUILD_OPTIONS := WITH_OPENGL WITH_PNG WITH_SDL WITH_PIPEWIRE WITH_AO \
+                 WITH_DEBUGGER WITH_DEBUG_HOOKS EXTRA_CFLAGS EXTRA_LDFLAGS DEBUG BUILD_MODE
+ifneq ($(filter install,$(MAKECMDGOALS)),)
+-include build/options.mk
+endif
+
 # ARCH: LINUX, FREEBSD, OPENBSD, NETBSD, DARWIN, WIN
 SUPPORTED_ARCHES := LINUX FREEBSD OPENBSD NETBSD DARWIN WIN
 UNIXSDL_ARCHES := LINUX FREEBSD OPENBSD NETBSD DARWIN
@@ -13,7 +25,7 @@ HOST_ARCH := $(if $(filter arm64,$(HOST_CPU_FAMILY)),aarch64,$(if $(filter riscv
 NAMED_TARGETS := linux_i686 linux_x86_64 linux_aarch64 linux_riscv64 \
                  macos_aarch64 macos_x86_64 \
                  freebsd_aarch64 freebsd_x86_64 \
-                 win_i686 win_x86_64
+                 win_i686 win_x86_64 win32 win64
 HOST_TARGET := $(filter $(NAMED_TARGETS),$(patsubst DARWIN,macos,$(patsubst LINUX,linux,$(patsubst FREEBSD,freebsd,$(patsubst WIN,win,$(HOST_OS)))))_$(HOST_ARCH))
 
 ARCH ?= $(HOST_OS)
@@ -160,8 +172,10 @@ GCC_ONLY_WARN_FLAGS := -Wduplicated-cond -Wduplicated-branches -Wlogical-op \
 ifeq ($(CC_IS_CLANG),yes)
 WARN_FLAGS := $(filter-out $(GCC_ONLY_WARN_FLAGS),$(WARN_FLAGS))
 endif
-# x86 uses absolute addressing; ARM, RISC-V and Darwin require PIC.
-PIC_FLAGS := $(if $(or $(filter arm64 riscv64,$(CPU)),$(filter DARWIN,$(ARCH))),,-fno-pic)
+# ARM, RISC-V and Darwin default to PIC; 64-bit x86 builds a PIE. 32-bit x86
+# stays absolute: PIE there costs a GOT register in every function, ~20%.
+X86_32 := $(if $(filter x86/32,$(CPU)/$(BITS)),yes)
+PIC_FLAGS := $(if $(or $(filter arm64 riscv64,$(CPU)),$(filter DARWIN,$(ARCH))),,$(if $(X86_32),-fno-pic,-fPIE))
 # XSI exposes setreuid/setregid on Linux; the BSDs show everything by default.
 FEATURE_FLAGS := -D_XOPEN_SOURCE=700
 ifneq ($(filter $(ARCH),FREEBSD OPENBSD NETBSD),)
@@ -180,6 +194,11 @@ ifeq ($(BUILD_MODE),debug)
 OPT_FLAGS := -Og -g3 -fno-omit-frame-pointer
 else
 OPT_FLAGS := -O3
+# LTO is skipped on macOS and FreeBSD, where the host toolchain's LTO plugin
+# is unreliable for this tree.
+ifeq ($(filter DARWIN FREEBSD,$(ARCH)),)
+OPT_FLAGS += -flto
+endif
 endif
 COMMON_FLAGS = $(ARCH_CFLAGS) -pthread $(PIC_FLAGS) -std=c11 $(FEATURE_FLAGS) $(OPT_FLAGS) -D_FORTIFY_SOURCE=2 -ffunction-sections -fdata-sections -fno-common -Wfatal-errors $(WARN_FLAGS)
 
@@ -192,9 +211,9 @@ endif
 endif
 # Darwin uses -dead_strip instead of GNU section GC.
 ifeq ($(ARCH),DARWIN)
-LDFLAGS += -Wl,-dead_strip -lz -lm
+LDFLAGS += -Wl,-dead_strip -lm
 else
-LDFLAGS += -Wl,--as-needed $(if $(filter arm64 riscv64,$(CPU)),,-no-pie) -Wl,--gc-sections -lz -lm
+LDFLAGS += -Wl,--as-needed $(if $(filter arm64 riscv64,$(CPU)),,$(if $(X86_32),-no-pie,-pie)) -Wl,--gc-sections -lm
 endif
 
 WITH_OPENGL   := yes
@@ -273,8 +292,8 @@ endif
 WRAPPER_GOALS := clean distclean debug linux_pi4 \
                  linux_i686 linux_x86_64 linux_aarch64 linux_riscv64 \
                  macos_aarch64 macos_x86_64 \
-                 freebsd_aarch64 freebsd_x86_64 \
-                 win_i686 win_x86_64 portcheck help test fmt unused
+                 freebsd_aarch64 freebsd_x86_64 freebsd_rpi4 \
+                 win_i686 win_x86_64 portcheck help test fmt unused win32 win64
 # Empty command-line backend variables are explicit opt-outs.
 BACKENDS_OPTOUT := $(if $(filter command line,$(origin WITH_SDL) \
                      $(origin WITH_PIPEWIRE) $(origin WITH_AO)),yes)
@@ -678,6 +697,8 @@ SRCS += zmovie.c
 SRCS += zpath.c
 SRCS += zstate.c
 SRCS += ztimec.c
+SRCS += zcompat.c
+SRCS += miniz.c
 
 PSRS :=
 PSRS += cfg.psr
@@ -809,7 +830,7 @@ BUILDSTAMP := $(BUILD_DIR)/MODE
 BUILD_TAG := $(BUILD_MODE)|$(ARCH)|$(BITS)|$(CPU)|$(CC_TARGET_TRIPLE)|\
 $(WITH_SDL)|$(WITH_OPENGL)|$(WITH_PNG)|$(WITH_AO)|$(WITH_PIPEWIRE)|\
 $(WITH_DEBUGGER)|$(WITH_DEBUG_HOOKS)|$(EXTRA_CFLAGS)|$(ARM64_CFLAGS)
-ifneq ($(filter all test,$(or $(MAKECMDGOALS),all)),)
+ifneq ($(filter all test install zsnes $(BINARY),$(or $(MAKECMDGOALS),all)),)
 PREV_BUILD_TAG := $(shell cat $(BUILDSTAMP) 2>/dev/null)
 ifneq ($(PREV_BUILD_TAG),)
 ifneq ($(PREV_BUILD_TAG),$(BUILD_TAG))
@@ -818,6 +839,10 @@ _CLEAN_SWITCH := $(shell rm -fr $(BUILD_DIR) $(BINARY) zsnes zsnes.exe)
 endif
 endif
 _WRITE_STAMP := $(shell mkdir -p $(BUILD_DIR) && printf '%s' '$(BUILD_TAG)' > $(BUILDSTAMP))
+ifeq ($(filter install,$(MAKECMDGOALS)),)
+$(file > $(BUILD_DIR)/options.mk,$(foreach v,$(BUILD_OPTIONS),$(if $(filter command line,$(origin $(v))),\
+ifneq ($$(origin $(v)),command line)$(newline)override $(v) := $(value $(v))$(newline)endif$(newline))))
+endif
 # A generated header can go stale when a checkout, an interrupted build or a
 # touch leaves its .psr older than a header built earlier: make then judges the
 # header current by mtime though the .psr contents changed. Compare by content
@@ -893,8 +918,8 @@ MINGW64_WINDRES ?= $(if $(MINGW64_NATIVE),windres,$(MINGW64_PREFIX)-windres)
 .PHONY: linux_pi4
 .PHONY: linux_i686 linux_x86_64 linux_aarch64 linux_riscv64
 .PHONY: macos_aarch64 macos_x86_64
-.PHONY: freebsd_aarch64 freebsd_x86_64
-.PHONY: win_i686 win_x86_64 help
+.PHONY: freebsd_aarch64 freebsd_x86_64 freebsd_rpi4
+.PHONY: win_i686 win_x86_64 help win32 win64
 
 linux_i686:
 	$(call need_tool,$(LINUX_I686_CC),an i686 Linux C compiler)
@@ -946,6 +971,13 @@ freebsd_aarch64:
 	  CC=$(FREEBSD_AARCH64_CC) CC_TARGET=$(FREEBSD_AARCH64_CC) \
 	  PKG_CONFIG=$(FREEBSD_AARCH64_PKG_CONFIG) all
 
+freebsd_rpi4:
+	$(call need_tool,$(FREEBSD_AARCH64_CC),an aarch64 FreeBSD C compiler)
+	$(MAKE) ARCH=FREEBSD BITS=64 CPU=arm64 ARM64_CFLAGS='-mcpu=cortex-a72 -mtune=cortex-a72' \
+	  CC=$(FREEBSD_AARCH64_CC) CC_TARGET=$(FREEBSD_AARCH64_CC) \
+	  PKG_CONFIG=$(FREEBSD_AARCH64_PKG_CONFIG) all
+
+win32: win_i686
 win_i686:
 	$(call need_tool,$(MINGW32_CC),the mingw32 toolchain)
 	$(call need_tool,$(MINGW32_WINDRES),the mingw32 resource compiler)
@@ -953,6 +985,7 @@ win_i686:
 	  CC=$(MINGW32_CC) CC_TARGET=$(MINGW32_CC) \
 	  WINDRES=$(MINGW32_WINDRES) PKG_CONFIG=$(MINGW32_PKG_CONFIG) all
 
+win64: win_x86_64
 win_x86_64:
 	$(call need_tool,$(MINGW64_CC),the mingw-w64 toolchain)
 	$(call need_tool,$(MINGW64_WINDRES),the mingw-w64 resource compiler)
@@ -972,6 +1005,7 @@ help:
 	@echo '  macos_aarch64  Apple Silicon macOS'
 	@echo '  macos_x86_64   Intel macOS'
 	@echo '  freebsd_aarch64  64-bit ARM FreeBSD'
+	@echo '  freebsd_rpi4     the same, tuned for a Raspberry Pi 4 Cortex-A72'
 	@echo '  freebsd_x86_64   64-bit x86 FreeBSD'
 	@echo '  win_i686       32-bit Windows'
 	@echo '  win_x86_64     64-bit Windows'
@@ -1001,6 +1035,10 @@ $(BUILD_DIR)/%.o: %.c
 	$(Q)mkdir -p $(@D)
 	$(Q)$(CC_TARGET) $(CFLAGS) -iquote $(BUILD_DIR) -c $(DEPFLAGS_C) -o $@ $<
 
+# Vendored miniz: silence its warnings, and drop its unused stdio/archive path.
+$(BUILD_DIR)/miniz.o: WARN_FLAGS := -w
+$(BUILD_DIR)/miniz.o: CFLAGS += -DMINIZ_NO_STDIO
+
 $(BUILD_DIR)/%.o: %.rc
 	@echo '===> RES $<'
 	$(Q)mkdir -p $(@D)
@@ -1019,7 +1057,7 @@ $(BUILD_DIR)/%.h $(BUILD_DIR)/%.o: %.psr $(PSR)
 
 clean distclean:
 	@echo '===> CLEAN'
-	$(Q)rm -fr $(BUILD_DIR) $(BINARY) zsnes zsnes.exe
+	$(Q)rm -fr $(BUILD_DIR) $(BUILD_DIR)-align $(BINARY) zsnes zsnes.exe
 
 info:
 	@echo "ARCH          = $(ARCH)"
@@ -1054,8 +1092,9 @@ fmt:
 test: $(BINARY)
 	$(MAKE) -C test run
 
-asmalign: $(BINARY)
-	$(PYTHON) tools/asmalign.py $(BUILD_DIR)
+asmalign:
+	$(Q)$(MAKE) BUILD_DIR=$(BUILD_DIR)-align OPT_FLAGS='$(OPT_FLAGS) -ffat-lto-objects' $(addprefix $(BUILD_DIR)-align/,$(OBJ_NAMES))
+	$(PYTHON) tools/asmalign.py $(BUILD_DIR)-align
 
 # The netplay relay (server/, Go): pairs two clients by room code and forwards
 # their input frames. Not part of `all`.
